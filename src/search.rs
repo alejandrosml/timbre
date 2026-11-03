@@ -255,6 +255,64 @@ fn dedupe(
     Ok((kept, consumed))
 }
 
+/// Words ending in s that are not plurals.
+const NOT_PLURAL: &[&str] = &[
+    "news",
+    "always",
+    "perhaps",
+    "series",
+    "species",
+    "less",
+    "unless",
+    "towards",
+    "afterwards",
+    "sometimes",
+    "nevertheless",
+    "jeans",
+    "thanks",
+    "lots",
+];
+
+/// Other grammatical numbers of a search word in French, English and
+/// Spanish, so that "facture" also finds "factures" and "reuniones" finds
+/// "reunión". Light rules rather than a stemmer: the mailbox mixes
+/// languages, and a stemmer for one would mangle the others.
+fn word_forms(word: &str) -> Vec<String> {
+    // Accents removed, as the index tokenizer does.
+    let w: String = {
+        use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
+        crate::norm::fold(word).nfd().filter(|c| !is_combining_mark(*c)).collect::<String>().to_lowercase()
+    };
+    if w.chars().count() < 4 || !w.chars().all(char::is_alphabetic) || NOT_PLURAL.contains(&w.as_str()) {
+        return vec![];
+    }
+    let vowel = |c: char| "aeiouy".contains(c);
+    // Spanish adds -es after these consonants; English after sibilants.
+    let takes_es = |s: &str| ["n", "r", "l", "d", "z", "j", "s", "x", "ch", "sh"].iter().any(|e| s.ends_with(e));
+    let mut out: Vec<String> = vec![];
+    if let Some(stem) = w.strip_suffix("ies").filter(|s| s.chars().count() >= 3) {
+        out.push(format!("{stem}y")); // companies → company
+    }
+    if let Some(stem) = w.strip_suffix("es").filter(|s| s.chars().count() >= 3 && takes_es(s)) {
+        out.push(stem.to_string()); // reuniones → reunion, boxes → box
+    }
+    if let Some(stem) = w.strip_suffix('s').filter(|s| !s.ends_with(['s', 'u', 'i'])) {
+        out.push(stem.to_string()); // factures → facture, meetings → meeting
+    }
+    if !w.ends_with(['s', 'x', 'z']) {
+        out.push(format!("{w}s")); // facture → factures
+        if !w.ends_with(vowel) && takes_es(&w) {
+            out.push(format!("{w}es")); // reunion → reuniones
+        }
+        if let Some(stem) = w.strip_suffix('y').filter(|s| !s.ends_with(vowel)) {
+            out.push(format!("{stem}ies")); // company → companies
+        }
+    }
+    out.retain(|v| *v != w);
+    out.dedup();
+    out
+}
+
 /// Build an FTS5 MATCH expression from free-text terms. Every term is
 /// quoted, so user input can never be read as FTS5 syntax.
 pub fn build_fts(terms: &[String]) -> Option<String> {
@@ -278,6 +336,11 @@ pub fn build_fts(terms: &[String]) -> Option<String> {
         let Some(mut q) = quote_fts(core) else { continue };
         if prefix {
             q.push('*');
+        } else if !phrase {
+            let forms: Vec<String> = word_forms(core).iter().filter_map(|f| quote_fts(f)).collect();
+            if !forms.is_empty() {
+                q = format!("({q} OR {})", forms.join(" OR "));
+            }
         }
         if neg {
             negatives.push(q);
@@ -605,9 +668,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn plural_and_singular_forms_are_searched_together() {
+        let forms = |w: &str| word_forms(w);
+        assert_eq!(forms("facture"), vec!["factures"]);
+        assert!(forms("factures").contains(&"facture".to_string()));
+        assert!(forms("reuniones").contains(&"reunion".to_string()));
+        assert!(forms("reunión").contains(&"reuniones".to_string()));
+        assert!(forms("companies").contains(&"company".to_string()));
+        assert!(forms("company").contains(&"companies".to_string()));
+        assert!(forms("boxes").contains(&"box".to_string()));
+        for unchanged in ["news", "plus", "mais", "fois", "status", "analysis", "process", "bus", "rendez-vous"] {
+            assert!(forms(unchanged).iter().all(|f| f.len() >= unchanged.len()), "{unchanged}: {:?}", forms(unchanged));
+        }
+        assert!(!forms("notes").contains(&"not".to_string()));
+        let q = |t: &[&str]| build_fts(&t.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(q(&["facture"]).as_deref(), Some("(\"facture\" OR \"factures\")"));
+        assert_eq!(q(&["\"facture\""]).as_deref(), Some("\"facture\""), "exact phrases stay exact");
+    }
+
+    #[test]
     fn query_terms_are_folded_and_short_prefixes_ignored() {
         let q = |t: &[&str]| build_fts(&t.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-        assert_eq!(q(&["cœur"]).as_deref(), Some("\"coeur\""));
+        assert!(q(&["cœur"]).unwrap().starts_with("(\"coeur\" OR \"coeurs\""));
         assert_eq!(q(&["fac*"]).as_deref(), Some("\"fac\"*"));
         assert_eq!(q(&["fa*"]).as_deref(), Some("\"fa\""));
     }
@@ -625,10 +707,13 @@ mod tests {
     #[test]
     fn fts_expression_is_safe() {
         let t = |q: &str| build_fts(&parse_query(q).text);
-        assert_eq!(t("facture"), Some("\"facture\"".into()));
+        assert_eq!(t("facture"), Some("(\"facture\" OR \"factures\")".into()));
         assert_eq!(t("fact*"), Some("\"fact\"*".into()));
         assert_eq!(t("a OR b c"), Some("(\"a\" OR \"b\") AND \"c\"".into()));
-        assert_eq!(t("rapport -brouillon"), Some("(\"rapport\") NOT (\"brouillon\")".into()));
+        assert_eq!(
+            t("rapport -brouillon"),
+            Some("((\"rapport\" OR \"rapports\")) NOT ((\"brouillon\" OR \"brouillons\" OR \"brouillones\"))".into())
+        );
         assert_eq!(t("\"mise en demeure\""), Some("\"mise en demeure\"".into()));
         // FTS5 syntax characters are neutralized inside quotes.
         assert_eq!(t("NEAR(a b) col:x"), Some("\"NEAR(a\" AND \"b)\" AND \"col:x\"".into()));

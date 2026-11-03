@@ -426,7 +426,9 @@ fn restarts_do_not_walk_the_whole_store() {
     let mail = rusqlite::Connection::open(store.db_path.clone()).unwrap();
     let mut m = fixture::messages().remove(1);
     m.id = 1600;
-    m.raw = "From: Bob <bob@example.com>\r\nSubject: Okapi\r\nMessage-ID: <o1600@example.com>\r\n\r\nokapi sighting\r\n".into();
+    m.raw =
+        "From: Bob <bob@example.com>\r\nSubject: Okapi\r\nMessage-ID: <o1600@example.com>\r\n\r\nokapi sighting\r\n"
+            .into();
     fixture::write_message(&store.version_dir, &mail, &m).unwrap();
     indexer.full_build(&mut conn, false).unwrap();
     assert_eq!(walked(&conn).as_deref(), Some("12345"));

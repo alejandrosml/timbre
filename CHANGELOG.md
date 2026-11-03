@@ -5,6 +5,18 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Searches also find the other grammatical number of each word in French,
+  English and Spanish (`facture` finds `factures`, `reuniones` finds
+  `reunión`), with light rules instead of a stemmer for mixed-language
+  mailboxes. Exact phrases in quotes stay exact.
+- New mail is searchable about 2 s after Mail stores it (Timbre watches
+  Mail's database instead of checking every 15 s).
+
+### Changed
+- Starting Timbre no longer walks Mail's whole store when the index is
+  complete (seconds of disk activity at every Claude launch).
+
 ## [0.3.1] - 2026-11-03
 
 ### Fixed
