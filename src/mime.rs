@@ -77,6 +77,8 @@ pub struct Parsed {
     pub invisible_chars: usize,
     pub hidden_sample: String,
     pub link_mismatches: Vec<String>,
+    /// The HTML was nested too deep to check; its text was withheld.
+    pub html_degraded: bool,
     /// The text/plain alternative says much that the displayed HTML does not.
     pub plain_differs: bool,
     pub attachments: Vec<AttachmentInfo>,
@@ -191,6 +193,7 @@ fn parse_inner(raw: &[u8], for_display: bool) -> Option<Parsed> {
             p.invisible_chars = t.invisible_chars;
             p.hidden_sample = t.hidden_sample;
             p.link_mismatches = t.link_mismatches;
+            p.html_degraded = t.degraded;
             p.body_source = "html";
         }
         (_, Some(t)) | (Some(t), None) => {
@@ -274,6 +277,12 @@ fn looks_like_html(s: &str) -> bool {
 pub fn warnings(p: &Parsed) -> Vec<String> {
     let mut w = vec![];
     w.extend(p.link_mismatches.iter().cloned());
+    if p.html_degraded {
+        w.push(
+            "HTML nested unusually deep (a parser attack?): its text was withheld; open it in Mail to read it"
+                .to_string(),
+        );
+    }
     if p.plain_differs {
         w.push("the plain-text version of this message differs from what Mail displays".to_string());
     }

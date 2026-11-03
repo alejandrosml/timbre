@@ -23,6 +23,9 @@ pub struct HtmlText {
     pub hidden_sample: String,
     /// Links whose visible text shows one domain but which lead to another.
     pub link_mismatches: Vec<String>,
+    /// The HTML was nested too deep to lay out safely: its text is withheld
+    /// (counted as hidden) because styles could not be checked.
+    pub degraded: bool,
 }
 
 /// Host of a URL or of a bare domain shown as link text, lower-cased.
@@ -411,7 +414,90 @@ impl Walker<'_> {
 }
 
 /// Convert an HTML body to readable text, dropping hidden content.
+/// Elements that never contain others, or whose end tag is usually left out.
+const NO_NESTING: &[&[u8]] = &[
+    b"br", b"img", b"hr", b"meta", b"link", b"input", b"col", b"area", b"base", b"wbr", b"source", b"track", b"embed",
+    b"param", b"p", b"li", b"td", b"th", b"tr", b"option", b"dt", b"dd",
+];
+
+/// Tree builders spend quadratic time on very deep nesting (each new element
+/// scans the open-element stack), so a few hundred kilobytes of nested tags
+/// can stall a parse for a minute. A linear scan estimates the depth first.
+fn too_deep(html: &str, limit: usize) -> bool {
+    let b = html.as_bytes();
+    let (mut depth, mut i) = (0usize, 0usize);
+    while let Some(off) = b[i..].iter().position(|&c| c == b'<') {
+        let j = i + off + 1;
+        i = j;
+        match b.get(j) {
+            Some(b'/') => depth = depth.saturating_sub(1),
+            Some(c) if c.is_ascii_alphabetic() => {
+                let end = b[j..].iter().position(|c| !c.is_ascii_alphanumeric()).map_or(b.len(), |k| j + k);
+                let name = b[j..end].to_ascii_lowercase();
+                let close = b[end..].iter().position(|&c| c == b'>').map(|k| end + k);
+                let self_closing = close.is_some_and(|k| k > 0 && b[k - 1] == b'/');
+                if !self_closing && !NO_NESTING.contains(&name.as_slice()) {
+                    depth += 1;
+                    if depth > limit {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Plain text of hostile HTML without building a tree: drop tags and the
+/// content of script/style/head, decode the common entities.
+fn strip_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 2);
+    let lower = html.to_ascii_lowercase();
+    let mut i = 0;
+    while i < html.len() {
+        let Some(off) = html[i..].find('<') else {
+            out.push_str(&html[i..]);
+            break;
+        };
+        out.push_str(&html[i..i + off]);
+        let tag = i + off;
+        let skip_to = ["script", "style", "head", "title"].iter().find_map(|t| {
+            lower[tag + 1..].starts_with(t).then(|| lower[tag..].find(&format!("</{t}")).map(|k| tag + k))?
+        });
+        let from = skip_to.unwrap_or(tag);
+        match html[from..].find('>') {
+            Some(k) => {
+                i = from + k + 1;
+                out.push(' ');
+            }
+            None => break,
+        }
+    }
+    out.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
 pub fn to_text(html: &str) -> HtmlText {
+    if too_deep(html, 512) {
+        // No real mail nests 512 levels deep. Styles cannot be checked without
+        // the tree, so the whole text is withheld like hidden text; a sample
+        // is kept for the prompt-injection scan.
+        let (clean, invisible) = strip_invisible(&strip_tags(html));
+        let clean = tidy_whitespace(&clean);
+        return HtmlText {
+            text: String::new(),
+            hidden_chars: clean.chars().filter(|c| !c.is_whitespace()).count(),
+            invisible_chars: invisible,
+            hidden_sample: clean.chars().take(2000).collect(),
+            link_mismatches: vec![],
+            degraded: true,
+        };
+    }
     let doc = Html::parse_document(html);
     let rules = collect_rules(&doc);
     let mut w = Walker {
@@ -430,6 +516,7 @@ pub fn to_text(html: &str) -> HtmlText {
         invisible_chars: invisible,
         hidden_sample: w.hidden_sample,
         link_mismatches: w.link_mismatches,
+        degraded: false,
     }
 }
 
@@ -438,8 +525,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extreme_nesting_skips_the_tree_builder() {
+        let depth = 200_000;
+        let html = format!("<p>top</p>{}secret &amp; more{}", "<div>".repeat(depth), "</div>".repeat(depth));
+        let started = std::time::Instant::now();
+        let t = to_text(&html);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
+        assert!(t.degraded);
+        assert!(t.text.is_empty());
+        assert!(t.hidden_chars > 0 && t.hidden_sample.contains("secret & more"), "{}", t.hidden_sample);
+        // Ordinary mail is untouched by the guard.
+        let normal = "<table><tr><td><p>a<p>b<br><img src=x><li>c</table>".repeat(500);
+        assert!(!too_deep(&normal, 512));
+        let t = to_text("<style>.x{}</style><div><b>Hi</b></div>");
+        assert!(!t.degraded && t.text.trim() == "Hi", "{}", t.text);
+    }
+
+    #[test]
     fn hostile_nesting_neither_overflows_nor_hides_text() {
-        let depth = 3_000;
+        let depth = 400; // below the tree-builder guard, above the walker's limit
         let html = format!("<p>top</p>{}secret{}", "<div>".repeat(depth), "</div>".repeat(depth));
         let t = to_text(&html);
         assert!(t.text.contains("top"));

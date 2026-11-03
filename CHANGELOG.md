@@ -5,6 +5,11 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- HTML nested more than 512 levels deep no longer stalls the parser (tree
+  builders are quadratic in depth): a linear pre-scan withholds its text
+  and warns, as no real mail is built that way.
+
 ## [0.3.0] - 2026-11-03
 
 ### Added
