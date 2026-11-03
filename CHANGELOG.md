@@ -5,6 +5,13 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-03
+
+### Added
+- Before Full Disk Access is granted, `open_permission_settings` opens
+  System Settings at the right pane and selects Timbre's program in
+  Finder: the user only drags it into the list.
+
 ## [0.4.0] - 2026-11-03
 
 ### Added

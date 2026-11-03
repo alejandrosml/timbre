@@ -36,11 +36,42 @@ impl Degraded {
         Ok(Json(Problem {
             problem: self.error.clone(),
             how_to_fix: vec![
+                "Claude can open the right settings pane and show the file: call open_permission_settings.".into(),
                 "Open System Settings › Privacy & Security › Full Disk Access.".into(),
                 format!("Click +, press ⌘⇧G, paste this path and enable it: {binary}"),
                 "Then turn the Timbre extension off and on again in Claude's settings.".into(),
             ],
         }))
+    }
+
+    #[tool(
+        name = "open_permission_settings",
+        description = "Opens System Settings at Full Disk Access and selects Timbre's program in Finder, so the user only drags it into the list and switches it on.",
+        annotations(
+            title = "Open Full Disk Access settings",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn open_permission_settings(&self) -> Result<String, String> {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        if !cfg!(target_os = "macos") {
+            return Err("Only available on macOS.".into());
+        }
+        let open = |args: &[&std::ffi::OsStr]| {
+            std::process::Command::new("/usr/bin/open").args(args).status().is_ok_and(|s| s.success())
+        };
+        let pane = open(&["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles".as_ref()]);
+        let shown = open(&["-R".as_ref(), exe.as_os_str()]);
+        Ok(format!(
+            "{}{} Ask the user to drag the selected file \"{}\" from Finder into the Full Disk Access list (or click + and pick it), \
+             switch it on, then turn the Timbre extension off and on in Claude's settings.",
+            if pane { "System Settings is open at Full Disk Access. " } else { "Could not open System Settings. " },
+            if shown { "Finder shows Timbre's program, selected." } else { "Could not show the program in Finder." },
+            exe.display()
+        ))
     }
 }
 
@@ -50,7 +81,8 @@ impl ServerHandler for Degraded {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("timbre", env!("CARGO_PKG_VERSION")).with_title("Timbre"))
             .with_instructions(
-                "Timbre cannot read Mail's data yet. Call mail_status and show the user the steps to fix it.",
+                "Timbre cannot read Mail's data yet. Call mail_status; open_permission_settings opens the right \
+                 System Settings pane and shows the file to add.",
             )
     }
 }
