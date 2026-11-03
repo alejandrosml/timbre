@@ -220,3 +220,26 @@ fn status_reports_index_and_settings() {
     assert_eq!(s.index.state, "ready");
     assert!(!s.sending_enabled);
 }
+
+#[test]
+fn copies_in_several_mailboxes_are_shown_once() {
+    // Gmail shows one message in INBOX and in All Mail (here: Archive).
+    let env = setup("dedupe", true);
+    let cfg = env.ctx.cfg.clone();
+    let store = env.ctx.store.clone();
+    let mut conn = index::open(&cfg, &store, true).unwrap();
+    let mut indexer = Indexer::new(cfg.clone(), store.clone(), env.ctx.progress.clone());
+    let mail = rusqlite::Connection::open(store.db_path.clone()).unwrap();
+    let mut copy = fixture::messages().remove(1); // 102, INBOX, <m102@example.com>
+    copy.id = 1400;
+    copy.mailbox = "Archive";
+    fixture::write_message(&store.version_dir, &mail, &copy).unwrap();
+    assert_eq!(indexer.sync(&mut conn).unwrap(), 1);
+
+    let r = search(&env, q("meeting"));
+    let found: Vec<i64> = ids(&r).into_iter().filter(|id| *id == 102 || *id == 1400).collect();
+    assert_eq!(found, vec![102], "one result, from the inbox");
+    // A search limited to the archive still finds its copy.
+    let r = search(&env, SearchParams { mailbox: Some("archive".into()), ..q("meeting") });
+    assert_eq!(ids(&r), vec![1400]);
+}

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::index::Progress;
-use crate::store::{Meta, Store};
+use crate::store::{Meta, Role, Store};
 use crate::util::{clip, iso_local, now_unix, parse_when};
 
 #[derive(Debug, Default, Clone, Deserialize, JsonSchema)]
@@ -172,6 +172,49 @@ fn quote_fts(term: &str) -> Option<String> {
         return None;
     }
     Some(format!("\"{}\"", cleaned.replace('"', "\"\"")))
+}
+
+/// Keep the first `limit` distinct messages of `ranked`: copies sharing a
+/// Message-ID collapse into one, taking the copy with the lowest `preference`.
+/// Returns the kept ids and how many ranked ids were consumed (for paging).
+fn dedupe(
+    conn: &Connection,
+    ranked: &[i64],
+    limit: usize,
+    preference: impl Fn(i64) -> u8,
+) -> rusqlite::Result<(Vec<i64>, usize)> {
+    let mut msgid_of: HashMap<i64, String> = HashMap::new();
+    if !ranked.is_empty() {
+        let list = ranked.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        let mut stmt =
+            conn.prepare(&format!("SELECT id, msgid FROM docs WHERE msgid IS NOT NULL AND id IN ({list})"))?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+            let (id, msgid) = row?;
+            msgid_of.insert(id, msgid);
+        }
+    }
+    let mut kept: Vec<i64> = vec![];
+    let mut slot: HashMap<&str, usize> = HashMap::new();
+    let mut consumed = 0;
+    for (pos, &id) in ranked.iter().enumerate() {
+        let duplicate = msgid_of.get(&id).and_then(|m| slot.get(m.as_str()).copied());
+        match duplicate {
+            Some(k) => {
+                if preference(id) < preference(kept[k]) {
+                    kept[k] = id;
+                }
+            }
+            None if kept.len() == limit => break,
+            None => {
+                if let Some(m) = msgid_of.get(&id) {
+                    slot.insert(m.as_str(), kept.len());
+                }
+                kept.push(id);
+            }
+        }
+        consumed = pos + 1;
+    }
+    Ok((kept, consumed))
 }
 
 /// Build an FTS5 MATCH expression from free-text terms. Every term is
@@ -424,7 +467,10 @@ pub fn search(
     if use_fts && order.contains('?') {
         select_args.push(Value::Integer(now_db));
     }
-    select_args.push(Value::Integer(limit as i64));
+    // Fetch extra ids: copies of one message in several mailboxes (Gmail
+    // labels and All Mail) are shown once.
+    let fetch = (limit * 2).min(200);
+    select_args.push(Value::Integer(fetch as i64));
     select_args.push(Value::Integer(offset as i64));
     // Rank ids only. Metadata and snippets are read for the returned page
     // alone: computing snippets for every match made searches 2.5x slower.
@@ -436,23 +482,32 @@ pub fn search(
         let ids = stmt.query_map(rusqlite::params_from_iter(select_args.iter()), |r| r.get(0)).map_err(err)?;
         ids.collect::<rusqlite::Result<Vec<i64>>>().map_err(err)
     };
-    let mut ids = rank(&window)?;
-    if !window.is_empty() && (ids.len() as u32) < limit && total > offset as u64 + ids.len() as u64 {
+    let mut ranked = rank(&window)?;
+    if !window.is_empty() && (ranked.len() as u32) < fetch && total > offset as u64 + ranked.len() as u64 {
         // Filters removed most of the window: rank every match instead.
-        ids = rank("")?;
+        ranked = rank("")?;
     }
 
     let mut metas: HashMap<i64, Meta> = store
-        .get_metas(conn, &ids)
+        .get_metas(conn, &ranked)
         .map_err(|e| format!("search failed: {e}"))?
         .into_iter()
         .map(|m| (m.id, m))
         .collect();
+    let mailboxes = store.mailboxes();
+    let (ids, consumed) = dedupe(conn, &ranked, limit as usize, |id| {
+        // Prefer the inbox copy, then any but an archive or All Mail.
+        match metas.get(&id).and_then(|m| mailboxes.get(&m.mailbox)).map(|mb| mb.role) {
+            Some(Role::Inbox) => 0,
+            Some(Role::Archive) => 2,
+            _ => 1,
+        }
+    })
+    .map_err(err)?;
     let mut snippet_stmt = conn
         .prepare_cached("SELECT snippet(fts, -1, '«', '»', '…', 14) FROM fts WHERE fts MATCH ?1 AND rowid = ?2")
         .map_err(err)?;
     let mut auth_stmt = conn.prepare_cached("SELECT auth FROM docs WHERE id = ?1").map_err(err)?;
-    let mailboxes = store.mailboxes();
     let mut results = vec![];
     for id in ids {
         let Some(m) = metas.remove(&id) else { continue };
@@ -477,11 +532,11 @@ pub fn search(
             warning: auth_warning(auth.as_deref()),
         });
     }
-    let shown = offset as u64 + results.len() as u64;
+    let more = ranked.len() as u32 == fetch || consumed < ranked.len();
     Ok(SearchResult {
         total: total.min(COUNT_CAP),
         total_is_lower_bound: total > COUNT_CAP,
-        next_offset: (shown < total).then_some(offset + results.len() as u32),
+        next_offset: more.then_some(offset + consumed as u32),
         engine: if use_fts { "fulltext" } else { "metadata" }.to_string(),
         notice,
         took_ms: started.elapsed().as_millis() as u64,

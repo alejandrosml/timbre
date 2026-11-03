@@ -5,6 +5,10 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- A message stored in several mailboxes (Gmail labels and All Mail) appears
+  once in search results, preferably from the inbox.
+
 ## [0.2.0] - 2026-11-03
 
 ### Changed
