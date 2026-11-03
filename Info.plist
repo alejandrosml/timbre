@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.alejandrosml.timbre</string>
+	<key>CFBundleName</key>
+	<string>Timbre</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Timbre asks Mail to create drafts and to file or flag messages when you request it.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 Alejandro San Martin Lamas — MIT License</string>
+</dict>
+</plist>

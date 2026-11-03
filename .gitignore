@@ -1,0 +1,7 @@
+/target
+/build/mcpb
+/dist
+*.pem
+*.p12
+*.p8
+.DS_Store
