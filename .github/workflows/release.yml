@@ -1,0 +1,93 @@
+# Builds, signs (Developer ID, hardened runtime), notarizes and publishes a
+# release when a tag like v0.2.0 is pushed. Needs these repository secrets:
+#   MACOS_CERTIFICATE           base64 of the Developer ID Application .p12
+#   MACOS_CERTIFICATE_PASSWORD  its password
+#   MACOS_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_API_KEY               base64 of an App Store Connect API key (.p8)
+#   APPLE_API_KEY_ID, APPLE_API_ISSUER
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: macos-15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check secrets
+        env:
+          CERT: ${{ secrets.MACOS_CERTIFICATE }}
+          KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          if [ -z "$CERT" ] || [ -z "$KEY" ]; then
+            echo "::error::Signing secrets are missing. See the comment at the top of release.yml."
+            exit 1
+          fi
+      - name: Toolchain
+        run: rustup toolchain install
+      - name: Versions agree with the tag
+        run: python3 -I scripts/check-versions.py "${GITHUB_REF_NAME#v}"
+      - name: Build universal binary
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/timbre \
+            target/aarch64-apple-darwin/release/timbre target/x86_64-apple-darwin/release/timbre
+      - name: Sign
+        env:
+          CERT: ${{ secrets.MACOS_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          rm "$RUNNER_TEMP/cert.p12"
+          codesign --force --timestamp --options runtime \
+            --identifier io.github.alejandrosml.timbre \
+            --entitlements packaging/Timbre.entitlements \
+            --sign "$IDENTITY" dist/timbre
+          codesign --verify --strict --verbose=2 dist/timbre
+      - name: Notarize
+        env:
+          API_KEY: ${{ secrets.APPLE_API_KEY }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          echo "$API_KEY" | base64 --decode > "$RUNNER_TEMP/key.p8"
+          ditto -c -k --keepParent dist/timbre "$RUNNER_TEMP/timbre.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/timbre.zip" \
+            --key "$RUNNER_TEMP/key.p8" --key-id "$API_KEY_ID" --issuer "$API_ISSUER" --wait
+          rm "$RUNNER_TEMP/key.p8"
+      - name: Package the Claude extension
+        run: |
+          npm install -g @anthropic-ai/mcpb@2.1.2
+          scripts/package-mcpb.sh dist/timbre
+          cd dist && shasum -a 256 timbre timbre-*.mcpb > SHA256SUMS
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/timbre
+            dist/timbre-*.mcpb
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist/timbre-*.mcpb dist/timbre dist/SHA256SUMS

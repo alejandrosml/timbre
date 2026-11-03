@@ -1,0 +1,33 @@
+name: Bug report
+description: Something does not work as expected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Please never paste real mail content here. For security issues, use
+        Security → Report a vulnerability instead.
+  - type: input
+    id: version
+    attributes:
+      label: Timbre version
+      description: Shown by the mail_status tool.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of mail_status (optional)
+      render: json
