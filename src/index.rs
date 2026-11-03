@@ -268,6 +268,12 @@ fn register_functions(conn: &Connection) -> Result<()> {
             _ => Ok(None),
         },
     )?;
+    conn.create_scalar_function(
+        "timbre_fold",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| Ok(ctx.get::<Option<String>>(0)?.map(|s| norm::for_match(&s))),
+    )?;
     Ok(())
 }
 

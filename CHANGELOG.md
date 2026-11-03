@@ -5,6 +5,10 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- `from:`, `to:` and `subject:` filters ignore accents, ligatures and case
+  (`from:helene` finds Hélène), like the full-text search.
+
 ## [0.4.1] - 2026-11-03
 
 ### Added

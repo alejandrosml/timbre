@@ -458,3 +458,16 @@ fn restarts_do_not_walk_the_whole_store() {
     indexer.full_build(&mut conn, false).unwrap();
     assert_eq!(walked(&conn), before, "a known missing file does not trigger another walk");
 }
+
+#[test]
+fn filters_ignore_accents_and_case() {
+    let env = setup("folding", true);
+    // "Reunión del comité" in Archive, from Ana.
+    let r = search(
+        &env,
+        SearchParams { subject: Some("REUNION".into()), mailbox: Some("archive".into()), ..Default::default() },
+    );
+    assert_eq!(ids(&r), vec![104]);
+    let r = search(&env, SearchParams { subject: Some("comite".into()), ..Default::default() });
+    assert_eq!(ids(&r), vec![104]);
+}

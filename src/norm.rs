@@ -66,6 +66,13 @@ pub fn fold(s: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// Lower-case text without accents or ligatures, for comparisons that the
+/// full-text tokenizer does not handle (sender, recipient and subject filters).
+pub fn for_match(s: &str) -> String {
+    use unicode_normalization::char::is_combining_mark;
+    fold(s).nfd().filter(|c| !is_combining_mark(*c)).collect::<String>().to_lowercase()
+}
+
 /// Text for the index: folded, links reduced to their host name, and long
 /// machine tokens (base64, hex ids, tracking codes) dropped. They bloat the
 /// index and never match a real query.

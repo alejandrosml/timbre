@@ -390,7 +390,7 @@ pub fn build_fts(terms: &[String]) -> Option<String> {
 }
 
 fn like(term: &str) -> String {
-    let esc = term.to_lowercase().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let esc = crate::norm::for_match(term).replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
     format!("%{esc}%")
 }
 
@@ -441,8 +441,7 @@ pub fn search(
     let mut f = Filters { sql: vec![s.not_deleted.clone()], args: vec![] };
     if let Some(v) = &from {
         f.push(
-            "(lower(COALESCE(a.address,'')) LIKE ? ESCAPE '\\' OR lower(COALESCE(a.comment,'')) LIKE ? ESCAPE '\\')"
-                .into(),
+            "(timbre_fold(a.address) LIKE ? ESCAPE '\\' OR timbre_fold(a.comment) LIKE ? ESCAPE '\\')".into(),
             [Value::Text(like(v)), Value::Text(like(v))],
         );
     }
@@ -453,15 +452,15 @@ pub fn search(
         f.push(
             format!(
                 "EXISTS (SELECT 1 FROM mail.recipients r LEFT JOIN mail.addresses ra ON ra.ROWID = r.address \
-                     WHERE r.{col} = m.ROWID {typ}AND (lower(COALESCE(ra.address,'')) LIKE ? ESCAPE '\\' \
-                     OR lower(COALESCE(ra.comment,'')) LIKE ? ESCAPE '\\'))"
+                     WHERE r.{col} = m.ROWID {typ}AND (timbre_fold(ra.address) LIKE ? ESCAPE '\\' \
+                     OR timbre_fold(ra.comment) LIKE ? ESCAPE '\\'))"
             ),
             [Value::Text(like(v)), Value::Text(like(v))],
         );
     }
     if let Some(v) = &subject {
         f.push(
-            format!("lower({} || COALESCE(s.subject,'')) LIKE ? ESCAPE '\\'", s.subject_prefix),
+            format!("timbre_fold({} || COALESCE(s.subject,'')) LIKE ? ESCAPE '\\'", s.subject_prefix),
             [Value::Text(like(v))],
         );
     }
@@ -547,7 +546,7 @@ pub fn search(
             for w in &words {
                 f.push(
                     format!(
-                        "(lower({} || COALESCE(s.subject,'')) LIKE ? ESCAPE '\\' OR lower(COALESCE(a.comment,'') || ' ' || COALESCE(a.address,'')) LIKE ? ESCAPE '\\')",
+                        "(timbre_fold({} || COALESCE(s.subject,'')) LIKE ? ESCAPE '\\' OR timbre_fold(COALESCE(a.comment,'') || ' ' || COALESCE(a.address,'')) LIKE ? ESCAPE '\\')",
                         s.subject_prefix
                     ),
                     [Value::Text(like(w)), Value::Text(like(w))],
