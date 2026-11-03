@@ -5,6 +5,10 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `read_attachment` reads PDF (PDFKit) and Word, RTF and ODT files
+  (textutil). macOS converts them in a separate process with a 30 s timeout.
+
 ### Changed
 - A message stored in several mailboxes (Gmail labels and All Mail) appears
   once in search results, preferably from the inbox.

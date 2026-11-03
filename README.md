@@ -76,7 +76,7 @@ The full-text index builds in the background on first launch (a few minutes for 
 | `read_mail` | One message, with warnings and attachments | no |
 | `get_thread` | A whole conversation | no |
 | `list_mailboxes` | Accounts and mailboxes with counts | no |
-| `read_attachment` | Text of an attachment | no |
+| `read_attachment` | Text of an attachment: PDF, Word, RTF, ODT, text, HTML, CSV, calendar, attached mail | no |
 | `mail_status` | Permissions, index progress, settings | no |
 | `selected_mail` | Messages selected in Mail | no |
 | `open_in_mail` | Open a message in Mail | no |

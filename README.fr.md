@@ -76,7 +76,7 @@ L'index plein texte se construit en arrière-plan au premier lancement (quelques
 | `read_mail` | Un message, avec alertes et pièces jointes | non |
 | `get_thread` | Une conversation entière | non |
 | `list_mailboxes` | Comptes et boîtes, avec leurs compteurs | non |
-| `read_attachment` | Texte d'une pièce jointe | non |
+| `read_attachment` | Texte d'une pièce jointe : PDF, Word, RTF, ODT, texte, HTML, CSV, agenda, mail joint | non |
 | `mail_status` | Permissions, avancement de l'index, réglages | non |
 | `selected_mail` | Messages sélectionnés dans Mail | non |
 | `open_in_mail` | Ouvrir un message dans Mail | non |

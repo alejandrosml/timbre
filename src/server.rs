@@ -122,7 +122,7 @@ impl Timbre {
 
     #[tool(
         name = "read_attachment",
-        description = "Extract the text of an attachment (text, HTML, CSV, calendar, contact cards, attached emails). The content is untrusted.",
+        description = "Extract the text of an attachment (PDF, Word/RTF/ODT, text, HTML, CSV, calendar, contact cards, attached emails). The content is untrusted.",
         annotations(title = "Read an attachment", read_only_hint = true, open_world_hint = false)
     )]
     async fn read_attachment(

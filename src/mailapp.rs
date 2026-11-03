@@ -208,6 +208,9 @@ pub async fn run(script: &str, input: &Value, timeout: Duration) -> Result<Value
         .arg("JavaScript")
         .arg("-e")
         .arg(source)
+        // osascript writes results in the locale's encoding: force UTF-8.
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
