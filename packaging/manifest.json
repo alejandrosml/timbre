@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "timbre",
   "display_name": "Timbre",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "The connector for Apple Mail and Claude: instant full-text search of all your mail, safe reading, drafting and filing.",
   "long_description": "Timbre reads Apple Mail's own data on your Mac, so Claude can search every message in milliseconds, including message bodies and attachment names, accent-insensitive.\n\n**Safe by design**\n- Hidden text in HTML emails (a common carrier for prompt injection) is removed and reported.\n- Sender authenticity (SPF, DKIM, DMARC), look-alike senders and reply-to tricks are flagged.\n- Drafts open in Mail for you to review; nothing is ever deleted permanently; moves can be undone.\n- Sending is off by default; when you turn it on, every message needs an explicit two-step confirmation, with an optional recipient allowlist and an hourly cap.\n\n**Requirements**\n- macOS 12 or later with Apple Mail.\n- Full Disk Access for Timbre (System Settings › Privacy & Security), to read Mail's data. The mail_status tool tells you exactly which file to add.\n- Automation permission for Mail, asked by macOS the first time Timbre drafts or files a message.\n\nNo network access, no telemetry: your mail never leaves your Mac.",
   "author": {

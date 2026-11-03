@@ -39,6 +39,9 @@ pub struct SearchParams {
     pub include_junk_and_trash: Option<bool>,
     /// "relevance" (default with a query) or "newest" / "oldest".
     pub sort: Option<String>,
+    /// One result per conversation (default true): thread_matches counts its
+    /// other matching messages, get_thread shows them. false lists each message.
+    pub group_threads: Option<bool>,
     /// Results per page, 1-50 (default 20). Use next_offset for more.
     pub limit: Option<u32>,
     /// Skip this many results (pagination).
@@ -65,6 +68,9 @@ pub struct Hit {
     /// Sender authentication problem, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Other matching messages in this conversation (see get_thread).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_matches: Option<u32>,
 }
 
 fn is_zero(v: &i64) -> bool {
@@ -212,15 +218,24 @@ fn refresh_correspondents(conn: &Connection, store: &Store) -> rusqlite::Result<
     built.map(|_| true)
 }
 
-/// Keep the first `limit` distinct messages of `ranked`: copies sharing a
-/// Message-ID collapse into one, taking the copy with the lowest `preference`.
-/// Returns the kept ids and how many ranked ids were consumed (for paging).
-fn dedupe(
+/// A result kept for the page, with the conversation's other matches.
+struct Kept {
+    id: i64,
+    thread_matches: u32,
+}
+
+/// Keep the first `limit` results of `ranked`, collapsing copies of one
+/// message (same Message-ID: Gmail labels, All Mail), keeping the copy with
+/// the lowest `preference`, and, if `conversation` is given, messages of
+/// one conversation (counted in thread_matches). Returns the kept results
+/// and how many ranked ids were consumed (for paging).
+fn collapse(
     conn: &Connection,
     ranked: &[i64],
     limit: usize,
+    conversation: Option<&dyn Fn(i64) -> i64>,
     preference: impl Fn(i64) -> u8,
-) -> rusqlite::Result<(Vec<i64>, usize)> {
+) -> rusqlite::Result<(Vec<Kept>, usize)> {
     let mut msgid_of: HashMap<i64, String> = HashMap::new();
     if !ranked.is_empty() {
         let list = ranked.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
@@ -231,24 +246,34 @@ fn dedupe(
             msgid_of.insert(id, msgid);
         }
     }
-    let mut kept: Vec<i64> = vec![];
-    let mut slot: HashMap<&str, usize> = HashMap::new();
+    let mut kept: Vec<Kept> = vec![];
+    let mut by_msgid: HashMap<&str, usize> = HashMap::new();
+    let mut by_conversation: HashMap<i64, usize> = HashMap::new();
     let mut consumed = 0;
     for (pos, &id) in ranked.iter().enumerate() {
-        let duplicate = msgid_of.get(&id).and_then(|m| slot.get(m.as_str()).copied());
-        match duplicate {
-            Some(k) => {
-                if preference(id) < preference(kept[k]) {
-                    kept[k] = id;
-                }
+        let msgid = msgid_of.get(&id).map(String::as_str);
+        if let Some(k) = msgid.and_then(|m| by_msgid.get(m).copied()) {
+            // Another copy of a message already kept.
+            if preference(id) < preference(kept[k].id) {
+                kept[k].id = id;
             }
-            None if kept.len() == limit => break,
-            None => {
-                if let Some(m) = msgid_of.get(&id) {
-                    slot.insert(m.as_str(), kept.len());
-                }
-                kept.push(id);
+        } else if let Some(k) =
+            conversation.map(|c| c(id)).filter(|c| *c != 0).and_then(|c| by_conversation.get(&c).copied())
+        {
+            kept[k].thread_matches += 1;
+            if let Some(m) = msgid {
+                by_msgid.insert(m, k);
             }
+        } else if kept.len() == limit {
+            break;
+        } else {
+            if let Some(m) = msgid {
+                by_msgid.insert(m, kept.len());
+            }
+            if let Some(c) = conversation.map(|c| c(id)).filter(|c| *c != 0) {
+                by_conversation.insert(c, kept.len());
+            }
+            kept.push(Kept { id, thread_matches: 0 });
         }
         consumed = pos + 1;
     }
@@ -592,7 +617,8 @@ pub fn search(
     }
     // Fetch extra ids: copies of one message in several mailboxes (Gmail
     // labels and All Mail) are shown once.
-    let fetch = (limit * 2).min(200);
+    let group = req.group_threads.unwrap_or(true);
+    let fetch = (limit * if group { 4 } else { 2 }).min(200);
     select_args.push(Value::Integer(fetch as i64));
     select_args.push(Value::Integer(offset as i64));
     // Rank ids only. Metadata and snippets are read for the returned page
@@ -614,21 +640,23 @@ pub fn search(
         .map(|m| (m.id, m))
         .collect();
     let mailboxes = store.mailboxes();
-    let (ids, consumed) = dedupe(conn, &ranked, limit as usize, |id| {
-        // Prefer the inbox copy, then any but an archive or All Mail.
-        match metas.get(&id).and_then(|m| mailboxes.get(&m.mailbox)).map(|mb| mb.role) {
-            Some(Role::Inbox) => 0,
-            Some(Role::Archive) => 2,
-            _ => 1,
-        }
-    })
-    .map_err(err)?;
+    let conversation_of = |id: i64| metas.get(&id).map_or(0, |m| m.conversation);
+    let (kept, consumed) =
+        collapse(conn, &ranked, limit as usize, group.then_some(&conversation_of as &dyn Fn(i64) -> i64), |id| {
+            // Prefer the inbox copy, then any but an archive or All Mail.
+            match metas.get(&id).and_then(|m| mailboxes.get(&m.mailbox)).map(|mb| mb.role) {
+                Some(Role::Inbox) => 0,
+                Some(Role::Archive) => 2,
+                _ => 1,
+            }
+        })
+        .map_err(err)?;
     let mut snippet_stmt = conn
         .prepare_cached("SELECT snippet(fts, -1, '«', '»', '…', 14) FROM fts WHERE fts MATCH ?1 AND rowid = ?2")
         .map_err(err)?;
     let mut auth_stmt = conn.prepare_cached("SELECT auth FROM docs WHERE id = ?1").map_err(err)?;
     let mut results = vec![];
-    for id in ids {
+    for Kept { id, thread_matches } in kept {
         let Some(m) = metas.remove(&id) else { continue };
         let snippet: Option<String> = if use_fts {
             snippet_stmt.query_row(rusqlite::params![fts_expr, id], |r| r.get(0)).optional().map_err(err)?.flatten()
@@ -649,6 +677,7 @@ pub fn search(
             attachments: m.attachments,
             snippet: snippet.filter(|s| !s.trim().is_empty()).map(|s| clip(s.trim(), 280).0),
             warning: auth_warning(auth.as_deref()),
+            thread_matches: (thread_matches > 0).then_some(thread_matches),
         });
     }
     let more = ranked.len() as u32 == fetch || consumed < ranked.len();

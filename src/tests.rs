@@ -103,11 +103,17 @@ fn full_text_search_ranks_filters_and_skips_junk() {
         &SearchParams { mailbox: Some("Nope".into()), ..Default::default() },
     );
     assert!(err.unwrap_err().contains("list_mailboxes"));
-    // Pagination.
-    let r = search(&env, SearchParams { limit: Some(2), ..Default::default() });
+    // Pagination, message by message.
+    let r = search(&env, SearchParams { limit: Some(2), group_threads: Some(false), ..Default::default() });
     assert_eq!(r.results.len(), 2);
     assert_eq!(r.next_offset, Some(2));
     assert_eq!(r.total, 5);
+    // By conversation (the default): 102 and its reply 103 come as one result.
+    let all = search(&env, SearchParams { limit: Some(10), ..Default::default() });
+    let thread: Vec<_> = all.results.iter().filter(|h| h.id == 102 || h.id == 103).collect();
+    assert_eq!(thread.len(), 1);
+    assert_eq!(thread[0].thread_matches, Some(1));
+    assert_eq!(all.results.len(), 4);
 }
 
 #[test]

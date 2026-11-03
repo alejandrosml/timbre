@@ -11,7 +11,7 @@ Timbre lets Claude work with the mail you already have in Apple Mail, whatever t
 
 It is built for the reality of an AI assistant reading untrusted email: hidden instructions are stripped and reported, forged senders are flagged, nothing is ever deleted for good, and nothing is sent without you.
 
-> **Status:** early development (v0.3), being tested on a real 250,000-message mailbox. Feedback welcome in [Issues](https://github.com/alejandrosml/timbre/issues).
+> **Status:** early development (v0.4), being tested on a real 250,000-message mailbox. Feedback welcome in [Issues](https://github.com/alejandrosml/timbre/issues).
 
 ## What it does
 

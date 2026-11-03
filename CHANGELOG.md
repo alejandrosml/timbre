@@ -5,6 +5,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-03
+
 ### Added
 - Searches also find the other grammatical number of each word in French,
   English and Spanish (`facture` finds `factures`, `reuniones` finds
@@ -12,6 +14,11 @@ All notable changes are listed here. The format follows
   mailboxes. Exact phrases in quotes stay exact.
 - New mail is searchable about 2 s after Mail stores it (Timbre watches
   Mail's database instead of checking every 15 s).
+- Search results come one per conversation by default, with
+  `thread_matches` counting the other matching messages of the thread
+  (`group_threads: false` lists every message).
+- Timbre Signer (tools/signer): signs and notarizes releases with the
+  maintainer's Developer ID on his Mac; releases are now notarized.
 
 ### Changed
 - Starting Timbre no longer walks Mail's whole store when the index is
