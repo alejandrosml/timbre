@@ -29,6 +29,11 @@ pub const SCHEMA_VERSION: &str = "3";
 /// Longest body text indexed per message (characters).
 const MAX_INDEXED_BODY: usize = 32_000;
 const CHUNK: usize = 256;
+/// Up to this many unindexed messages, their files are found from their
+/// mailbox's folder instead of walking the whole store.
+const PREDICT_LIMIT: usize = 5000;
+/// Messages whose file was missing at a walk wait this long for another one.
+const WALK_EVERY: i64 = 6 * 3600;
 /// Messages per write transaction during a full build.
 const COMMIT_EVERY: usize = 4096;
 
@@ -131,6 +136,7 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
                      DROP VIEW IF EXISTS fts_src;
                      DROP TABLE IF EXISTS texts;
                      DROP TABLE IF EXISTS docs;
+                     DROP TABLE IF EXISTS unlocated;
                      DELETE FROM meta;
                      COMMIT;",
                 )?;
@@ -163,6 +169,8 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
                  status INTEGER NOT NULL DEFAULT 0
              );
              CREATE INDEX IF NOT EXISTS docs_msgid ON docs(msgid);
+             -- Messages without a file at the last walk of Mail's store.
+             CREATE TABLE IF NOT EXISTS unlocated(id INTEGER PRIMARY KEY);
              CREATE INDEX IF NOT EXISTS docs_mailbox ON docs(mailbox);
              -- What was indexed, kept for snippets; the body is zstd-compressed.
              CREATE TABLE IF NOT EXISTS texts(
@@ -375,7 +383,10 @@ pub fn background_priority() {
 /// always agree, even if the process stops halfway.
 fn clear(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
-    tx.execute_batch("DELETE FROM docs; DELETE FROM texts; INSERT INTO fts(fts) VALUES('delete-all');")?;
+    tx.execute_batch(
+        "DELETE FROM docs; DELETE FROM texts; DELETE FROM unlocated; DELETE FROM meta WHERE key = 'last_walk';
+         INSERT INTO fts(fts) VALUES('delete-all');",
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -480,11 +491,16 @@ impl Indexer {
         let live = self.store.live_messages(conn)?;
         let max_live = live.iter().map(|(id, _)| *id).max().unwrap_or(0);
         let wanted: HashMap<i64, i64> = live.into_iter().filter(|(_, mb)| !excluded.contains(mb)).collect();
-        let files = emlx::scan(&self.store.version_dir);
         let existing: HashMap<i64, i64> = {
             let mut stmt = conn.prepare("SELECT id, status FROM docs")?;
             stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
         };
+        let missing: Vec<(i64, i64)> = wanted
+            .iter()
+            .filter(|(id, _)| existing.get(id).is_none_or(|s| *s == 2))
+            .map(|(id, mb)| (*id, *mb))
+            .collect();
+        let files = self.locate_missing(conn, &missing)?;
         let mut todo: Vec<(i64, i64, Located)> = wanted
             .iter()
             .filter(|(id, _)| existing.get(id).is_none_or(|s| *s == 2))
@@ -581,6 +597,70 @@ impl Indexer {
     }
 
     /// Data directory of each mailbox's store, learned from indexed paths.
+    /// Files of the messages not indexed yet. Walking Mail's whole store
+    /// (hundreds of thousands of files, slow when the disk cache is cold) is
+    /// avoided at every start: nothing missing means nothing to look for, a
+    /// few missing are found from their mailbox's folder, and messages whose
+    /// file was already absent at a recent walk do not trigger another one.
+    fn locate_missing(&self, conn: &Connection, missing: &[(i64, i64)]) -> Result<HashMap<i64, Located>> {
+        if missing.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut found = HashMap::new();
+        let mut unfound = vec![];
+        if missing.len() <= PREDICT_LIMIT {
+            let roots = self.data_roots(conn)?;
+            for &(id, mb) in missing {
+                match roots.get(&mb).and_then(|root| emlx::predict(root, id)) {
+                    Some(loc) => {
+                        found.insert(id, loc);
+                    }
+                    None => unfound.push(id),
+                }
+            }
+        } else {
+            unfound = missing.iter().map(|(id, _)| *id).collect();
+        }
+        if unfound.is_empty() {
+            return Ok(found);
+        }
+        let recent = get_meta(conn, "last_walk")
+            .and_then(|s| s.parse::<i64>().ok())
+            .is_some_and(|t| now_unix() - t < WALK_EVERY);
+        if recent {
+            let mut known = conn.prepare("SELECT 1 FROM unlocated WHERE id = ?1")?;
+            let mut all_known = true;
+            for id in &unfound {
+                if !known.exists([id])? {
+                    all_known = false;
+                    break;
+                }
+            }
+            if all_known {
+                return Ok(found);
+            }
+        }
+        let scanned = emlx::scan(&self.store.version_dir);
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM unlocated", [])?;
+        {
+            let mut ins = tx.prepare("INSERT OR IGNORE INTO unlocated(id) VALUES(?1)")?;
+            for id in &unfound {
+                match scanned.get(id) {
+                    Some(loc) => {
+                        found.insert(*id, loc.clone());
+                    }
+                    None => {
+                        ins.execute([id])?;
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        set_meta(conn, "last_walk", &now_unix().to_string())?;
+        Ok(found)
+    }
+
     fn data_roots(&self, conn: &Connection) -> Result<HashMap<i64, PathBuf>> {
         let mut stmt = conn.prepare(
             "SELECT mailbox, path FROM docs WHERE id IN (SELECT max(id) FROM docs WHERE path != '' GROUP BY mailbox)",

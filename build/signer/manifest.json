@@ -1,0 +1,38 @@
+{
+  "manifest_version": "0.3",
+  "name": "timbre-signer",
+  "display_name": "Timbre Signer",
+  "version": "0.1.0",
+  "description": "Signs and notarizes Timbre builds with your Apple Developer ID, on this Mac. For the Timbre maintainer.",
+  "long_description": "One tool, timbre_signing. It creates a private key and certificate request on this Mac (the key never leaves it), installs the Developer ID certificate into a dedicated keychain, keeps the App Store Connect API key for notarization in a private folder, then signs (hardened runtime), notarizes and repackages a Timbre .mcpb from Downloads.",
+  "author": {
+    "name": "Alejandro San Martin Lamas",
+    "url": "https://github.com/alejandrosml"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alejandrosml/timbre"
+  },
+  "homepage": "https://github.com/alejandrosml/timbre",
+  "license": "MIT",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"]
+    }
+  },
+  "tools": [
+    {
+      "name": "timbre_signing",
+      "description": "Set up Developer ID signing and notarization, then sign Timbre builds."
+    }
+  ],
+  "compatibility": {
+    "platforms": ["darwin"],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}

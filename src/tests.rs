@@ -406,3 +406,47 @@ fn paging_is_stable_when_filters_thin_a_broad_query() {
     assert_eq!(distinct.len(), seen.len(), "a page repeated results");
     assert_eq!(distinct.len(), 350, "results were skipped");
 }
+
+#[test]
+fn restarts_do_not_walk_the_whole_store() {
+    let env = setup("restart", true);
+    let cfg = env.ctx.cfg.clone();
+    let store = env.ctx.store.clone();
+    let mut conn = index::open(&cfg, &store, true).unwrap();
+    let mut indexer = Indexer::new(cfg.clone(), store.clone(), env.ctx.progress.clone());
+    let walked = |conn: &rusqlite::Connection| index::get_meta(conn, "last_walk");
+    assert!(walked(&conn).is_some(), "the first build walks the store");
+
+    // Nothing missing: no walk.
+    index::set_meta(&conn, "last_walk", "12345").unwrap();
+    indexer.full_build(&mut conn, false).unwrap();
+    assert_eq!(walked(&conn).as_deref(), Some("12345"));
+
+    // A new message in a known mailbox is found from that mailbox's folder.
+    let mail = rusqlite::Connection::open(store.db_path.clone()).unwrap();
+    let mut m = fixture::messages().remove(1);
+    m.id = 1600;
+    m.raw = "From: Bob <bob@example.com>\r\nSubject: Okapi\r\nMessage-ID: <o1600@example.com>\r\n\r\nokapi sighting\r\n".into();
+    fixture::write_message(&store.version_dir, &mail, &m).unwrap();
+    indexer.full_build(&mut conn, false).unwrap();
+    assert_eq!(walked(&conn).as_deref(), Some("12345"));
+    assert_eq!(ids(&search(&env, q("okapi"))), vec![1600]);
+
+    // A message whose file Mail has not downloaded: one walk, then remembered.
+    let inbox: i64 = mail.query_row("SELECT ROWID FROM mailboxes WHERE url LIKE '%/INBOX'", [], |r| r.get(0)).unwrap();
+    mail.execute(
+        "INSERT INTO messages(ROWID, sender, subject_prefix, subject, date_sent, date_received, mailbox, flags, read, flagged, deleted, size, conversation_id)
+         VALUES(1700, 1, '', 1, 1793000000, 1793000000, ?1, 0, 0, 0, 0, 10, 1700)",
+        [inbox],
+    )
+    .unwrap();
+    indexer.full_build(&mut conn, false).unwrap();
+    let after_walk = walked(&conn);
+    assert_ne!(after_walk.as_deref(), Some("12345"), "an unknown missing file triggers a walk");
+    let unlocated: i64 = conn.query_row("SELECT count(*) FROM unlocated WHERE id = 1700", [], |r| r.get(0)).unwrap();
+    assert_eq!(unlocated, 1);
+    index::set_meta(&conn, "last_walk", &(crate::util::now_unix() - 60).to_string()).unwrap();
+    let before = walked(&conn);
+    indexer.full_build(&mut conn, false).unwrap();
+    assert_eq!(walked(&conn), before, "a known missing file does not trigger another walk");
+}
