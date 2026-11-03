@@ -51,11 +51,11 @@ Timbre takes the best ideas of the existing open-source Apple Mail connectors an
 
 A synthetic mailbox of 20,000 messages (788 MB: HTML newsletters, replies with quoted history, attachments, French, English and Spanish text with a realistic vocabulary), indexed on a small 2-core virtual machine:
 
-| | v0.1.0 | v0.3.1 |
+| | v0.1.0 | v0.4.0 |
 |---|---|---|
 | Full index build | 28.6 s | 13.0 s |
 | Index size on disk | 298 MB | 124 MB |
-| Search, median | 42 ms | 17 ms |
+| Search, median | 42 ms | 18 ms |
 | Search, 95th percentile | 62 ms | 30 ms |
 
 What made the difference: messages are parsed on every core while a single writer commits large transactions, with FTS5's merging deferred and a 64 MiB pending-terms table; the text kept for snippets is stored once, compressed with zstd; there is no prefix index; snippets and details are computed for the returned page only, and very broad queries are ranked over their 10,000 most recent matches. Index-time work that only matters when reading a message is skipped. To reproduce: `timbre dev-corpus /tmp/corpus 20000` (debug build), then `timbre index --rebuild` and `timbre bench` from a release build with `TIMBRE_MAIL_ROOT`, `TIMBRE_ACCOUNTS_DB` and `TIMBRE_DATA_DIR` pointing at it. Figures from a real 250,000-message mailbox on a Mac will follow.
