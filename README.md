@@ -62,11 +62,11 @@ What made the difference: messages are parsed on every core while a single write
 
 ## Install
 
-1. Download `timbre-<version>.mcpb` from [Releases](https://github.com/alejandrosml/timbre/releases) and double-click it; Claude Desktop installs it.
+1. Download `timbre-<version>.mcpb` from [Releases](https://github.com/alejandrosml/timbre/releases) and double-click it; Claude Desktop installs it. Releases are signed with a Developer ID and notarized by Apple.
 2. Give Timbre **Full Disk Access** (System Settings › Privacy & Security › Full Disk Access › +). Ask Claude for *Timbre status*: it tells you the exact file to add. Then turn the extension off and on in Claude's settings.
 3. The first time you ask for a draft or a move, macOS asks whether Timbre may control Mail: click OK.
 
-The full-text index builds in the background on first launch (a few minutes for a large mailbox); searches work meanwhile on subjects and senders.
+The full-text index builds in the background on first launch (about a minute per 100,000 messages on a recent Mac); searches work meanwhile on subjects and senders. Afterwards, new mail is searchable within seconds.
 
 ## Tools
 

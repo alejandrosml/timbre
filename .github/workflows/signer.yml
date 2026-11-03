@@ -45,7 +45,17 @@ jobs:
           mkdir -p pkg/server
           printf '{"name": "timbre", "version": "9.9.9"}\n' > pkg/manifest.json
           printf 'int main(void){return 0;}\n' > m.c && clang -o pkg/server/timbre m.c
-          (cd pkg && zip -qr ../timbre-9.9.9.mcpb .) && mv timbre-9.9.9.mcpb ~/Downloads/
+          # Like mcpb, store modes without a file type (ditto then drops them).
+          python3 - <<'EOF'
+          import zipfile
+          with zipfile.ZipFile("timbre-9.9.9.mcpb", "w", zipfile.ZIP_DEFLATED) as z:
+              for path, mode in [("manifest.json", 0o644), ("server/timbre", 0o755)]:
+                  info = zipfile.ZipInfo(path)
+                  info.create_system = 3
+                  info.external_attr = mode << 16
+                  z.writestr(info, open("pkg/" + path, "rb").read())
+          EOF
+          mv timbre-9.9.9.mcpb ~/Downloads/
           TIMBRE_SIGNER_TEST=1 bash $S sign-run timbre-9.9.9.mcpb || true
           cat "$HOME/Library/Application Support/Timbre/signing/last-sign.log"
           test -f ~/Downloads/timbre-9.9.9-test.mcpb
@@ -56,6 +66,7 @@ jobs:
           grep -q "flags=0x10000(runtime)" sig.txt
           codesign --display --entitlements - out/server/timbre 2>&1 | grep -q "automation.apple-events"
           test -x out/server/timbre
+          zipinfo ~/Downloads/timbre-9.9.9-test.mcpb | grep -q 'rwxr-xr-x.*server/timbre'
           after="$(security list-keychains -d user)"
           [ "$before" = "$after" ] || { echo "keychain search list not restored"; exit 1; }
           bash $S status

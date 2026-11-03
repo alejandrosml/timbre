@@ -125,9 +125,11 @@ install() {
   status
 }
 
+SIGN_TMP=""
 sign_run() {
   local file="$1" tmp out version id
   exec >"$LOG" 2>&1
+  umask 022 # the package's files must stay readable, and the server executable
   echo "started $(date '+%Y-%m-%d %H:%M:%S') — $file"
   [[ "$file" =~ ^timbre-[0-9]+\.[0-9]+\.[0-9]+\.mcpb$ ]] || die "unexpected file name"
   [ -f "$DL/$file" ] || die "$file is not in Downloads"
@@ -137,8 +139,12 @@ sign_run() {
   local testing="${TIMBRE_SIGNER_TEST:-0}"
   [ "$testing" = 1 ] || [ -f "$NOTARY" ] || die "notarization is not set up"
   tmp="$(mktemp -d)"
-  trap 'search_restore; rm -rf "$tmp"' EXIT
+  SIGN_TMP="$tmp" # the EXIT trap runs after this function's locals are gone
+  trap 'search_restore; [ -n "$SIGN_TMP" ] && rm -rf "$SIGN_TMP"' EXIT
   ditto -x -k "$DL/$file" "$tmp/x" || die "cannot unpack $file"
+  # Zip entries written by mcpb carry no file type, so ditto drops their
+  # modes: restore them (the signature does not cover file modes).
+  chmod -R u+rwX,go+rX "$tmp/x" && chmod 755 "$tmp/x/server/timbre"
   grep -q '"name": *"timbre"' "$tmp/x/manifest.json" || die "$file is not a Timbre package"
   version="$(sed -n 's/.*"version": *"\([0-9.]*\)".*/\1/p' "$tmp/x/manifest.json" | head -1)"
   cat > "$tmp/entitlements.plist" <<'PLIST'

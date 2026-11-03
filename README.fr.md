@@ -62,11 +62,11 @@ Ce qui a fait la différence : les messages sont analysés sur tous les cœurs p
 
 ## Installation
 
-1. Téléchargez `timbre-<version>.mcpb` dans les [Releases](https://github.com/alejandrosml/timbre/releases) et double-cliquez dessus : Claude Desktop l'installe.
+1. Téléchargez `timbre-<version>.mcpb` dans les [Releases](https://github.com/alejandrosml/timbre/releases) et double-cliquez dessus : Claude Desktop l'installe. Les versions publiées sont signées avec un Developer ID et notarisées par Apple.
 2. Donnez à Timbre l'**accès complet au disque** (Réglages Système › Confidentialité et sécurité › Accès complet au disque › +). Demandez à Claude l'*état de Timbre* : il vous indique le fichier exact à ajouter. Désactivez puis réactivez ensuite l'extension dans les réglages de Claude.
 3. La première fois que vous demandez un brouillon ou un déplacement, macOS demande si Timbre peut contrôler Mail : cliquez sur OK.
 
-L'index plein texte se construit en arrière-plan au premier lancement (quelques minutes pour une grosse boîte) ; en attendant, la recherche porte sur les sujets et les expéditeurs.
+L'index plein texte se construit en arrière-plan au premier lancement (environ une minute pour 100 000 messages sur un Mac récent) ; en attendant, la recherche porte sur les sujets et les expéditeurs. Ensuite, un nouveau mail est cherchable en quelques secondes.
 
 ## Outils
 
