@@ -52,3 +52,17 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install 1.98 --profile minimal
       - run: cargo +1.98 check --locked --all-targets
+
+  deny:
+    name: Licences and advisories (cargo-deny)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        with:
+          tool: cargo-deny
+      - run: cargo deny --locked check

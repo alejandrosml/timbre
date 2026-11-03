@@ -8,7 +8,7 @@ version = 2
 [licenses]
 version = 2
 # MPL-2.0 comes with the HTML parser (scraper, cssparser, selectors).
-allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "MPL-2.0"]
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "MPL-2.0"]
 confidence-threshold = 0.9
 
 [bans]

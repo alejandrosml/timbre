@@ -39,7 +39,7 @@ pub struct SearchParams {
     pub include_junk_and_trash: Option<bool>,
     /// "relevance" (default with a query) or "newest" / "oldest".
     pub sort: Option<String>,
-    /// Results per page, 1-100 (default 20).
+    /// Results per page, 1-50 (default 20). Use next_offset for more.
     pub limit: Option<u32>,
     /// Skip this many results (pagination).
     pub offset: Option<u32>,
@@ -345,7 +345,7 @@ pub fn search(
     let unread = req.unread.or(parsed.unread);
     let flagged = req.flagged.or(parsed.flagged);
     let has_attachments = req.has_attachments.or(parsed.has_attachments);
-    let limit = req.limit.unwrap_or(20).clamp(1, 100);
+    let limit = req.limit.unwrap_or(20).clamp(1, 50);
     let offset = req.offset.unwrap_or(0).min(50_000);
     let fts = build_fts(&parsed.text);
     let s = &store.schema;
