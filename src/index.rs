@@ -29,6 +29,8 @@ pub const SCHEMA_VERSION: &str = "3";
 /// Longest body text indexed per message (characters).
 const MAX_INDEXED_BODY: usize = 32_000;
 const CHUNK: usize = 256;
+/// How often Mail's database is checked for changes.
+const POLL: Duration = Duration::from_secs(2);
 /// Up to this many unindexed messages, their files are found from their
 /// mailbox's folder instead of walking the whole store.
 const PREDICT_LIMIT: usize = 5000;
@@ -792,8 +794,24 @@ impl Indexer {
             tracing::warn!("index build failed: {e:#}");
             self.progress.fail(&e);
         }
+        // Mail's commits change the attached database's data_version: polling
+        // it costs a page read, so new mail is indexed within seconds instead
+        // of at the next 15 s tick. Pending files are retried every 15 s, and
+        // a sync still runs every minute in any case.
+        let mut last_version: Option<i64> = None;
+        let mut last_sync = Instant::now();
         loop {
-            std::thread::sleep(Duration::from_secs(15));
+            std::thread::sleep(POLL);
+            let version = conn.query_row("PRAGMA mail.data_version", [], |r| r.get::<_, i64>(0)).ok();
+            let due = version.is_none()
+                || version != last_version
+                || (!self.pending.is_empty() && last_sync.elapsed() >= Duration::from_secs(15))
+                || last_sync.elapsed() >= Duration::from_secs(60);
+            if !due {
+                continue;
+            }
+            last_version = version;
+            last_sync = Instant::now();
             if mode == store::OpenMode::Immutable {
                 // Opened while Mail was closed: switch to a live read-only
                 // view as soon as Mail runs again (immutable reads would

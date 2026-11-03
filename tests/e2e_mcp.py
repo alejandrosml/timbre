@@ -76,5 +76,32 @@ assert any("DMARC" in w for w in m["warnings"])
 r = rpc("tools/call", {"name": "search_mail", "arguments": {"mailbox": "nowhere"}})
 assert r.get("isError") and "list_mailboxes" in r["content"][0]["text"]
 print("errors guide the model: ok")
+
+# New mail is indexed within seconds (the server watches Mail's database).
+import sqlite3
+v10 = f"{root}/Library/Mail/V10"
+mail = sqlite3.connect(f"{v10}/MailData/Envelope Index")
+inbox_url = next(u for (u,) in mail.execute("SELECT url FROM mailboxes") if u.endswith("/INBOX"))
+inbox = mail.execute("SELECT ROWID FROM mailboxes WHERE url = ?", (inbox_url,)).fetchone()[0]
+account = inbox_url.split("/")[2]
+store_dir = next(os.scandir(f"{v10}/{account}/INBOX.mbox")).path  # the store UUID folder
+raw = "From: Zed <zed@example.com>\r\nSubject: Quokka\r\nMessage-ID: <q3001@example.com>\r\n\r\nquokka report\r\n"
+# Mail numbers new messages above every existing one; 3001 lives in Data/3/Messages.
+os.makedirs(f"{store_dir}/Data/3/Messages", exist_ok=True)
+with open(f"{store_dir}/Data/3/Messages/3001.emlx", "w") as f:
+    f.write(f"{len(raw)}\n{raw}<?xml version=\"1.0\"?><plist version=\"1.0\"><dict/></plist>\n")
+mail.execute("INSERT INTO subjects(subject) VALUES('Quokka')")
+subj = mail.execute("SELECT ROWID FROM subjects WHERE subject = 'Quokka'").fetchone()[0]
+mail.execute("INSERT INTO messages(ROWID, sender, subject_prefix, subject, date_sent, date_received, mailbox, flags, read, flagged, deleted, size, conversation_id) "
+             "VALUES(3001, 1, '', ?, 1793100000, 1793100000, ?, 0, 0, 0, 0, 100, 3001)", (subj, inbox))
+mail.commit(); mail.close()
+start = time.time()
+while time.time() - start < 20:
+    if [h["id"] for h in call("search_mail", {"query": "quokka"})["results"]] == [3001]:
+        break
+    time.sleep(0.25)
+lag = time.time() - start
+print(f"new mail searchable after {lag:.1f} s")
+assert lag < 6, "new mail should be indexed within a few seconds"
 p.stdin.close(); p.wait(timeout=5)
 print("E2E OK")
