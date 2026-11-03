@@ -6,6 +6,18 @@ All notable changes are listed here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- Found by an independent review, each covered by a regression test:
+  a forced rebuild now empties the index in one transaction, and tables
+  left disagreeing by an interrupted run are detected and rebuilt; the
+  index file is never deleted (outdated tables are dropped in place, and
+  a database that is not Timbre's is refused); paging stays stable when
+  filters thin a broad query; RTF typed `text/rtf` goes to the converter;
+  documents with more than 8 MB of text are truncated instead of failing;
+  `percent_decode` no longer panics on non-ASCII mailbox names; the HTML
+  nesting guard cannot be bypassed with stray end tags or `<div/>`, and
+  its own scans are linear. Long words, file names and scheme-less links
+  are indexed; only machine strings (runs of 41+ letters and digits) are
+  dropped.
 - HTML nested more than 512 levels deep no longer stalls the parser (tree
   builders are quadratic in depth): a linear pre-scan withholds its text
   and warns, as no real mail is built that way.

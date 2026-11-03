@@ -122,7 +122,8 @@ fn main() -> Result<()> {
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
-    Ok(tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?)
+    // Tool calls run on blocking threads: give them room for deep messages.
+    Ok(tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_stack_size(8 << 20).enable_all().build()?)
 }
 
 fn serve(cfg: Config) -> Result<()> {
@@ -139,7 +140,10 @@ fn serve(cfg: Config) -> Result<()> {
             });
         }
     };
-    drop(index::open(&cfg, &store, true)?);
+    if let Err(e) = index::open(&cfg, &store, true) {
+        // Search still works without the index (subjects and senders).
+        tracing::warn!("index unavailable: {e:#}");
+    }
     // Parsing threads for the index: utility priority, and roomy stacks for
     // hostile, deeply nested messages.
     let _ = rayon::ThreadPoolBuilder::new()

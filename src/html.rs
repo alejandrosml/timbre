@@ -263,7 +263,7 @@ struct Walker<'a> {
 /// Real mail nests tables a few dozen levels deep at most. Deeper content
 /// is treated as hidden: it keeps the recursive walk off the stack limit
 /// and cannot be used to smuggle text past the hidden-text checks.
-const MAX_DEPTH: usize = 160;
+const MAX_DEPTH: usize = 320;
 
 fn short_url(url: &str) -> String {
     if url.chars().count() <= 80 {
@@ -414,36 +414,68 @@ impl Walker<'_> {
 }
 
 /// Convert an HTML body to readable text, dropping hidden content.
-/// Elements that never contain others, or whose end tag is usually left out.
-const NO_NESTING: &[&[u8]] = &[
+/// Elements that never contain others.
+const VOID: &[&[u8]] = &[
     b"br", b"img", b"hr", b"meta", b"link", b"input", b"col", b"area", b"base", b"wbr", b"source", b"track", b"embed",
-    b"param", b"p", b"li", b"td", b"th", b"tr", b"option", b"dt", b"dd",
+    b"param", b"keygen",
 ];
+/// Elements whose end tag is usually left out: a new one closes the last.
+const IMPLIED_END: &[&[u8]] = &[b"p", b"li", b"td", b"th", b"tr", b"option", b"dt", b"dd"];
+/// Nesting depth (as estimated by [`too_deep`]) above which the tree is not built.
+const MAX_PARSE_DEPTH: usize = 2000;
 
 /// Tree builders spend quadratic time on very deep nesting (each new element
 /// scans the open-element stack), so a few hundred kilobytes of nested tags
 /// can stall a parse for a minute. A linear scan estimates the depth first.
 fn too_deep(html: &str, limit: usize) -> bool {
+    // Linear: every byte is looked at a bounded number of times. End tags
+    // only close an element of that name that is open, the self-closing
+    // slash only counts inside svg/math (HTML ignores it), and elements with
+    // implied end tags replace their open sibling instead of nesting.
     let b = html.as_bytes();
-    let (mut depth, mut i) = (0usize, 0usize);
+    let mut open: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
+    let (mut depth, mut foreign, mut i) = (0usize, 0usize, 0usize);
     while let Some(off) = b[i..].iter().position(|&c| c == b'<') {
-        let j = i + off + 1;
-        i = j;
-        match b.get(j) {
-            Some(b'/') => depth = depth.saturating_sub(1),
-            Some(c) if c.is_ascii_alphabetic() => {
-                let end = b[j..].iter().position(|c| !c.is_ascii_alphanumeric()).map_or(b.len(), |k| j + k);
-                let name = b[j..end].to_ascii_lowercase();
-                let close = b[end..].iter().position(|&c| c == b'>').map(|k| end + k);
-                let self_closing = close.is_some_and(|k| k > 0 && b[k - 1] == b'/');
-                if !self_closing && !NO_NESTING.contains(&name.as_slice()) {
-                    depth += 1;
-                    if depth > limit {
-                        return true;
-                    }
-                }
+        let at = i + off + 1;
+        let closing = b.get(at) == Some(&b'/');
+        let name_start = if closing { at + 1 } else { at };
+        if !b.get(name_start).is_some_and(u8::is_ascii_alphabetic) {
+            i = at;
+            continue;
+        }
+        let name_end =
+            b[name_start..].iter().position(|c| !c.is_ascii_alphanumeric()).map_or(b.len(), |k| name_start + k);
+        let Some(gt) = b[name_end..].iter().position(|&c| c == b'>').map(|k| name_end + k) else {
+            return false; // no complete tag after this point
+        };
+        i = gt + 1;
+        let name = b[name_start..name_end].to_ascii_lowercase();
+        if VOID.contains(&name.as_slice()) {
+            continue;
+        }
+        let is_foreign = name == b"svg" || name == b"math";
+        if closing {
+            if let Some(n) = open.get_mut(&name)
+                && *n > 0
+            {
+                *n -= 1;
+                depth -= 1;
+                foreign -= usize::from(is_foreign);
             }
-            _ => {}
+            continue;
+        }
+        if foreign > 0 && b[gt - 1] == b'/' {
+            continue;
+        }
+        let n = open.entry(name.clone()).or_insert(0);
+        if IMPLIED_END.contains(&name.as_slice()) && *n > 0 {
+            continue; // closes the previous one: same depth
+        }
+        *n += 1;
+        depth += 1;
+        foreign += usize::from(is_foreign);
+        if depth > limit {
+            return true;
         }
     }
     false
@@ -454,6 +486,7 @@ fn too_deep(html: &str, limit: usize) -> bool {
 fn strip_tags(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let lower = html.to_ascii_lowercase();
+    let mut missing = [false; 4]; // closers already searched for in vain
     let mut i = 0;
     while i < html.len() {
         let Some(off) = html[i..].find('<') else {
@@ -462,9 +495,16 @@ fn strip_tags(html: &str) -> String {
         };
         out.push_str(&html[i..i + off]);
         let tag = i + off;
-        let skip_to = ["script", "style", "head", "title"].iter().find_map(|t| {
-            lower[tag + 1..].starts_with(t).then(|| lower[tag..].find(&format!("</{t}")).map(|k| tag + k))?
-        });
+        let mut skip_to = None;
+        for (k, t) in ["script", "style", "head", "title"].iter().enumerate() {
+            if !missing[k] && lower[tag + 1..].starts_with(t) {
+                match lower[tag..].find(&format!("</{t}")) {
+                    Some(at) => skip_to = Some(tag + at),
+                    None => missing[k] = true,
+                }
+                break;
+            }
+        }
         let from = skip_to.unwrap_or(tag);
         match html[from..].find('>') {
             Some(k) => {
@@ -483,8 +523,8 @@ fn strip_tags(html: &str) -> String {
 }
 
 pub fn to_text(html: &str) -> HtmlText {
-    if too_deep(html, 512) {
-        // No real mail nests 512 levels deep. Styles cannot be checked without
+    if too_deep(html, MAX_PARSE_DEPTH) {
+        // No real mail nests thousands of levels deep. Styles cannot be checked without
         // the tree, so the whole text is withheld like hidden text; a sample
         // is kept for the prompt-injection scan.
         let (clean, invisible) = strip_invisible(&strip_tags(html));
@@ -534,9 +574,23 @@ mod tests {
         assert!(t.degraded);
         assert!(t.text.is_empty());
         assert!(t.hidden_chars > 0 && t.hidden_sample.contains("secret & more"), "{}", t.hidden_sample);
-        // Ordinary mail is untouched by the guard.
+        // Ordinary and sloppy mail is untouched by the guard.
         let normal = "<table><tr><td><p>a<p>b<br><img src=x><li>c</table>".repeat(500);
-        assert!(!too_deep(&normal, 512));
+        assert!(!too_deep(&normal, MAX_PARSE_DEPTH));
+        assert!(!too_deep(&"<font size=2>x".repeat(600), MAX_PARSE_DEPTH));
+        assert!(!too_deep(&"<svg><path d='M0'/></svg>".repeat(5000), MAX_PARSE_DEPTH));
+        // Bypass attempts: stray end tags, self-closing slashes, no '>' at all.
+        let n = 100_000;
+        for hostile in ["<div></x>".repeat(n), "<div/>".repeat(n), "<b><i>".repeat(n)] {
+            let t0 = std::time::Instant::now();
+            assert!(too_deep(&hostile, MAX_PARSE_DEPTH));
+            assert!(to_text(&hostile).degraded);
+            assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+        }
+        let t0 = std::time::Instant::now();
+        assert!(!too_deep(&"<br".repeat(n), MAX_PARSE_DEPTH));
+        assert!(strip_tags(&"<script>".repeat(n)).len() < 10 * n);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5));
         let t = to_text("<style>.x{}</style><div><b>Hi</b></div>");
         assert!(!t.degraded && t.text.trim() == "Hi", "{}", t.text);
     }

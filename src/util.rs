@@ -64,11 +64,12 @@ pub fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+            && let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
         {
-            out.push(v);
+            out.push((h * 16 + l) as u8);
             i += 3;
             continue;
         }
@@ -177,6 +178,13 @@ pub fn domain_of(addr: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_decode_never_slices_inside_a_character() {
+        assert_eq!(percent_decode("Promo%aé"), "Promo%aé");
+        assert_eq!(percent_decode("%C3%A9t%C3%A9%2"), "été%2");
+        assert_eq!(percent_decode("Sent%20Messages"), "Sent Messages");
+    }
 
     #[test]
     fn uri_encodes_spaces() {

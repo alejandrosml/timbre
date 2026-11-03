@@ -495,10 +495,13 @@ pub fn search(
         .query_row(&count_sql, rusqlite::params_from_iter(count_args.iter()), |r| r.get::<_, i64>(0))
         .map_err(err)? as u64;
 
-    // Very broad queries are ranked over their most recent matches only:
-    // bm25 costs a little for every match, and recency weighs in anyway.
+    // Very broad queries are ranked over their RANK_WINDOW most recent
+    // matches: bm25 costs a little for every match, and recency weighs in
+    // anyway. The choice depends on the query only, never on the page, so
+    // paging is stable: the window is kept if, after filters, it still holds
+    // COUNT_CAP matches, and the result list then ends with it.
     let mut window = String::new();
-    if use_fts && order.contains("bm25") && (offset + limit) as usize <= RANK_WINDOW / 2 {
+    if use_fts && order.contains("bm25") && total > COUNT_CAP {
         let floor: Option<i64> = conn
             .query_row(
                 "SELECT rowid FROM fts WHERE fts MATCH ?1 ORDER BY rowid DESC LIMIT 1 OFFSET ?2",
@@ -508,7 +511,16 @@ pub fn search(
             .optional()
             .map_err(err)?;
         if let Some(floor) = floor {
-            window = format!("fts.rowid >= {floor} AND ");
+            let clause = format!("fts.rowid >= {floor} AND ");
+            let sql = format!(
+                "SELECT count(*) FROM (SELECT 1 FROM {from_sql} {joins} WHERE {fts_clause}{clause}{where_sql} LIMIT {COUNT_CAP})"
+            );
+            let in_window: u64 = conn
+                .query_row(&sql, rusqlite::params_from_iter(count_args.iter()), |r| r.get::<_, i64>(0))
+                .map_err(err)? as u64;
+            if in_window >= COUNT_CAP {
+                window = clause;
+            }
         }
     }
     select_args.extend(f.args.iter().cloned());
@@ -530,11 +542,7 @@ pub fn search(
         let ids = stmt.query_map(rusqlite::params_from_iter(select_args.iter()), |r| r.get(0)).map_err(err)?;
         ids.collect::<rusqlite::Result<Vec<i64>>>().map_err(err)
     };
-    let mut ranked = rank(&window)?;
-    if !window.is_empty() && (ranked.len() as u32) < fetch && total > offset as u64 + ranked.len() as u64 {
-        // Filters removed most of the window: rank every match instead.
-        ranked = rank("")?;
-    }
+    let ranked = rank(&window)?;
 
     let mut metas: HashMap<i64, Meta> = store
         .get_metas(conn, &ranked)

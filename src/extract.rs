@@ -52,12 +52,13 @@ pub fn to_text(name: &str, mime_type: &str, bytes: &[u8]) -> Result<String, Stri
         out.push_str(&format!("Subject: {}\n\n{}", p.subject, p.body));
         return Ok(out);
     }
+    // Before the plain-text case: RTF is often typed text/rtf.
+    if let Some(kind) = native_kind(&e, &m) {
+        return native::convert(kind, bytes).map(|t| crate::util::strip_invisible(&t).0);
+    }
     if texty {
         let (clean, _) = crate::util::strip_invisible(&decode_text(bytes));
         return Ok(clean);
-    }
-    if let Some(kind) = native_kind(&e, &m) {
-        return native::convert(kind, bytes).map(|t| crate::util::strip_invisible(&t).0);
     }
     Err(format!(
         "Reading text from '{name}' ({mime_type}) is not supported: Timbre reads text, HTML, mail, PDF and \
@@ -110,8 +111,8 @@ mod native {
     const PDF_SCRIPT: &str = r#"function run(argv) {
   try { ObjC.import('PDFKit'); } catch (e) { ObjC.import('Quartz'); }
   const doc = $.PDFDocument.alloc.initWithURL($.NSURL.fileURLWithPath(argv[0]));
-  if (doc.isNil()) return 'unreadable';
-  if (doc.isLocked) return 'locked';
+  if (doc.isNil()) return '\u0001unreadable';
+  if (doc.isLocked) return '\u0001locked';
   const text = doc.string;
   return text.isNil() ? '' : text.js;
 }"#;
@@ -187,6 +188,9 @@ mod native {
         let reader = std::thread::spawn(move || {
             let mut out = Vec::new();
             let _ = (&mut stdout).take(MAX_OUTPUT).read_to_end(&mut out);
+            // Keep draining: a converter killed by a closed pipe would turn
+            // a long document into an error instead of a truncated text.
+            let _ = std::io::copy(&mut stdout, &mut std::io::sink());
             out
         });
         let started = Instant::now();
@@ -221,6 +225,16 @@ mod tests {
         assert_eq!(native_kind("docx", "application/octet-stream"), Some(NativeKind::Word("docx")));
         assert_eq!(native_kind("", "application/msword"), Some(NativeKind::Word("doc")));
         assert_eq!(native_kind("exe", "application/octet-stream"), None);
+    }
+
+    #[test]
+    fn rtf_typed_as_text_goes_to_the_converter() {
+        let r = to_text("note.rtf", "text/rtf", br"{\rtf1\ansi Bonjour}");
+        if cfg!(target_os = "macos") {
+            assert_eq!(r.unwrap().trim(), "Bonjour");
+        } else {
+            assert!(r.unwrap_err().contains("only be read on macOS"));
+        }
     }
 
     #[test]

@@ -107,10 +107,42 @@ fn index_token(tok: &str) -> Option<Cow<'_, str>> {
         let host = host.get(..4).filter(|h| h.eq_ignore_ascii_case("www.")).map_or(host, |_| &host[4..]);
         return (!host.is_empty() && host.len() <= 60).then(|| Cow::Owned(host.to_string()));
     }
-    if tok.len() > 40 && tok.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=_-.%:&?#~".contains(&b)) {
-        return None;
+    drop_machine_runs(tok)
+}
+
+/// Base64, hex digests and tracking codes are long unbroken runs of ASCII
+/// letters and digits; real words are not. Only those runs are dropped, so
+/// `report_final_2026.xlsx` or `site.com/a/b` keep their words.
+fn drop_machine_runs(tok: &str) -> Option<Cow<'_, str>> {
+    const MAX_RUN: usize = 40;
+    let mut run = 0;
+    let long = tok.bytes().any(|c| {
+        run = if c.is_ascii_alphanumeric() { run + 1 } else { 0 };
+        run > MAX_RUN
+    });
+    if !long {
+        return Some(Cow::Borrowed(tok));
     }
-    Some(Cow::Borrowed(tok))
+    let mut out = String::with_capacity(tok.len());
+    let mut start: Option<usize> = None;
+    for (i, c) in tok.char_indices() {
+        if c.is_ascii_alphanumeric() {
+            start.get_or_insert(i);
+            continue;
+        }
+        if let Some(s) = start.take()
+            && i - s <= MAX_RUN
+        {
+            out.push_str(&tok[s..i]);
+        }
+        out.push(c);
+    }
+    if let Some(s) = start
+        && tok.len() - s <= MAX_RUN
+    {
+        out.push_str(&tok[s..]);
+    }
+    out.chars().any(char::is_alphanumeric).then_some(Cow::Owned(out))
 }
 
 #[cfg(test)]
@@ -141,6 +173,21 @@ mod tests {
         let t = for_index(&format!("Voir https://tracker.example.com/x?id=1 et www.site.fr ici\n{long} fin"));
         assert_eq!(t, "Voir tracker.example.com et site.fr ici\nfin\n");
         assert_eq!(for_index("Lien (https://user@zoom.us:443/j/1?pwd=x)."), "Lien zoom.us\n");
+    }
+
+    #[test]
+    fn only_machine_runs_are_dropped() {
+        let code = "Z".repeat(41);
+        assert_eq!(for_index(&format!("id={code}&utm=x")), "id=&utm=x\n");
+        assert_eq!(
+            for_index("report_final_version_2026_q3_budget_review.xlsx"),
+            "report_final_version_2026_q3_budget_review.xlsx\n"
+        );
+        assert_eq!(
+            for_index("github.com/alejandrosml/timbre/blob/main/README.md"),
+            "github.com/alejandrosml/timbre/blob/main/README.md\n"
+        );
+        assert_eq!(for_index(&code), "");
     }
 
     #[test]

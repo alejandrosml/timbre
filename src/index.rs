@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::Serialize;
@@ -114,17 +114,30 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
         | OpenFlags::SQLITE_OPEN_URI
         | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let path = cfg.index_path();
-    let mut conn = Connection::open_with_flags(&path, flags).with_context(|| format!("opening {}", path.display()))?;
-    if writable && stale_schema(&conn, store) {
-        // A new index format: start from an empty file rather than dropping
-        // tables, which would leave the old file's size behind.
-        drop(conn);
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-        }
-        conn = Connection::open_with_flags(&path, flags).with_context(|| format!("opening {}", path.display()))?;
-    }
+    let conn = Connection::open_with_flags(&path, flags).with_context(|| format!("opening {}", path.display()))?;
     register_functions(&conn)?;
+    if writable {
+        match classify(&conn, store)? {
+            IndexFile::Empty | IndexFile::Current => {}
+            IndexFile::Foreign => {
+                bail!("{} is not a Timbre index; move it away or set TIMBRE_DATA_DIR to another folder", path.display())
+            }
+            IndexFile::Outdated => {
+                // Another format or another Mail store: drop Timbre's tables
+                // (never the file: another process may have it open).
+                conn.execute_batch(
+                    "BEGIN IMMEDIATE;
+                     DROP TABLE IF EXISTS fts;
+                     DROP VIEW IF EXISTS fts_src;
+                     DROP TABLE IF EXISTS texts;
+                     DROP TABLE IF EXISTS docs;
+                     DELETE FROM meta;
+                     COMMIT;",
+                )?;
+                let _ = conn.execute_batch("VACUUM;"); // give the old index's space back
+            }
+        }
+    }
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch(
         "PRAGMA temp_store = MEMORY;
@@ -169,6 +182,11 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
         )?;
         set_meta(&conn, "schema", SCHEMA_VERSION)?;
         set_meta(&conn, "mail_dir", &current_dir)?;
+        // A build that was killed may have left its bulk-load settings.
+        conn.execute_batch(
+            "INSERT INTO fts(fts, rank) VALUES('automerge', 4);
+             INSERT INTO fts(fts, rank) VALUES('hashsize', 1048576);",
+        )?;
     }
     let mode = store::attach(&conn, &store.db_path)?;
     if !writable {
@@ -177,26 +195,31 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
     Ok((conn, mode))
 }
 
-/// True when the index file was written by another format or for another
-/// Mail store, and must be rebuilt.
-fn stale_schema(conn: &Connection, store: &Store) -> bool {
-    let read = |key: &str| -> Option<String> {
-        conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional().ok().flatten()
-    };
-    let has_meta = conn
-        .query_row("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'meta'", [], |_| Ok(()))
-        .optional()
-        .ok()
-        .flatten()
-        .is_some();
+enum IndexFile {
+    Empty,
+    Current,
+    Outdated,
+    Foreign,
+}
+
+/// What is at the index path: nothing yet, Timbre's index (current or for
+/// another format or Mail store), or some other database.
+fn classify(conn: &Connection, store: &Store) -> Result<IndexFile> {
+    let objects: i64 = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0))?;
+    let has_meta: bool =
+        conn.query_row("SELECT count(*) > 0 FROM sqlite_schema WHERE type = 'table' AND name = 'meta'", [], |r| {
+            r.get(0)
+        })?;
     if !has_meta {
-        // A new file, or one from before any schema: rebuild unless empty.
-        return conn
-            .query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get::<_, i64>(0))
-            .map_or(true, |n| n > 0);
+        return Ok(if objects == 0 { IndexFile::Empty } else { IndexFile::Foreign });
     }
+    let read = |key: &str| -> Result<Option<String>> {
+        Ok(conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional()?)
+    };
     let current_dir = store.version_dir.to_string_lossy().to_string();
-    read("schema").as_deref() != Some(SCHEMA_VERSION) || read("mail_dir").is_some_and(|d| d != current_dir)
+    let same_format = read("schema")?.as_deref() == Some(SCHEMA_VERSION);
+    let same_store = read("mail_dir")?.is_none_or(|d| d == current_dir);
+    Ok(if same_format && same_store { IndexFile::Current } else { IndexFile::Outdated })
 }
 
 /// zstd level 1 with one reused context per thread. On mail text it beat
@@ -348,6 +371,25 @@ pub fn background_priority() {
     };
 }
 
+/// Empty the index in one transaction: docs, stored text and FTS entries
+/// always agree, even if the process stops halfway.
+fn clear(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute_batch("DELETE FROM docs; DELETE FROM texts; INSERT INTO fts(fts) VALUES('delete-all');")?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Every indexed document has stored text and an FTS entry, and nothing else.
+fn consistent(conn: &Connection) -> Result<bool> {
+    let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0));
+    let indexed = count("SELECT count(*) FROM docs WHERE status = 0")?;
+    let texts = count("SELECT count(*) FROM texts")?;
+    let fts = count("SELECT count(*) FROM fts_docsize")?;
+    let orphans = count("SELECT count(*) FROM texts WHERE id NOT IN (SELECT id FROM docs WHERE status = 0)")?;
+    Ok(indexed == texts && texts == fts && orphans == 0)
+}
+
 /// Runs one indexing step, turning a panic into an error so the loop goes on.
 fn guarded<T>(what: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
@@ -426,7 +468,13 @@ impl Indexer {
         self.progress.phase.store(PHASE_SCANNING, Ordering::Relaxed);
         self.store.reload_mailboxes(conn)?;
         if force {
-            conn.execute_batch("DELETE FROM docs; DELETE FROM texts; INSERT INTO fts(fts) VALUES('delete-all');")?;
+            clear(conn)?;
+        }
+        if !force && !consistent(conn)? {
+            // Left by an interrupted older version: start over rather than
+            // build on an index whose FTS entries and stored text disagree.
+            tracing::warn!("index: inconsistent tables, rebuilding from scratch");
+            clear(conn)?;
         }
         let excluded = self.excluded_mailboxes();
         let live = self.store.live_messages(conn)?;

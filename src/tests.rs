@@ -268,3 +268,141 @@ fn people_the_user_wrote_to_rank_first() {
     assert_eq!(indexer.sync(&mut conn).unwrap(), 2);
     assert_eq!(ids(&search(&env, q("quarterly budget"))), vec![1502, 1501]);
 }
+
+fn integrity(conn: &rusqlite::Connection) {
+    conn.execute("INSERT INTO fts(fts, rank) VALUES('integrity-check', 1)", []).expect("FTS index consistent");
+}
+
+#[test]
+fn interrupted_rebuilds_leave_a_usable_index() {
+    let env = setup("interrupt", true);
+    let cfg = env.ctx.cfg.clone();
+    let store = env.ctx.store.clone();
+    let mut conn = index::open(&cfg, &store, true).unwrap();
+    let mut indexer = Indexer::new(cfg.clone(), store.clone(), env.ctx.progress.clone());
+
+    // A forced rebuild that fails halfway through emptying the index rolls
+    // back as a whole.
+    conn.execute_batch("CREATE TEMP TRIGGER stop BEFORE DELETE ON main.texts BEGIN SELECT RAISE(ABORT, 'stop'); END;")
+        .unwrap();
+    assert!(indexer.full_build(&mut conn, true).is_err());
+    conn.execute_batch("DROP TRIGGER temp.stop;").unwrap();
+    indexer.full_build(&mut conn, false).unwrap();
+    integrity(&conn);
+
+    // Tables left disagreeing (as an older version could) are detected and
+    // the index is rebuilt instead of failing on every start.
+    conn.execute_batch("DELETE FROM docs; DELETE FROM texts;").unwrap();
+    indexer.full_build(&mut conn, false).unwrap();
+    integrity(&conn);
+    assert_eq!(ids(&search(&env, q("facture"))), vec![101]);
+    let automerge: i64 = conn.query_row("SELECT v FROM fts_config WHERE k = 'automerge'", [], |r| r.get(0)).unwrap();
+    assert_eq!(automerge, 4);
+}
+
+#[test]
+fn index_file_is_never_deleted() {
+    let env = setup("indexfile", true);
+    let cfg = env.ctx.cfg.clone();
+    let store = env.ctx.store.clone();
+    let path = cfg.index_path();
+
+    // An outdated format is rebuilt in place: connections already open keep
+    // working on the same file.
+    let reader = index::open(&cfg, &store, false).unwrap();
+    {
+        let w = index::open(&cfg, &store, true).unwrap();
+        index::set_meta(&w, "schema", "0").unwrap();
+    }
+    let w = index::open(&cfg, &store, true).unwrap();
+    assert_eq!(index::get_meta(&w, "schema").as_deref(), Some(index::SCHEMA_VERSION));
+    index::set_meta(&w, "probe", "same file").unwrap();
+    let seen: String = reader.query_row("SELECT value FROM meta WHERE key = 'probe'", [], |r| r.get(0)).unwrap();
+    assert_eq!(seen, "same file");
+    drop((w, reader));
+
+    // Someone else's database at that path is refused, not deleted.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    let other = rusqlite::Connection::open(&path).unwrap();
+    other.execute_batch("CREATE TABLE notes(t TEXT); INSERT INTO notes VALUES('precious');").unwrap();
+    drop(other);
+    let err = index::open(&cfg, &store, true).unwrap_err();
+    assert!(format!("{err:#}").contains("not a Timbre index"), "{err:#}");
+    let kept: i64 =
+        rusqlite::Connection::open(&path).unwrap().query_row("SELECT count(*) FROM notes", [], |r| r.get(0)).unwrap();
+    assert_eq!(kept, 1);
+}
+
+#[test]
+fn paging_is_stable_when_filters_thin_a_broad_query() {
+    let env = setup("paging", true);
+    let cfg = env.ctx.cfg.clone();
+    let store = env.ctx.store.clone();
+    let mut ix = index::open(&cfg, &store, true).unwrap();
+    let mut mail = rusqlite::Connection::open(&store.db_path).unwrap();
+    let inbox: i64 = mail.query_row("SELECT ROWID FROM mailboxes WHERE url LIKE '%/INBOX'", [], |r| r.get(0)).unwrap();
+    mail.execute("INSERT INTO addresses(address, comment) VALUES('rare@x.com', 'Rare')", []).unwrap();
+    let rare = mail.last_insert_rowid();
+    mail.execute("INSERT INTO addresses(address, comment) VALUES('bulk@y.com', 'Bulk')", []).unwrap();
+    let bulk = mail.last_insert_rowid();
+    let now = crate::util::now_unix();
+    {
+        let mt = mail.transaction().unwrap();
+        let it = ix.transaction().unwrap();
+        let add = |id: i64, sender: i64, subject: &str, body: &str, date: i64| {
+            mt.execute("INSERT OR IGNORE INTO subjects(subject) VALUES(?1)", [subject]).unwrap();
+            let s: i64 =
+                mt.query_row("SELECT ROWID FROM subjects WHERE subject = ?1", [subject], |r| r.get(0)).unwrap();
+            mt.execute(
+                "INSERT INTO messages(ROWID, sender, subject_prefix, subject, date_sent, date_received, mailbox, flags, read, flagged, deleted, size, conversation_id)
+                 VALUES(?1, ?2, '', ?3, ?4, ?4, ?5, 1, 1, 0, 0, 100, 0)",
+                rusqlite::params![id, sender, s, date, inbox],
+            )
+            .unwrap();
+            it.execute(
+                "INSERT INTO docs(id, mailbox, path, status) VALUES(?1, ?2, '', 0)",
+                rusqlite::params![id, inbox],
+            )
+            .unwrap();
+            it.execute(
+                "INSERT INTO texts(id, subject, people, body, attachments) VALUES(?1, ?2, '', ?3, '')",
+                rusqlite::params![id, subject, index::pack(body)],
+            )
+            .unwrap();
+            it.execute(
+                "INSERT INTO fts(rowid, subject, people, body, attachments) VALUES(?1, ?2, '', ?3, '')",
+                rusqlite::params![id, subject, body],
+            )
+            .unwrap();
+        };
+        for id in 20_000..20_300 {
+            add(id, rare, "zork report", "monthly statement", now - 400 * 86_400);
+        }
+        for id in 30_000..40_000 {
+            add(id, bulk, "news", "zork news filler", now - 10 * 86_400);
+        }
+        for id in 40_000..40_050 {
+            add(id, rare, "update", "the zork thing", now - 86_400);
+        }
+        it.commit().unwrap();
+        mt.commit().unwrap();
+    }
+    let mut seen = vec![];
+    let mut offset = 0;
+    loop {
+        let p = SearchParams { limit: Some(20), offset: Some(offset), ..q("zork from:rare") };
+        let r = search(&env, p);
+        seen.extend(ids(&r));
+        match r.next_offset {
+            Some(o) => offset = o,
+            None => break,
+        }
+    }
+    let mut distinct = seen.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), seen.len(), "a page repeated results");
+    assert_eq!(distinct.len(), 350, "results were skipped");
+}
