@@ -49,6 +49,8 @@ impl ServerHandler for Degraded {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("timbre", env!("CARGO_PKG_VERSION")).with_title("Timbre"))
-            .with_instructions("Timbre cannot read Mail's data yet. Call mail_status and show the user the steps to fix it.")
+            .with_instructions(
+                "Timbre cannot read Mail's data yet. Call mail_status and show the user the steps to fix it.",
+            )
     }
 }

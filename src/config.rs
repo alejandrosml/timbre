@@ -35,11 +35,7 @@ fn env_str(key: &str) -> Option<String> {
     let v = v.trim();
     // An unset manifest placeholder arrives verbatim (`${user_config.x}`),
     // and some hosts pass the string "null": treat both as unset.
-    if v.is_empty() || v.starts_with("${") || v.eq_ignore_ascii_case("null") {
-        None
-    } else {
-        Some(v.to_string())
-    }
+    if v.is_empty() || v.starts_with("${") || v.eq_ignore_ascii_case("null") { None } else { Some(v.to_string()) }
 }
 
 fn env_bool(key: &str, default: bool) -> bool {
@@ -69,10 +65,7 @@ impl Config {
         let list = |key: &str| -> Vec<String> {
             env_str(key)
                 .map(|s| {
-                    s.split([',', ';', '\n'])
-                        .map(|x| x.trim().to_ascii_lowercase())
-                        .filter(|x| !x.is_empty())
-                        .collect()
+                    s.split([',', ';', '\n']).map(|x| x.trim().to_ascii_lowercase()).filter(|x| !x.is_empty()).collect()
                 })
                 .unwrap_or_default()
         };

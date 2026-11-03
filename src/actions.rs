@@ -140,8 +140,12 @@ fn valid_addresses(list: &Option<Vec<String>>) -> Result<Vec<String>, String> {
 
 fn quote_header(body: &str, date: &str, from: &str) -> String {
     let b = format!(" {} ", body.to_lowercase());
-    let fr = [" bonjour", " merci", " je ", " vous ", " nous ", " cordialement", " bien à"].iter().filter(|w| b.contains(*w)).count();
-    let es = [" hola", " gracias", " usted", " saludos", " estimado", " nosotros"].iter().filter(|w| b.contains(*w)).count();
+    let fr = [" bonjour", " merci", " je ", " vous ", " nous ", " cordialement", " bien à"]
+        .iter()
+        .filter(|w| b.contains(*w))
+        .count();
+    let es =
+        [" hola", " gracias", " usted", " saludos", " estimado", " nosotros"].iter().filter(|w| b.contains(*w)).count();
     if fr >= 1 && fr >= es {
         format!("Le {date}, {from} a écrit :")
     } else if es >= 1 {
@@ -180,13 +184,19 @@ async fn compose(ctx: &Ctx, p: &DraftParams) -> Result<serde_json::Value, String
             if to.is_empty() {
                 return Err("A new message needs at least one recipient in 'to'.".into());
             }
-            (mailapp::DRAFT_NEW, json!({"to": to, "cc": cc, "bcc": bcc, "subject": p.subject.clone().unwrap_or_default(), "body": p.body}))
+            (
+                mailapp::DRAFT_NEW,
+                json!({"to": to, "cc": cc, "bcc": bcc, "subject": p.subject.clone().unwrap_or_default(), "body": p.body}),
+            )
         }
         "reply" | "reply_all" => {
             let id = p.id.ok_or("'id' of the message to reply to is required")?;
             let (loc, _) = loc_of(ctx, id)?;
             let body = reply_body(ctx, id, &p.body);
-            (mailapp::DRAFT_REPLY, json!({"loc": loc, "id": id, "reply_all": mode == "reply_all", "cc": cc, "bcc": bcc, "body": body}))
+            (
+                mailapp::DRAFT_REPLY,
+                json!({"loc": loc, "id": id, "reply_all": mode == "reply_all", "cc": cc, "bcc": bcc, "body": body}),
+            )
         }
         "forward" => {
             let id = p.id.ok_or("'id' of the message to forward is required")?;
@@ -202,7 +212,10 @@ async fn compose(ctx: &Ctx, p: &DraftParams) -> Result<serde_json::Value, String
 }
 
 fn strings(v: &serde_json::Value, key: &str) -> Vec<String> {
-    v.get(key).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    v.get(key)
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
 }
 
 pub async fn create_draft(ctx: &Ctx, p: &DraftParams) -> Result<DraftResult, String> {
@@ -283,9 +296,13 @@ pub async fn mark(ctx: &Ctx, p: &MarkParams) -> Result<BatchResult, String> {
             Err(e) => failed.push(Failure { id: *id, error: e }),
         }
     }
-    let r = mailapp::run(mailapp::MARK, &json!({"items": items, "action": action, "color": color}), timeout_for(items.len()))
-        .await
-        .map_err(|e| e.to_string())?;
+    let r = mailapp::run(
+        mailapp::MARK,
+        &json!({"items": items, "action": action, "color": color}),
+        timeout_for(items.len()),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     let (done, mut f2) = collect_failures(&r);
     failed.append(&mut f2);
     Ok(BatchResult { done, failed, undo_token: None, note: None })
@@ -305,13 +322,13 @@ pub struct MoveParams {
 }
 
 fn destination(ctx: &Ctx, src: &Mailbox, to: &str, account: Option<&str>) -> Result<Mailbox, String> {
-    if let Some(role) = Role::from_alias(to) {
-        if account.is_none() {
-            return ctx
-                .store
-                .role_mailbox_for_account(&src.account_id, &src.account, role)
-                .ok_or_else(|| format!("Account '{}' has no {} mailbox.", src.account, role.as_str()));
-        }
+    if let Some(role) = Role::from_alias(to)
+        && account.is_none()
+    {
+        return ctx
+            .store
+            .role_mailbox_for_account(&src.account_id, &src.account, role)
+            .ok_or_else(|| format!("Account '{}' has no {} mailbox.", src.account, role.as_str()));
     }
     let ids = ctx.store.resolve_mailboxes(to, account);
     let all: Vec<Mailbox> = ids.iter().filter_map(|i| ctx.store.mailbox(*i)).collect();
@@ -332,7 +349,8 @@ pub async fn move_mail(ctx: &Ctx, p: &MoveParams) -> Result<BatchResult, String>
     let mut plan: HashMap<i64, (Loc, Loc)> = HashMap::new();
     let mut failed = vec![];
     for id in &p.ids {
-        let r = loc_of(ctx, *id).and_then(|(loc, mb)| destination(ctx, &mb, &p.to, p.account.as_deref()).map(|d| (loc, mb, d)));
+        let r = loc_of(ctx, *id)
+            .and_then(|(loc, mb)| destination(ctx, &mb, &p.to, p.account.as_deref()).map(|d| (loc, mb, d)));
         match r {
             Ok((_, mb, dest)) if dest.id == mb.id => failed.push(Failure { id: *id, error: "already there".into() }),
             Ok((loc, _, dest)) => {
@@ -346,7 +364,9 @@ pub async fn move_mail(ctx: &Ctx, p: &MoveParams) -> Result<BatchResult, String>
     if items.is_empty() {
         return Ok(BatchResult { done: 0, failed, undo_token: None, note: None });
     }
-    let r = mailapp::run(mailapp::MOVE, &json!({"items": items}), timeout_for(items.len())).await.map_err(|e| e.to_string())?;
+    let r = mailapp::run(mailapp::MOVE, &json!({"items": items}), timeout_for(items.len()))
+        .await
+        .map_err(|e| e.to_string())?;
     let mut undo_items = vec![];
     for item in r.as_array().into_iter().flatten() {
         if item.get("ok").and_then(|v| v.as_bool()) != Some(true) {
@@ -397,8 +417,14 @@ pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
     if entry.undone {
         return Err("This move was already undone.".into());
     }
-    let items: Vec<_> = entry.items.iter().map(|i| json!({"message_id": i.message_id, "now_in": i.now_in, "back_to": i.back_to})).collect();
-    let r = mailapp::run(mailapp::MOVE_BACK, &json!({"items": items}), timeout_for(items.len() * 3)).await.map_err(|e| e.to_string())?;
+    let items: Vec<_> = entry
+        .items
+        .iter()
+        .map(|i| json!({"message_id": i.message_id, "now_in": i.now_in, "back_to": i.back_to}))
+        .collect();
+    let r = mailapp::run(mailapp::MOVE_BACK, &json!({"items": items}), timeout_for(items.len() * 3))
+        .await
+        .map_err(|e| e.to_string())?;
     let (done, failed) = collect_failures(&r);
     {
         let mut journal = ctx.undo.lock().unwrap_or_else(|e| e.into_inner());
@@ -444,7 +470,8 @@ pub async fn prepare_send(ctx: &Ctx, p: &DraftParams) -> Result<PreparedSend, St
     let t = token();
     let mut st = ctx.sends.lock().unwrap_or_else(|e| e.into_inner());
     st.pending.retain(|_, v| now_unix() - v.created < SEND_TTL);
-    st.pending.insert(t.clone(), PendingSend { outgoing_id, recipients: all, subject: subject.clone(), created: now_unix() });
+    st.pending
+        .insert(t.clone(), PendingSend { outgoing_id, recipients: all, subject: subject.clone(), created: now_unix() });
     Ok(PreparedSend {
         token: t,
         to,
@@ -482,7 +509,10 @@ pub async fn confirm_send(ctx: &Ctx, p: &ConfirmParams) -> Result<SentResult, St
             st.sent.pop_front();
         }
         if st.sent.len() as u32 >= ctx.cfg.max_sends_per_hour {
-            return Err(format!("Sending limit reached ({} per hour). The draft stays open in Mail.", ctx.cfg.max_sends_per_hour));
+            return Err(format!(
+                "Sending limit reached ({} per hour). The draft stays open in Mail.",
+                ctx.cfg.max_sends_per_hour
+            ));
         }
         let expected = st.pending.get(&p.token).ok_or("Unknown or already used token: call prepare_send again.")?;
         let mut given: Vec<String> = p.recipients.iter().map(|a| a.trim().to_lowercase()).collect();
@@ -492,7 +522,10 @@ pub async fn confirm_send(ctx: &Ctx, p: &ConfirmParams) -> Result<SentResult, St
         want.sort();
         want.dedup();
         if given != want {
-            return Err(format!("The recipients do not match what was prepared ({}). Nothing was sent.", want.join(", ")));
+            return Err(format!(
+                "The recipients do not match what was prepared ({}). Nothing was sent.",
+                want.join(", ")
+            ));
         }
         let pending = st.pending.remove(&p.token).ok_or("Unknown or already used token: call prepare_send again.")?;
         if now - pending.created > SEND_TTL {
@@ -537,7 +570,10 @@ pub async fn selected(_ctx: &Ctx) -> Result<Vec<Selected>, String> {
         .into_iter()
         .flatten()
         .filter_map(|v| {
-            Some(Selected { id: v.get("id")?.as_i64()?, subject: v.get("subject").and_then(|s| s.as_str()).unwrap_or("").to_string() })
+            Some(Selected {
+                id: v.get("id")?.as_i64()?,
+                subject: v.get("subject").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+            })
         })
         .collect())
 }
@@ -549,7 +585,8 @@ pub fn open_in_mail(ctx: &Ctx, id: i64) -> Result<String, String> {
     }
     .ok_or_else(|| format!("The content of message {id} is not on this Mac."))?;
     let headers = crate::emlx::read_headers(&loc.path).map_err(|e| e.to_string())?;
-    let mid = mime::parse(&headers).and_then(|p| p.message_id).ok_or("This message has no Message-ID to open it with.")?;
+    let mid =
+        mime::parse(&headers).and_then(|p| p.message_id).ok_or("This message has no Message-ID to open it with.")?;
     mailapp::open_message_url(&mid).map_err(|e| e.to_string())?;
     Ok("Opened in Mail.".into())
 }

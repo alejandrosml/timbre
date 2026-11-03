@@ -47,9 +47,7 @@ pub fn sqlite_uri(path: &std::path::Path, query: &str) -> String {
     out.push_str("file:");
     for b in raw.as_bytes() {
         match *b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char)
-            }
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => out.push(*b as char),
             other => out.push_str(&format!("%{other:02X}")),
         }
     }
@@ -66,12 +64,13 @@ pub fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -177,10 +176,7 @@ mod tests {
     #[test]
     fn uri_encodes_spaces() {
         let p = std::path::Path::new("/Users/a b/Library/Mail/V10/MailData/Envelope Index");
-        assert_eq!(
-            sqlite_uri(p, "mode=ro"),
-            "file:/Users/a%20b/Library/Mail/V10/MailData/Envelope%20Index?mode=ro"
-        );
+        assert_eq!(sqlite_uri(p, "mode=ro"), "file:/Users/a%20b/Library/Mail/V10/MailData/Envelope%20Index?mode=ro");
     }
 
     #[test]

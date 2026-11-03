@@ -95,7 +95,13 @@ fn full_text_search_ranks_filters_and_skips_junk() {
     assert_eq!(ids(&r), vec![105]);
     // Unknown mailbox explains itself.
     let c = &env.ctx;
-    let err = search::search(&c.db(), &c.store, &c.cfg, &c.progress, &SearchParams { mailbox: Some("Nope".into()), ..Default::default() });
+    let err = search::search(
+        &c.db(),
+        &c.store,
+        &c.cfg,
+        &c.progress,
+        &SearchParams { mailbox: Some("Nope".into()), ..Default::default() },
+    );
     assert!(err.unwrap_err().contains("list_mailboxes"));
     // Pagination.
     let r = search(&env, SearchParams { limit: Some(2), ..Default::default() });
@@ -147,7 +153,8 @@ fn read_mail_hides_injection_and_flags_spoofing() {
 #[test]
 fn thread_attachments_and_mailboxes() {
     let env = setup("thread", true);
-    let t = app::get_thread(&env.ctx, &ThreadParams { id: 103, max_messages: None, max_chars_per_message: None }).unwrap();
+    let t =
+        app::get_thread(&env.ctx, &ThreadParams { id: 103, max_messages: None, max_chars_per_message: None }).unwrap();
     assert_eq!(t.count, 2);
     assert_eq!(t.messages[0].id, 102);
     assert!(t.messages[1].text.contains("\nThursday works for me.\n⟦/untrusted"), "{}", t.messages[1].text);

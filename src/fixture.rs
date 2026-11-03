@@ -170,7 +170,11 @@ pub fn write_message(v10: &Path, conn: &Connection, m: &Msg) -> Result<()> {
         std::fs::create_dir_all(&att)?;
         std::fs::write(att.join("contrat.txt"), "Contrat de vente — signé le 26.")?;
     }
-    let mb: i64 = conn.query_row("SELECT ROWID FROM mailboxes WHERE url = ?1", [format!("imap://{ACCOUNT}/{}", m.mailbox)], |r| r.get(0))?;
+    let mb: i64 = conn.query_row(
+        "SELECT ROWID FROM mailboxes WHERE url = ?1",
+        [format!("imap://{ACCOUNT}/{}", m.mailbox)],
+        |r| r.get(0),
+    )?;
     conn.execute("INSERT OR IGNORE INTO subjects(subject) VALUES(?1)", [m.subject])?;
     let subj: i64 = conn.query_row("SELECT ROWID FROM subjects WHERE subject = ?1", [m.subject], |r| r.get(0))?;
     conn.execute("INSERT INTO addresses(address, comment) VALUES(?1, ?2)", params![m.from.1, m.from.0])?;

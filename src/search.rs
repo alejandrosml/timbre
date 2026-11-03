@@ -80,6 +80,7 @@ pub struct SearchResult {
     pub engine: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    pub took_ms: u64,
     pub results: Vec<Hit>,
 }
 
@@ -161,7 +162,7 @@ pub fn parse_query(q: &str) -> Parsed {
 }
 
 fn quote_fts(term: &str) -> Option<String> {
-    let t = term.trim_matches('"');
+    let t = crate::norm::fold(term.trim_matches('"'));
     let cleaned: String = t.chars().filter(|c| !c.is_control()).collect();
     if !cleaned.chars().any(|c| c.is_alphanumeric()) {
         return None;
@@ -185,7 +186,9 @@ pub fn build_fts(terms: &[String]) -> Option<String> {
             _ => (false, raw.as_str()),
         };
         let phrase = body.starts_with('"');
-        let prefix = !phrase && body.ends_with('*') && body.len() > 1;
+        // There is no prefix index (it doubles the index size): short
+        // prefixes would scan a large part of the term list.
+        let prefix = !phrase && body.ends_with('*') && body.trim_end_matches('*').chars().count() >= 3;
         let core = body.trim_end_matches('*');
         let Some(mut q) = quote_fts(core) else { continue };
         if prefix {
@@ -238,7 +241,14 @@ impl Filters {
     }
 }
 
-pub fn search(conn: &Connection, store: &Store, cfg: &Config, progress: &Progress, req: &SearchParams) -> Result<SearchResult, String> {
+pub fn search(
+    conn: &Connection,
+    store: &Store,
+    cfg: &Config,
+    progress: &Progress,
+    req: &SearchParams,
+) -> Result<SearchResult, String> {
+    let started = std::time::Instant::now();
     let parsed = parse_query(req.query.as_deref().unwrap_or(""));
     let pick = |a: &Option<String>, b: Option<String>| a.clone().filter(|s| !s.trim().is_empty()).or(b);
     let from = pick(&req.from, parsed.from.clone());
@@ -257,32 +267,38 @@ pub fn search(conn: &Connection, store: &Store, cfg: &Config, progress: &Progres
 
     let mut f = Filters { sql: vec![s.not_deleted.clone()], args: vec![] };
     if let Some(v) = &from {
-        f.push("(lower(COALESCE(a.address,'')) LIKE ? ESCAPE '\\' OR lower(COALESCE(a.comment,'')) LIKE ? ESCAPE '\\')".into(), [
-            Value::Text(like(v)),
-            Value::Text(like(v)),
-        ]);
+        f.push(
+            "(lower(COALESCE(a.address,'')) LIKE ? ESCAPE '\\' OR lower(COALESCE(a.comment,'')) LIKE ? ESCAPE '\\')"
+                .into(),
+            [Value::Text(like(v)), Value::Text(like(v))],
+        );
     }
-    if let Some(v) = &to {
-        if let Some(col) = &s.rec_msg_col {
-            let typ = s.rec_type_col.as_deref().map(|t| format!("AND r.{t} IN (0, 1) ")).unwrap_or_default();
-            f.push(
-                format!(
-                    "EXISTS (SELECT 1 FROM mail.recipients r LEFT JOIN mail.addresses ra ON ra.ROWID = r.address \
+    if let Some(v) = &to
+        && let Some(col) = &s.rec_msg_col
+    {
+        let typ = s.rec_type_col.as_deref().map(|t| format!("AND r.{t} IN (0, 1) ")).unwrap_or_default();
+        f.push(
+            format!(
+                "EXISTS (SELECT 1 FROM mail.recipients r LEFT JOIN mail.addresses ra ON ra.ROWID = r.address \
                      WHERE r.{col} = m.ROWID {typ}AND (lower(COALESCE(ra.address,'')) LIKE ? ESCAPE '\\' \
                      OR lower(COALESCE(ra.comment,'')) LIKE ? ESCAPE '\\'))"
-                ),
-                [Value::Text(like(v)), Value::Text(like(v))],
-            );
-        }
+            ),
+            [Value::Text(like(v)), Value::Text(like(v))],
+        );
     }
     if let Some(v) = &subject {
-        f.push(format!("lower({} || COALESCE(s.subject,'')) LIKE ? ESCAPE '\\'", s.subject_prefix), [Value::Text(like(v))]);
+        f.push(
+            format!("lower({} || COALESCE(s.subject,'')) LIKE ? ESCAPE '\\'", s.subject_prefix),
+            [Value::Text(like(v))],
+        );
     }
     let mut named_mailbox = false;
     if let Some(v) = &mailbox {
         let ids = store.resolve_mailboxes(v, req.account.as_deref());
         if ids.is_empty() {
-            return Err(format!("No mailbox matches '{v}'. Call list_mailboxes to see names, or use a role: inbox, sent, drafts, archive, junk, trash."));
+            return Err(format!(
+                "No mailbox matches '{v}'. Call list_mailboxes to see names, or use a role: inbox, sent, drafts, archive, junk, trash."
+            ));
         }
         named_mailbox = true;
         f.sql.push(format!("m.mailbox IN ({})", ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")));
@@ -331,14 +347,20 @@ pub fn search(conn: &Connection, store: &Store, cfg: &Config, progress: &Progres
             "newest" => "m.date_received DESC".to_string(),
             "oldest" => "m.date_received ASC".to_string(),
             // bm25 is negative (lower is better); recent messages get up to 1.5x.
-            _ => "bm25(fts, 5.0, 2.5, 1.0, 1.5) * (1.0 + 0.5 / (1.0 + MAX(0, ? - m.date_received) / 5184000.0)) ASC".to_string(),
+            _ => "bm25(fts, 4.0, 2.5, 1.0, 2.0) * (1.0 + 0.75 / (1.0 + MAX(0, ? - m.date_received) / 3888000.0)) ASC"
+                .to_string(),
         };
         let args = vec![Value::Text(fts.clone().unwrap_or_default())];
         ("fts JOIN mail.messages m ON m.ROWID = fts.rowid".to_string(), args, order)
     } else {
         if fts.is_some() || !parsed.text.is_empty() {
             // No index yet: fall back to subject and sender matching.
-            let words: Vec<String> = parsed.text.iter().map(|t| t.trim_matches(['"', '*', '-']).to_string()).filter(|t| !t.is_empty()).collect();
+            let words: Vec<String> = parsed
+                .text
+                .iter()
+                .map(|t| t.trim_matches(['"', '*', '-']).to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
             for w in &words {
                 f.push(
                     format!(
@@ -350,7 +372,9 @@ pub fn search(conn: &Connection, store: &Store, cfg: &Config, progress: &Progres
             }
             let v = progress.view();
             notice = Some(match v.percent {
-                Some(p) => format!("Full-text index is being built ({p}%). Searching subjects and senders only for now."),
+                Some(p) => {
+                    format!("Full-text index is being built ({p}%). Searching subjects and senders only for now.")
+                }
                 None => format!("Full-text index is {}. Searching subjects and senders only.", v.state),
             });
         }
@@ -373,11 +397,7 @@ pub fn search(conn: &Connection, store: &Store, cfg: &Config, progress: &Progres
         .query_row(&count_sql, rusqlite::params_from_iter(count_args.iter()), |r| r.get::<_, i64>(0))
         .map_err(|e| format!("search failed: {e}"))? as u64;
 
-    let extra = if use_fts {
-        "snippet(fts, -1, '«', '»', '…', 14), d.auth"
-    } else {
-        "NULL, d.auth"
-    };
+    let extra = if use_fts { "snippet(fts, -1, '«', '»', '…', 14), d.auth" } else { "NULL, d.auth" };
     let select_sql = format!(
         "SELECT {cols}, {extra} FROM {from_sql} {joins} LEFT JOIN docs d ON d.id = m.ROWID \
          WHERE {fts_clause}{where_sql} ORDER BY {order} LIMIT ? OFFSET ?",
@@ -426,6 +446,7 @@ pub fn search(conn: &Connection, store: &Store, cfg: &Config, progress: &Progres
         next_offset: (shown < total).then_some(offset + results.len() as u32),
         engine: if use_fts { "fulltext" } else { "metadata" }.to_string(),
         notice,
+        took_ms: started.elapsed().as_millis() as u64,
         results,
     })
 }
@@ -433,6 +454,14 @@ pub fn search(conn: &Connection, store: &Store, cfg: &Config, progress: &Progres
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_terms_are_folded_and_short_prefixes_ignored() {
+        let q = |t: &[&str]| build_fts(&t.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(q(&["cœur"]).as_deref(), Some("\"coeur\""));
+        assert_eq!(q(&["fac*"]).as_deref(), Some("\"fac\"*"));
+        assert_eq!(q(&["fa*"]).as_deref(), Some("\"fa\""));
+    }
 
     #[test]
     fn operators_are_extracted() {

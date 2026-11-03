@@ -30,7 +30,9 @@ fn host_of(s: &str) -> Option<String> {
     let t = s.trim().trim_end_matches(['/', '.', ',', ')']).to_ascii_lowercase();
     let rest = t.split_once("://").map(|(_, r)| r).unwrap_or(&t);
     let host = rest.split(['/', '?', '#', ':']).next()?.trim_start_matches("www.");
-    let looks = host.contains('.') && !host.contains(char::is_whitespace) && host.len() <= 253
+    let looks = host.contains('.')
+        && !host.contains(char::is_whitespace)
+        && host.len() <= 253
         && host.rsplit('.').next().is_some_and(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()));
     looks.then(|| host.to_string())
 }
@@ -44,7 +46,8 @@ pub fn base_domain(host: &str) -> String {
         return host.to_string();
     }
     let two = format!("{}.{}", labels[n - 2], labels[n - 1]);
-    if ["co.uk", "com.au", "co.jp", "com.br", "com.es", "gouv.fr", "co.nz", "com.mx", "org.uk"].contains(&two.as_str()) {
+    if ["co.uk", "com.au", "co.jp", "com.br", "com.es", "gouv.fr", "co.nz", "com.mx", "org.uk"].contains(&two.as_str())
+    {
         format!("{}.{}", labels[n - 3], two)
     } else {
         two
@@ -52,15 +55,45 @@ pub fn base_domain(host: &str) -> String {
 }
 
 const SKIP: &[&str] = &[
-    "script", "style", "head", "title", "noscript", "template", "svg", "math", "object", "embed", "iframe",
-    "frame", "frameset", "canvas", "audio", "video", "map", "select", "option", "textarea", "meta", "link",
-    "base", "input",
+    "script", "style", "head", "title", "noscript", "template", "svg", "math", "object", "embed", "iframe", "frame",
+    "frameset", "canvas", "audio", "video", "map", "select", "option", "textarea", "meta", "link", "base", "input",
 ];
 
 const BLOCK: &[&str] = &[
-    "p", "div", "section", "article", "header", "footer", "aside", "nav", "main", "blockquote", "pre", "address",
-    "center", "table", "tbody", "thead", "tfoot", "ul", "ol", "dl", "dt", "dd", "figure", "figcaption", "h1", "h2",
-    "h3", "h4", "h5", "h6", "form", "fieldset", "details", "summary",
+    "p",
+    "div",
+    "section",
+    "article",
+    "header",
+    "footer",
+    "aside",
+    "nav",
+    "main",
+    "blockquote",
+    "pre",
+    "address",
+    "center",
+    "table",
+    "tbody",
+    "thead",
+    "tfoot",
+    "ul",
+    "ol",
+    "dl",
+    "dt",
+    "dd",
+    "figure",
+    "figcaption",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "form",
+    "fieldset",
+    "details",
+    "summary",
 ];
 
 /// Classes and ids hidden by `<style>` rules such as `.preheader{display:none}`.
@@ -111,10 +144,10 @@ pub fn style_hides(style: &str) -> bool {
     if s.contains("mso-hide:all") || s.contains("color:transparent") {
         return true;
     }
-    if let Some(v) = decl_value(&s, "opacity").and_then(|v| v.parse::<f64>().ok()) {
-        if v < 0.1 {
-            return true;
-        }
+    if let Some(v) = decl_value(&s, "opacity").and_then(|v| v.parse::<f64>().ok())
+        && v < 0.1
+    {
+        return true;
     }
     if let Some(v) = decl_value(&s, "font-size") {
         let n: f64 = v.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '%').parse().unwrap_or(99.0);
@@ -134,27 +167,27 @@ pub fn style_hides(style: &str) -> bool {
     if s.contains("clip:rect(0") || s.contains("clip-path:inset(50%") || s.contains("clip-path:inset(100%") {
         return true;
     }
-    if let Some(n) = num_after(&s, "text-indent:") {
-        if n <= -999.0 {
-            return true;
-        }
+    if let Some(n) = num_after(&s, "text-indent:")
+        && n <= -999.0
+    {
+        return true;
     }
     if s.contains("position:absolute") || s.contains("position:fixed") {
         for k in ["left:", "top:"] {
-            if let Some(n) = num_after(&s, k) {
-                if n <= -999.0 {
-                    return true;
-                }
+            if let Some(n) = num_after(&s, k)
+                && n <= -999.0
+            {
+                return true;
             }
         }
     }
     // Same colour for text and background.
     if let Some(fg) = decl_value(&s, "color") {
         let bg = decl_value(&s, "background-color").or_else(|| decl_value(&s, "background"));
-        if let Some(bg) = bg {
-            if fg == bg || (is_whiteish(fg) && is_whiteish(bg)) {
-                return true;
-            }
+        if let Some(bg) = bg
+            && (fg == bg || (is_whiteish(fg) && is_whiteish(bg)))
+        {
+            return true;
         }
     }
     false
@@ -177,7 +210,8 @@ fn collect_rules(doc: &Html) -> HideRules {
                 continue;
             }
             for sel in selectors.split(',') {
-                let last = sel.split(|c: char| c.is_whitespace() || c == '>' || c == '+' || c == '~').filter(|p| !p.is_empty()).last();
+                let last =
+                    sel.split(|c: char| c.is_whitespace() || c == '>' || c == '+' || c == '~').rfind(|p| !p.is_empty());
                 let Some(last) = last else { continue };
                 let mut rest = last;
                 while let Some(pos) = rest.find(['.', '#']) {
@@ -220,7 +254,13 @@ struct Walker<'a> {
     hidden_sample: String,
     link_mismatches: Vec<String>,
     rules: &'a HideRules,
+    depth: usize,
 }
+
+/// Real mail nests tables a few dozen levels deep at most. Deeper content
+/// is treated as hidden: it keeps the recursive walk off the stack limit
+/// and cannot be used to smuggle text past the hidden-text checks.
+const MAX_DEPTH: usize = 160;
 
 fn short_url(url: &str) -> String {
     if url.chars().count() <= 80 {
@@ -315,20 +355,26 @@ impl Walker<'_> {
                     _ if BLOCK.contains(&name.as_str()) => self.newline(),
                     _ => {}
                 }
+                if self.depth >= MAX_DEPTH {
+                    self.count_hidden(node);
+                    return;
+                }
                 let start = self.out.len();
+                self.depth += 1;
                 for child in node.children() {
                     self.walk(child);
                 }
+                self.depth -= 1;
                 match name.as_str() {
                     "a" => {
                         if let Some(href) = e.attr("href").map(str::trim) {
                             let visible = self.out[start..].trim().to_string();
-                            if href.starts_with("http") && self.link_mismatches.len() < 5 {
-                                if let (Some(shown), Some(real)) = (host_of(&visible), host_of(href)) {
-                                    if base_domain(&shown) != base_domain(&real) {
-                                        self.link_mismatches.push(format!("a link shows {shown} but leads to {real}"));
-                                    }
-                                }
+                            if href.starts_with("http")
+                                && self.link_mismatches.len() < 5
+                                && let (Some(shown), Some(real)) = (host_of(&visible), host_of(href))
+                                && base_domain(&shown) != base_domain(&real)
+                            {
+                                self.link_mismatches.push(format!("a link shows {shown} but leads to {real}"));
                             }
                             let show = if let Some(addr) = href.strip_prefix("mailto:") {
                                 let addr = addr.split('?').next().unwrap_or(addr);
@@ -373,6 +419,7 @@ pub fn to_text(html: &str) -> HtmlText {
         hidden_sample: String::new(),
         link_mismatches: vec![],
         rules: &rules,
+        depth: 0,
     };
     w.walk(doc.tree.root());
     let (clean, invisible) = strip_invisible(&w.out);
@@ -388,6 +435,16 @@ pub fn to_text(html: &str) -> HtmlText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostile_nesting_neither_overflows_nor_hides_text() {
+        let depth = 3_000;
+        let html = format!("<p>top</p>{}secret{}", "<div>".repeat(depth), "</div>".repeat(depth));
+        let t = to_text(&html);
+        assert!(t.text.contains("top"));
+        assert!(!t.text.contains("secret"));
+        assert!(t.hidden_chars >= 6);
+    }
 
     #[test]
     fn drops_hidden_text() {
@@ -421,7 +478,9 @@ mod tests {
 
     #[test]
     fn link_text_mismatch_is_flagged() {
-        let t = to_text(r#"<a href="https://evil.example/login">www.paypal.com</a> <a href="https://news.paypal.com/x">paypal.com</a>"#);
+        let t = to_text(
+            r#"<a href="https://evil.example/login">www.paypal.com</a> <a href="https://news.paypal.com/x">paypal.com</a>"#,
+        );
         assert_eq!(t.link_mismatches, vec!["a link shows paypal.com but leads to evil.example".to_string()]);
     }
 

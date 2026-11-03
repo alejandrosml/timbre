@@ -88,10 +88,21 @@ impl Role {
             Role::Inbox
         } else if has("draft") || has("brouillon") || has("borrador") {
             Role::Drafts
-        } else if has("junk") || has("spam") || has("indésirable") || has("indesirable") || has("no deseado") || word("bulk") {
+        } else if has("junk")
+            || has("spam")
+            || has("indésirable")
+            || has("indesirable")
+            || has("no deseado")
+            || word("bulk")
+        {
             Role::Junk
-        } else if has("trash") || has("deleted") || has("corbeille") || has("papelera") || has("supprimé")
-            || has("eliminad") || word("bin")
+        } else if has("trash")
+            || has("deleted")
+            || has("corbeille")
+            || has("papelera")
+            || has("supprimé")
+            || has("eliminad")
+            || word("bin")
         {
             Role::Trash
         } else if has("sent") || has("envoy") || has("enviad") {
@@ -196,8 +207,7 @@ pub fn locate_version_dir(mail_root: &Path) -> Result<PathBuf> {
             }
         }
     }
-    best.map(|(_, p)| p)
-        .ok_or_else(|| anyhow!("No V*/MailData/Envelope Index under {}", mail_root.display()))
+    best.map(|(_, p)| p).ok_or_else(|| anyhow!("No V*/MailData/Envelope Index under {}", mail_root.display()))
 }
 
 /// Attach the Envelope Index to `conn` as `mail`, read-only.
@@ -211,8 +221,7 @@ pub fn attach(conn: &Connection, db_path: &Path) -> Result<OpenMode> {
     }
     let _ = conn.execute_batch("DETACH DATABASE mail");
     let uri = sqlite_uri(db_path, "mode=ro&immutable=1");
-    conn.execute("ATTACH DATABASE ?1 AS mail", [&uri])
-        .with_context(|| format!("attaching {}", db_path.display()))?;
+    conn.execute("ATTACH DATABASE ?1 AS mail", [&uri]).with_context(|| format!("attaching {}", db_path.display()))?;
     probe(conn).with_context(|| format!("reading {}", db_path.display()))?;
     Ok(OpenMode::Immutable)
 }
@@ -264,11 +273,7 @@ fn detect_schema(conn: &Connection) -> Result<Schema> {
         } else {
             "0".into()
         },
-        flag_color: if flags {
-            format!("((m.flags & {FLAG_COLOR_MASK}) >> {FLAG_COLOR_SHIFT})")
-        } else {
-            "-1".into()
-        },
+        flag_color: if flags { format!("((m.flags & {FLAG_COLOR_MASK}) >> {FLAG_COLOR_SHIFT})") } else { "-1".into() },
         date_sent: if has("date_sent") { "m.date_sent".into() } else { "m.date_received".into() },
         subject_prefix: if has("subject_prefix") { "COALESCE(m.subject_prefix, '')".into() } else { "''".into() },
         size: if has("size") { "COALESCE(m.size, 0)".into() } else { "0".into() },
@@ -285,7 +290,8 @@ fn detect_schema(conn: &Connection) -> Result<Schema> {
 }
 
 fn load_accounts(path: &Path) -> HashMap<String, String> {
-    let Ok(conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    let Ok(conn) =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
     else {
         return HashMap::new();
     };
@@ -295,12 +301,12 @@ fn load_accounts(path: &Path) -> HashMap<String, String> {
                FROM ZACCOUNT a LEFT JOIN ZACCOUNT p ON a.ZPARENTACCOUNT = p.Z_PK
                WHERE a.ZIDENTIFIER IS NOT NULL";
     let mut out = HashMap::new();
-    if let Ok(mut stmt) = conn.prepare(sql) {
-        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))) {
-            for (id, name) in rows.flatten() {
-                if let (Some(id), Some(name)) = (id, name) {
-                    out.insert(id.to_uppercase(), name);
-                }
+    if let Ok(mut stmt) = conn.prepare(sql)
+        && let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)))
+    {
+        for (id, name) in rows.flatten() {
+            if let (Some(id), Some(name)) = (id, name) {
+                out.insert(id.to_uppercase(), name);
             }
         }
     }
@@ -441,11 +447,8 @@ impl Store {
     }
 
     pub fn get_meta(&self, conn: &Connection, id: i64) -> Result<Option<Meta>> {
-        let sql = format!(
-            "SELECT {} FROM mail.messages m {} WHERE m.ROWID = ?1",
-            self.meta_columns(),
-            Self::META_JOINS
-        );
+        let sql =
+            format!("SELECT {} FROM mail.messages m {} WHERE m.ROWID = ?1", self.meta_columns(), Self::META_JOINS);
         Ok(conn.query_row(&sql, [id], |r| self.row_meta(r, 0)).optional()?)
     }
 
@@ -477,7 +480,9 @@ impl Store {
         let mut stmt = conn.prepare(&sql)?;
         let mut to = vec![];
         let mut cc = vec![];
-        for row in stmt.query_map([id], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))? {
+        for row in
+            stmt.query_map([id], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+        {
             let (t, name, addr) = row?;
             if addr.is_empty() {
                 continue;
@@ -498,9 +503,11 @@ impl Store {
             return Ok(vec![id]);
         }
         let conv: Option<i64> = conn
-            .query_row(&format!("SELECT {} FROM mail.messages m WHERE m.ROWID = ?1", self.schema.conversation), [id], |r| {
-                r.get(0)
-            })
+            .query_row(
+                &format!("SELECT {} FROM mail.messages m WHERE m.ROWID = ?1", self.schema.conversation),
+                [id],
+                |r| r.get(0),
+            )
             .optional()?;
         let Some(conv) = conv.filter(|c| *c != 0) else { return Ok(vec![id]) };
         let sql = format!(
@@ -508,7 +515,9 @@ impl Store {
             self.schema.conversation, self.schema.not_deleted
         );
         let mut stmt = conn.prepare(&sql)?;
-        let ids = stmt.query_map(rusqlite::params![conv, limit as i64], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
+        let ids = stmt
+            .query_map(rusqlite::params![conv, limit as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
         Ok(if ids.is_empty() { vec![id] } else { ids })
     }
 
@@ -519,7 +528,9 @@ impl Store {
             self.schema.unread, self.schema.not_deleted
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?.unwrap_or(0))))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?.unwrap_or(0)))
+        })?;
         Ok(rows.flatten().map(|(id, t, u)| (id, (t, u))).collect())
     }
 
@@ -533,7 +544,10 @@ impl Store {
         let mut out: Vec<i64> = self
             .mailboxes()
             .values()
-            .filter(|m| acct.as_ref().is_none_or(|a| m.account.to_lowercase().contains(a.as_str()) || m.account_id.to_lowercase() == *a))
+            .filter(|m| {
+                acct.as_ref()
+                    .is_none_or(|a| m.account.to_lowercase().contains(a.as_str()) || m.account_id.to_lowercase() == *a)
+            })
             .filter(|m| {
                 role.is_some_and(|r| m.role == r)
                     || m.display_path().to_lowercase() == lower
@@ -547,11 +561,7 @@ impl Store {
 
     /// Mailbox ids whose role is in `roles` (e.g. junk, trash).
     pub fn mailboxes_with_roles(&self, roles: &[String]) -> Vec<i64> {
-        self.mailboxes()
-            .values()
-            .filter(|m| roles.iter().any(|r| r == m.role.as_str()))
-            .map(|m| m.id)
-            .collect()
+        self.mailboxes().values().filter(|m| roles.iter().any(|r| r == m.role.as_str())).map(|m| m.id).collect()
     }
 
     /// Accounts' mailbox with a given role (first match), e.g. Trash of an account.
@@ -559,7 +569,9 @@ impl Store {
         let mut candidates: Vec<Mailbox> = self
             .mailboxes()
             .values()
-            .filter(|m| m.role == role && ((!account_id.is_empty() && m.account_id == account_id) || m.account == account))
+            .filter(|m| {
+                m.role == role && ((!account_id.is_empty() && m.account_id == account_id) || m.account == account)
+            })
             .cloned()
             .collect();
         candidates.sort_by_key(|m| m.path.len());

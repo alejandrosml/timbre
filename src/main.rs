@@ -15,6 +15,7 @@ mod html;
 mod index;
 mod mailapp;
 mod mime;
+mod norm;
 mod quote;
 mod search;
 mod security;
@@ -89,6 +90,12 @@ fn main() -> Result<()> {
         .with_ansi(false)
         .with_env_filter(EnvFilter::try_from_env("TIMBRE_LOG").unwrap_or_else(|_| EnvFilter::new("warn")))
         .init();
+    std::panic::set_hook(Box::new(|info| {
+        let bt = std::backtrace::Backtrace::capture();
+        let bt =
+            if bt.status() == std::backtrace::BacktraceStatus::Captured { format!("\n{bt}") } else { String::new() };
+        tracing::error!("panic in thread {}: {info}{bt}", std::thread::current().name().unwrap_or("?"));
+    }));
     let cli = Cli::parse();
     let cfg = Config::from_env();
     match cli.command.unwrap_or(Command::Serve) {
@@ -125,11 +132,14 @@ fn serve(cfg: Config) -> Result<()> {
     let indexer = index::Indexer::new(cfg.clone(), store.clone(), progress.clone());
     std::thread::Builder::new().name("timbre-index".into()).spawn(move || indexer.run_forever())?;
     let ctx = Arc::new(app::Ctx::new(cfg, store, progress)?);
-    rt.block_on(async move {
+    let result = rt.block_on(async move {
         let service = server::Timbre::new(ctx).serve(rmcp::transport::stdio()).await?;
         service.waiting().await?;
-        Ok(())
-    })
+        anyhow::Ok(())
+    });
+    // Claude closed stdin: exit now rather than wait for a running query.
+    rt.shutdown_timeout(Duration::from_secs(2));
+    result
 }
 
 fn open_ctx(cfg: Config) -> Result<Arc<app::Ctx>> {
@@ -214,12 +224,24 @@ fn doctor(cfg: Config, automation: bool) -> Result<()> {
         }
         Ok(store) => {
             println!("mail store: {} ({:?})", store.version_dir.display(), store.open_mode);
-            println!("schema: unread={} flagged={} conversation={}", store.schema.unread, store.schema.flagged, store.schema.conversation);
+            println!(
+                "schema: unread={} flagged={} conversation={}",
+                store.schema.unread, store.schema.flagged, store.schema.conversation
+            );
             let conn = index::open(&cfg, &store, true)?;
             let (total, unread) = store.stats(&conn)?;
-            println!("messages: {total} ({unread} unread), mailboxes: {}, accounts: {}", store.mailboxes().len(), store.account_names().join(", "));
+            println!(
+                "messages: {total} ({unread} unread), mailboxes: {}, accounts: {}",
+                store.mailboxes().len(),
+                store.account_names().join(", ")
+            );
             let docs: i64 = conn.query_row("SELECT count(*) FROM docs WHERE status = 0", [], |r| r.get(0)).unwrap_or(0);
-            println!("index: {} ({} messages, built={})", cfg.index_path().display(), docs, index::get_meta(&conn, "built").is_some());
+            println!(
+                "index: {} ({} messages, built={})",
+                cfg.index_path().display(),
+                docs,
+                index::get_meta(&conn, "built").is_some()
+            );
             // How well the path prediction scheme matches this Mac.
             let mut stmt = conn.prepare("SELECT id, path FROM docs WHERE path != '' ORDER BY random() LIMIT 200")?;
             let rows: Vec<(i64, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.flatten().collect();
@@ -236,13 +258,18 @@ fn doctor(cfg: Config, automation: bool) -> Result<()> {
             if automation {
                 let inbox = store.mailboxes().values().find(|m| m.role == store::Role::Inbox).cloned();
                 let latest: Option<i64> = inbox.as_ref().and_then(|mb| {
-                    conn.query_row("SELECT max(ROWID) FROM mail.messages WHERE mailbox = ?1", [mb.id], |r| r.get(0)).ok().flatten()
+                    conn.query_row("SELECT max(ROWID) FROM mail.messages WHERE mailbox = ?1", [mb.id], |r| r.get(0))
+                        .ok()
+                        .flatten()
                 });
                 match (inbox, latest) {
                     (Some(mb), Some(id)) => {
                         let input = serde_json::json!({"loc": mailapp::Loc::from(&mb), "id": id});
                         match runtime()?.block_on(mailapp::run(mailapp::VERIFY, &input, Duration::from_secs(30))) {
-                            Ok(v) => println!("automation: OK (Mail answered for message {id}: {})", v.get("subject").and_then(|s| s.as_str()).unwrap_or("")),
+                            Ok(v) => println!(
+                                "automation: OK (Mail answered for message {id}: {})",
+                                v.get("subject").and_then(|s| s.as_str()).unwrap_or("")
+                            ),
                             Err(e) => println!("automation: FAILED — {e:#}"),
                         }
                     }
@@ -256,7 +283,8 @@ fn doctor(cfg: Config, automation: bool) -> Result<()> {
 
 fn bench(cfg: Config, runs: usize) -> Result<()> {
     let ctx = open_ctx(cfg)?;
-    let queries = ["facture", "réunion", "invoice", "meeting", "rendez-vous", "contrat", "merci", "projet", "factura", "urgent"];
+    let queries =
+        ["facture", "réunion", "invoice", "meeting", "rendez-vous", "contrat", "merci", "projet", "factura", "urgent"];
     let mut times = vec![];
     for i in 0..runs {
         let q = queries[i % queries.len()];

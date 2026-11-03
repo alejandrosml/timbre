@@ -20,11 +20,12 @@ use serde::Serialize;
 use crate::config::Config;
 use crate::emlx::{self, Located};
 use crate::mime;
+use crate::norm;
 use crate::quote;
 use crate::store::{self, Store};
 use crate::util::{clip, now_unix};
 
-pub const SCHEMA_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "2";
 /// Longest body text indexed per message (characters).
 const MAX_INDEXED_BODY: usize = 32_000;
 const CHUNK: usize = 256;
@@ -116,7 +117,7 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
     conn.execute_batch(
         "PRAGMA temp_store = MEMORY;
          PRAGMA cache_size = -65536;
-         PRAGMA mmap_size = 268435456;",
+         PRAGMA mmap_size = 1073741824;",
     )?;
     if writable {
         conn.execute_batch(
@@ -124,8 +125,10 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
              PRAGMA synchronous = NORMAL;
              CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )?;
-        let version: Option<String> = conn.query_row("SELECT value FROM meta WHERE key='schema'", [], |r| r.get(0)).optional()?;
-        let mail_dir: Option<String> = conn.query_row("SELECT value FROM meta WHERE key='mail_dir'", [], |r| r.get(0)).optional()?;
+        let version: Option<String> =
+            conn.query_row("SELECT value FROM meta WHERE key='schema'", [], |r| r.get(0)).optional()?;
+        let mail_dir: Option<String> =
+            conn.query_row("SELECT value FROM meta WHERE key='mail_dir'", [], |r| r.get(0)).optional()?;
         let current_dir = store.version_dir.to_string_lossy().to_string();
         if version.as_deref() != Some(SCHEMA_VERSION) || mail_dir.as_deref().is_some_and(|d| d != current_dir) {
             conn.execute_batch("DROP TABLE IF EXISTS docs; DROP TABLE IF EXISTS fts; DELETE FROM meta;")?;
@@ -145,8 +148,7 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
              CREATE INDEX IF NOT EXISTS docs_mailbox ON docs(mailbox);
              CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
                  subject, people, body, attachments,
-                 tokenize = 'unicode61 remove_diacritics 2',
-                 prefix = '2 3'
+                 tokenize = 'unicode61 remove_diacritics 2'
              );",
         )?;
         set_meta(&conn, "schema", SCHEMA_VERSION)?;
@@ -160,7 +162,10 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
 }
 
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    conn.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value])?;
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
     Ok(())
 }
 
@@ -211,16 +216,49 @@ pub fn build_doc(version_dir: &Path, id: i64, mailbox: i64, loc: &Located) -> Do
     let parsed = emlx::read_message(&loc.path).ok().and_then(|raw| mime::parse(&raw));
     if let Some(p) = parsed {
         let (body, _) = clip(&quote::strip_quotes(&p.body), MAX_INDEXED_BODY);
+        let names: Vec<&str> = p.attachments.iter().filter(|a| !a.inline).map(|a| a.name.as_str()).collect();
         row.status = 0;
-        row.subject = p.subject.clone();
-        row.people = people_of(&p);
-        row.body = body;
-        row.attachments = p.attachments.iter().filter(|a| !a.inline).map(|a| a.name.as_str()).collect::<Vec<_>>().join(" ");
+        row.subject = norm::fold(&p.subject).into_owned();
+        row.people = norm::fold(&people_of(&p)).into_owned();
+        row.body = norm::for_index(&body);
+        row.attachments = norm::fold(&names.join(" ")).into_owned();
         row.msgid = p.message_id.clone();
         row.auth = (!p.auth.is_empty()).then(|| p.auth.compact());
         row.hidden = (p.hidden_chars + p.invisible_chars) as i64;
     }
     row
+}
+
+/// Mail is untrusted input: if parsing one message panics, record it as
+/// unreadable (status 1, never retried) and keep indexing the rest.
+pub fn build_doc_guarded(version_dir: &Path, id: i64, mailbox: i64, loc: &Located) -> DocRow {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_doc(version_dir, id, mailbox, loc))) {
+        Ok(row) => row,
+        Err(_) => {
+            tracing::warn!("message {id}: parser panicked; skipped");
+            let path = loc.path.strip_prefix(version_dir).unwrap_or(&loc.path).to_string_lossy().to_string();
+            DocRow {
+                id,
+                mailbox,
+                path,
+                partial: loc.partial,
+                msgid: None,
+                auth: None,
+                hidden: 0,
+                status: 1,
+                subject: String::new(),
+                people: String::new(),
+                body: String::new(),
+                attachments: String::new(),
+            }
+        }
+    }
+}
+
+/// Runs one indexing step, turning a panic into an error so the loop goes on.
+fn guarded<T>(what: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("{what} panicked")))
 }
 
 fn write_docs(conn: &mut Connection, rows: &[DocRow], replace: bool) -> Result<()> {
@@ -230,7 +268,8 @@ fn write_docs(conn: &mut Connection, rows: &[DocRow], replace: bool) -> Result<(
             "INSERT OR REPLACE INTO docs(id, mailbox, path, partial, msgid, auth, hidden, status) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
         let mut del_fts = tx.prepare_cached("DELETE FROM fts WHERE rowid = ?1")?;
-        let mut ins_fts = tx.prepare_cached("INSERT INTO fts(rowid, subject, people, body, attachments) VALUES(?1, ?2, ?3, ?4, ?5)")?;
+        let mut ins_fts =
+            tx.prepare_cached("INSERT INTO fts(rowid, subject, people, body, attachments) VALUES(?1, ?2, ?3, ?4, ?5)")?;
         for r in rows {
             ins_doc.execute(params![r.id, r.mailbox, r.path, r.partial as i64, r.msgid, r.auth, r.hidden, r.status])?;
             if replace {
@@ -306,7 +345,8 @@ impl Indexer {
         self.progress.phase.store(PHASE_INDEXING, Ordering::Relaxed);
         let version_dir = self.store.version_dir.clone();
         for chunk in todo.chunks(CHUNK) {
-            let rows: Vec<DocRow> = chunk.par_iter().map(|(id, mb, loc)| build_doc(&version_dir, *id, *mb, loc)).collect();
+            let rows: Vec<DocRow> =
+                chunk.par_iter().map(|(id, mb, loc)| build_doc_guarded(&version_dir, *id, *mb, loc)).collect();
             write_docs(conn, &rows, false)?;
             self.progress.done.fetch_add(chunk.len() as u64, Ordering::Relaxed);
             self.progress.docs.fetch_add(rows.iter().filter(|r| r.status == 0).count() as u64, Ordering::Relaxed);
@@ -334,7 +374,9 @@ impl Indexer {
 
     /// Data directory of each mailbox's store, learned from indexed paths.
     fn data_roots(&self, conn: &Connection) -> Result<HashMap<i64, PathBuf>> {
-        let mut stmt = conn.prepare("SELECT mailbox, path FROM docs WHERE id IN (SELECT max(id) FROM docs WHERE path != '' GROUP BY mailbox)")?;
+        let mut stmt = conn.prepare(
+            "SELECT mailbox, path FROM docs WHERE id IN (SELECT max(id) FROM docs WHERE path != '' GROUP BY mailbox)",
+        )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
         let mut out = HashMap::new();
         for (mb, rel) in rows.flatten() {
@@ -385,7 +427,8 @@ impl Indexer {
                 return Ok(0);
             }
             let version_dir = self.store.version_dir.clone();
-            let rows: Vec<DocRow> = found.par_iter().map(|(id, mb, loc)| build_doc(&version_dir, *id, *mb, loc)).collect();
+            let rows: Vec<DocRow> =
+                found.par_iter().map(|(id, mb, loc)| build_doc_guarded(&version_dir, *id, *mb, loc)).collect();
             indexed = rows.len();
             write_docs(conn, &rows, true)?;
         }
@@ -456,7 +499,7 @@ impl Indexer {
         if built {
             self.progress.phase.store(PHASE_READY, Ordering::Relaxed);
         }
-        if let Err(e) = self.full_build(&mut conn, false) {
+        if let Err(e) = guarded("index build", || self.full_build(&mut conn, false)) {
             tracing::warn!("index build failed: {e:#}");
             self.progress.fail(&e);
         }
@@ -471,7 +514,7 @@ impl Indexer {
                     mode = store::OpenMode::ReadOnly;
                 }
             }
-            if let Err(e) = self.sync(&mut conn) {
+            if let Err(e) = guarded("index sync", || self.sync(&mut conn)) {
                 tracing::warn!("index sync failed: {e:#}");
                 // Mail may have been upgraded or the connection broken: reopen.
                 match open_with_mode(&self.cfg, &self.store, true) {
@@ -489,8 +532,11 @@ impl Indexer {
 }
 
 /// Finds message files: the index first, then a cached full scan.
+/// When the last full scan ran, and what it found.
+type ScanCache = (Instant, Arc<HashMap<i64, Located>>);
+
 pub struct Locator {
-    scan: Mutex<Option<(Instant, Arc<HashMap<i64, Located>>)>>,
+    scan: Mutex<Option<ScanCache>>,
 }
 
 impl Locator {
@@ -500,22 +546,24 @@ impl Locator {
 
     pub fn locate(&self, conn: &Connection, store: &Store, id: i64) -> Option<Located> {
         let row: Option<(String, i64, i64)> = conn
-            .query_row("SELECT path, partial, mailbox FROM docs WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_row("SELECT path, partial, mailbox FROM docs WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
             .optional()
             .ok()
             .flatten();
-        if let Some((rel, partial, _)) = &row {
-            if !rel.is_empty() {
-                let path = store.version_dir.join(rel);
-                if path.is_file() {
-                    return Some(Located { path, partial: *partial != 0 });
-                }
+        if let Some((rel, partial, _)) = &row
+            && !rel.is_empty()
+        {
+            let path = store.version_dir.join(rel);
+            if path.is_file() {
+                return Some(Located { path, partial: *partial != 0 });
             }
         }
-        self.from_scan(store, id, false).or_else(|| self.from_scan(store, id, true))
+        self.lookup_scan(store, id, false).or_else(|| self.lookup_scan(store, id, true))
     }
 
-    fn from_scan(&self, store: &Store, id: i64, refresh: bool) -> Option<Located> {
+    fn lookup_scan(&self, store: &Store, id: i64, refresh: bool) -> Option<Located> {
         let mut guard = self.scan.lock().unwrap_or_else(|e| e.into_inner());
         let stale = guard.as_ref().is_none_or(|(t, _)| t.elapsed() > Duration::from_secs(60));
         if guard.is_none() || (refresh && stale) {

@@ -101,10 +101,8 @@ pub fn fmt_list(v: &[(String, String)]) -> Vec<String> {
 /// Reduce a sender-supplied attachment name to a safe basename.
 pub fn safe_filename(name: Option<&str>, fallback: &str) -> String {
     let base = name.unwrap_or("").rsplit(['/', '\\']).next().unwrap_or("");
-    let cleaned: String = base
-        .chars()
-        .map(|c| if c.is_control() || matches!(c, ':' | '/' | '\\') { '_' } else { c })
-        .collect();
+    let cleaned: String =
+        base.chars().map(|c| if c.is_control() || matches!(c, ':' | '/' | '\\') { '_' } else { c }).collect();
     let (cleaned, _) = strip_invisible(&cleaned);
     let cleaned = cleaned.trim().trim_start_matches('.').trim().to_string();
     if cleaned.is_empty() { fallback.to_string() } else { cleaned.chars().take(200).collect() }
@@ -117,15 +115,15 @@ pub fn parse_auth(value: &str) -> Auth {
     for part in lower.split(';') {
         let p = part.trim();
         for (key, slot) in [("spf=", &mut auth.spf), ("dkim=", &mut auth.dkim), ("dmarc=", &mut auth.dmarc)] {
-            if slot.is_none() {
-                if let Some(pos) = p.find(key) {
-                    let boundary = pos == 0 || !p.as_bytes()[pos - 1].is_ascii_alphanumeric();
-                    if boundary {
-                        let rest = &p[pos + key.len()..];
-                        let v: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
-                        if !v.is_empty() {
-                            *slot = Some(v);
-                        }
+            if slot.is_none()
+                && let Some(pos) = p.find(key)
+            {
+                let boundary = pos == 0 || !p.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                if boundary {
+                    let rest = &p[pos + key.len()..];
+                    let v: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                    if !v.is_empty() {
+                        *slot = Some(v);
                     }
                 }
             }
@@ -251,8 +249,15 @@ fn plain_differs(plain: &str, shown: &str) -> bool {
 
 fn looks_like_html(s: &str) -> bool {
     let head: String = s.chars().take(2000).collect::<String>().to_ascii_lowercase();
-    head.contains('<') && (head.contains("<html") || head.contains("<body") || head.contains("<div") || head.contains("<p")
-        || head.contains("<br") || head.contains("<table") || head.contains("<span") || head.contains("<a "))
+    head.contains('<')
+        && (head.contains("<html")
+            || head.contains("<body")
+            || head.contains("<div")
+            || head.contains("<p")
+            || head.contains("<br")
+            || head.contains("<table")
+            || head.contains("<span")
+            || head.contains("<a "))
 }
 
 /// Human-readable warnings about the sender's authenticity.
@@ -272,25 +277,26 @@ pub fn warnings(p: &Parsed) -> Vec<String> {
     if let Some((name, _)) = p.from.first() {
         // Display name showing an address other than the real one.
         if let Some(shown) = name.split_whitespace().find(|t| t.contains('@')) {
-            let shown = shown.trim_matches(|c: char| !c.is_alphanumeric() && c != '@' && c != '.' && c != '-' && c != '_');
+            let shown =
+                shown.trim_matches(|c: char| !c.is_alphanumeric() && c != '@' && c != '.' && c != '-' && c != '_');
             if !shown.is_empty() && !shown.eq_ignore_ascii_case(from_addr) {
                 w.push(format!("display name shows an address ({shown}) that is not the real sender ({from_addr})"));
             }
         }
     }
-    if let (Some(fd), Some((_, rt))) = (&from_dom, p.reply_to.first()) {
-        if let Some(rd) = domain_of(rt) {
-            let base = |d: &str| d.rsplitn(3, '.').take(2).collect::<Vec<_>>().join(".");
-            if base(&rd) != base(fd) {
-                w.push(format!("replies would go to another domain ({rd})"));
-            }
+    if let (Some(fd), Some((_, rt))) = (&from_dom, p.reply_to.first())
+        && let Some(rd) = domain_of(rt)
+    {
+        let base = |d: &str| d.rsplitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+        if base(&rd) != base(fd) {
+            w.push(format!("replies would go to another domain ({rd})"));
         }
     }
     if let Some(fd) = &from_dom {
         if fd.split('.').any(|l| l.starts_with("xn--")) {
             w.push(format!("sender domain uses punycode ({fd}): check for a look-alike domain"));
         }
-        if fd.chars().any(|c| !c.is_ascii()) {
+        if !fd.is_ascii() {
             w.push(format!("sender domain contains non-ASCII characters ({fd})"));
         }
     }
@@ -303,7 +309,9 @@ mod tests {
 
     #[test]
     fn auth_results() {
-        let a = parse_auth(" mx.example.com; spf=pass smtp.mailfrom=x.com; dkim=fail header.d=x.com; dmarc=fail (p=REJECT)");
+        let a = parse_auth(
+            " mx.example.com; spf=pass smtp.mailfrom=x.com; dkim=fail header.d=x.com; dmarc=fail (p=REJECT)",
+        );
         assert_eq!(a.spf.as_deref(), Some("pass"));
         assert_eq!(a.dkim.as_deref(), Some("fail"));
         assert_eq!(a.dmarc.as_deref(), Some("fail"));

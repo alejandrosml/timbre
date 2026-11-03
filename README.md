@@ -15,7 +15,7 @@ It is built for the reality of an AI assistant reading untrusted email: hidden i
 
 ## What it does
 
-- **Search everything.** Full-text over subjects, people, message bodies and attachment names, ranked by relevance and recency, accent-insensitive (`réunion` = `reunion`), with filters and Gmail-style operators: `from:`, `to:`, `subject:`, `in:`, `is:unread`, `is:flagged`, `has:attachment`, `after:`, `before:`, `"exact phrase"`, `prefix*`, `-exclude`, `OR`.
+- **Search everything.** Full-text over subjects, people, message bodies and attachment names, ranked by relevance and recency, accent- and ligature-insensitive (`réunion` = `reunion`, `cœur` = `coeur`), with filters and Gmail-style operators: `from:`, `to:`, `subject:`, `in:`, `is:unread`, `is:flagged`, `has:attachment`, `after:`, `before:`, `"exact phrase"`, `prefix*` (3 letters or more), `-exclude`, `OR`.
 - **Read safely.** The text a person sees in Mail, with hidden HTML content removed, sender-authenticity warnings and attachment risks.
 - **Follow conversations.** A whole thread, each message reduced to its new text.
 - **Read attachments.** Text, HTML, CSV, calendars, contact cards and attached emails.

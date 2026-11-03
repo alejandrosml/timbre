@@ -18,7 +18,12 @@ fn is_reply_header(line: &str, next: Option<&str>) -> bool {
         return true;
     }
     // "Le <date>, <nom> a écrit :"
-    if starts("le ") && (lower.ends_with("a écrit :") || lower.ends_with("a écrit:") || joined.ends_with("a écrit :") || joined.ends_with("a écrit:")) {
+    if starts("le ")
+        && (lower.ends_with("a écrit :")
+            || lower.ends_with("a écrit:")
+            || joined.ends_with("a écrit :")
+            || joined.ends_with("a écrit:"))
+    {
         return true;
     }
     // "El <fecha>, <nombre> escribió:"
@@ -27,7 +32,10 @@ fn is_reply_header(line: &str, next: Option<&str>) -> bool {
     }
     matches!(
         lower.as_str(),
-        "-----original message-----" | "-----message d'origine-----" | "-----mensaje original-----" | "----- original message -----"
+        "-----original message-----"
+            | "-----message d'origine-----"
+            | "-----mensaje original-----"
+            | "----- original message -----"
     )
 }
 
@@ -44,8 +52,13 @@ fn is_outlook_block(lines: &[&str], i: usize) -> bool {
     }
     (at + 1..=at + 3).any(|k| {
         let s = get(k);
-        s.starts_with("sent:") || s.starts_with("envoyé :") || s.starts_with("envoyé:") || s.starts_with("enviado:")
-            || s.starts_with("date:") || s.starts_with("date :") || s.starts_with("fecha:")
+        s.starts_with("sent:")
+            || s.starts_with("envoyé :")
+            || s.starts_with("envoyé:")
+            || s.starts_with("enviado:")
+            || s.starts_with("date:")
+            || s.starts_with("date :")
+            || s.starts_with("fecha:")
     })
 }
 

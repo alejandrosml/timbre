@@ -15,7 +15,7 @@ Il est conçu pour la réalité d'un assistant qui lit des mails dont on ne conn
 
 ## Ce qu'il fait
 
-- **Tout retrouver.** Recherche plein texte dans les sujets, les personnes, le corps des messages et le nom des pièces jointes, classée par pertinence et par date, insensible aux accents (`réunion` = `reunion`), avec des filtres et les opérateurs à la Gmail : `from:`, `to:`, `subject:`, `in:`, `is:unread`, `is:flagged`, `has:attachment`, `after:`, `before:`, `"expression exacte"`, `préfixe*`, `-exclure`, `OR`.
+- **Tout retrouver.** Recherche plein texte dans les sujets, les personnes, le corps des messages et le nom des pièces jointes, classée par pertinence et par date, insensible aux accents et aux ligatures (`réunion` = `reunion`, `cœur` = `coeur`), avec des filtres et les opérateurs à la Gmail : `from:`, `to:`, `subject:`, `in:`, `is:unread`, `is:flagged`, `has:attachment`, `after:`, `before:`, `"expression exacte"`, `préfixe*` (3 lettres minimum), `-exclure`, `OR`.
 - **Lire sans risque.** Le texte que vous voyez dans Mail, sans le contenu HTML caché, avec des alertes sur l'authenticité de l'expéditeur et sur les pièces jointes dangereuses.
 - **Suivre une conversation.** Le fil entier, chaque message réduit à ce qu'il apporte de nouveau.
 - **Lire les pièces jointes.** Texte, HTML, CSV, invitations de calendrier, fiches contact et mails joints.

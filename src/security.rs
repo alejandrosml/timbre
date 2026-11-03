@@ -89,11 +89,44 @@ pub fn fence(text: &str) -> String {
 }
 
 const EXECUTABLE: &[&str] = &[
-    "app", "exe", "scr", "com", "bat", "cmd", "command", "sh", "zsh", "js", "jse", "vbs", "vbe", "wsf", "ps1", "msi", "pkg",
-    "mpkg", "dmg", "jar", "apk", "iso", "img", "lnk", "hta", "reg", "dll", "scpt", "applescript", "workflow", "terminal",
-    "action", "url", "webloc", "inetloc",
+    "app",
+    "exe",
+    "scr",
+    "com",
+    "bat",
+    "cmd",
+    "command",
+    "sh",
+    "zsh",
+    "js",
+    "jse",
+    "vbs",
+    "vbe",
+    "wsf",
+    "ps1",
+    "msi",
+    "pkg",
+    "mpkg",
+    "dmg",
+    "jar",
+    "apk",
+    "iso",
+    "img",
+    "lnk",
+    "hta",
+    "reg",
+    "dll",
+    "scpt",
+    "applescript",
+    "workflow",
+    "terminal",
+    "action",
+    "url",
+    "webloc",
+    "inetloc",
 ];
-const DOCUMENT: &[&str] = &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "jpg", "jpeg", "png", "txt", "rtf", "csv", "zip"];
+const DOCUMENT: &[&str] =
+    &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "jpg", "jpeg", "png", "txt", "rtf", "csv", "zip"];
 const MACROS: &[&str] = &["docm", "xlsm", "pptm", "dotm", "xltm", "xlam"];
 
 /// Label attachments that can run code or disguise their type.

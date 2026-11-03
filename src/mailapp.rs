@@ -230,18 +230,23 @@ pub async fn run(script: &str, input: &Value, timeout: Duration) -> Result<Value
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stdout.trim().is_empty() {
         if stderr.contains("-1743") || stderr.contains("Not authorized") {
-            bail!("macOS has not allowed Timbre to control Mail. Allow it in System Settings › Privacy & Security › Automation.");
+            bail!(
+                "macOS has not allowed Timbre to control Mail. Allow it in System Settings › Privacy & Security › Automation."
+            );
         }
         bail!("Mail scripting failed: {}", stderr.trim());
     }
-    let v: Value = serde_json::from_str(stdout.trim()).map_err(|e| anyhow!("unexpected reply from Mail: {e}: {stdout}"))?;
+    let v: Value =
+        serde_json::from_str(stdout.trim()).map_err(|e| anyhow!("unexpected reply from Mail: {e}: {stdout}"))?;
     if v.get("ok").and_then(Value::as_bool) == Some(true) {
         Ok(v.get("result").cloned().unwrap_or(Value::Null))
     } else {
         let msg = v.get("error").and_then(Value::as_str).unwrap_or("unknown error");
         let num = v.get("number").and_then(Value::as_i64);
         if num == Some(-1743) {
-            bail!("macOS has not allowed Timbre to control Mail. Allow it in System Settings › Privacy & Security › Automation.");
+            bail!(
+                "macOS has not allowed Timbre to control Mail. Allow it in System Settings › Privacy & Security › Automation."
+            );
         }
         bail!("Mail refused: {msg}")
     }
@@ -255,8 +260,25 @@ pub fn open_message_url(message_id: &str) -> Result<()> {
     let mut enc = String::new();
     for b in format!("<{message_id}>").bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-' | b'_' | b'~' | b'@' | b'!' | b'$' | b'&' | b'\'' | b'('
-            | b')' | b'*' | b'+' | b',' | b';' | b'=' => enc.push(b as char),
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'.'
+            | b'-'
+            | b'_'
+            | b'~'
+            | b'@'
+            | b'!'
+            | b'$'
+            | b'&'
+            | b'\''
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b';'
+            | b'=' => enc.push(b as char),
             other => enc.push_str(&format!("%{other:02X}")),
         }
     }

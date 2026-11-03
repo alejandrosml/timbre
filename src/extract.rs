@@ -20,13 +20,22 @@ fn decode_text(bytes: &[u8]) -> String {
 
 pub fn to_text(name: &str, mime_type: &str, bytes: &[u8]) -> Result<String, String> {
     if bytes.len() > MAX_INPUT {
-        return Err(format!("This attachment is too large to read as text ({} MB). Use save_attachment.", bytes.len() / 1_048_576));
+        return Err(format!(
+            "This attachment is too large to read as text ({} MB). Use save_attachment.",
+            bytes.len() / 1_048_576
+        ));
     }
     let e = ext(name);
     let m = mime_type.to_ascii_lowercase();
     let texty = m.starts_with("text/")
-        || matches!(m.as_str(), "application/json" | "application/xml" | "application/csv" | "application/x-yaml" | "application/yaml")
-        || matches!(e.as_str(), "txt" | "md" | "csv" | "tsv" | "json" | "xml" | "yaml" | "yml" | "ics" | "vcf" | "log" | "ini" | "toml");
+        || matches!(
+            m.as_str(),
+            "application/json" | "application/xml" | "application/csv" | "application/x-yaml" | "application/yaml"
+        )
+        || matches!(
+            e.as_str(),
+            "txt" | "md" | "csv" | "tsv" | "json" | "xml" | "yaml" | "yml" | "ics" | "vcf" | "log" | "ini" | "toml"
+        );
     if m == "text/html" || matches!(e.as_str(), "html" | "htm") {
         return Ok(html::to_text(&decode_text(bytes)).text);
     }

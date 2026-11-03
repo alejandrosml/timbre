@@ -2,7 +2,7 @@
 name = "timbre-mail"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.98"
 description = "Timbre — the connector for Apple Mail and Claude: instant full-text search, safe reading and filing over MCP."
 authors = ["Alejandro San Martin Lamas (https://github.com/alejandrosml)"]
 license = "MIT"
@@ -20,7 +20,7 @@ path = "src/main.rs"
 rmcp = { version = "3.8", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "process", "time", "sync"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
-mail-parser = "1"
+mail-parser = { version = "1", features = ["full_encoding"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
@@ -35,6 +35,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 scraper = "0.29"
 encoding_rs = "0.8"
 ego-tree = "0.11"
+unicode-normalization = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 embed_plist = "1"
@@ -44,5 +45,5 @@ libc = "0.2"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
-strip = "symbols"
+panic = "unwind"    # one malformed message must not take the server down
+strip = "debuginfo" # keep function names in backtraces
