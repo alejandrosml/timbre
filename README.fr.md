@@ -11,7 +11,7 @@ Timbre permet à Claude de travailler avec le courrier que vous avez déjà dans
 
 Il est conçu pour la réalité d'un assistant qui lit des mails dont on ne connaît pas l'auteur : les instructions cachées sont retirées et signalées, les expéditeurs usurpés sont repérés, rien n'est jamais supprimé définitivement, et rien n'est envoyé sans vous.
 
-> **État :** début de développement (v0.2), en test sur une vraie boîte de 250 000 messages. Vos retours sont bienvenus dans les [Issues](https://github.com/alejandrosml/timbre/issues).
+> **État :** début de développement (v0.3), en test sur une vraie boîte de 250 000 messages. Vos retours sont bienvenus dans les [Issues](https://github.com/alejandrosml/timbre/issues).
 
 ## Ce qu'il fait
 

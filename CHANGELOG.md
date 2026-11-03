@@ -5,6 +5,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-03
+
 ### Added
 - `read_attachment` reads PDF (PDFKit) and Word, RTF and ODT files
   (textutil). macOS converts them in a separate process with a 30 s timeout.
@@ -14,6 +16,7 @@ All notable changes are listed here. The format follows
   once in search results, preferably from the inbox.
 - Messages from people you have written to rank higher (1.5x), so a
   colleague's mail outranks a newsletter with the same words.
+- zstd 0.14.
 
 ## [0.2.0] - 2026-11-03
 
