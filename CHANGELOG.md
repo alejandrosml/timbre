@@ -8,6 +8,8 @@ All notable changes are listed here. The format follows
 ### Changed
 - A message stored in several mailboxes (Gmail labels and All Mail) appears
   once in search results, preferably from the inbox.
+- Messages from people you have written to rank higher (1.5x), so a
+  colleague's mail outranks a newsletter with the same words.
 
 ## [0.2.0] - 2026-11-03
 

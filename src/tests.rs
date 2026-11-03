@@ -243,3 +243,28 @@ fn copies_in_several_mailboxes_are_shown_once() {
     let r = search(&env, SearchParams { mailbox: Some("archive".into()), ..q("meeting") });
     assert_eq!(ids(&r), vec![1400]);
 }
+
+#[test]
+fn people_the_user_wrote_to_rank_first() {
+    let env = setup("affinity", true);
+    let cfg = env.ctx.cfg.clone();
+    let store = env.ctx.store.clone();
+    let mut conn = index::open(&cfg, &store, true).unwrap();
+    let mut indexer = Indexer::new(cfg.clone(), store.clone(), env.ctx.progress.clone());
+    let mail = rusqlite::Connection::open(store.db_path.clone()).unwrap();
+    // Same words, same date; Ann is a correspondent (message 103 was sent to her).
+    for (id, from) in [(1501, ("News Bot", "news@shop.example")), (1502, ("Ann Lee", "ann@example.com"))] {
+        let mut m = fixture::messages().remove(1);
+        m.id = id;
+        m.from = from;
+        m.subject = "Quarterly budget";
+        m.conversation = id;
+        m.raw = format!(
+            "From: {} <{}>\r\nTo: moi@icloud.com\r\nSubject: Quarterly budget\r\nMessage-ID: <q{id}@example.com>\r\n\r\nThe quarterly budget review.\r\n",
+            from.0, from.1
+        );
+        fixture::write_message(&store.version_dir, &mail, &m).unwrap();
+    }
+    assert_eq!(indexer.sync(&mut conn).unwrap(), 2);
+    assert_eq!(ids(&search(&env, q("quarterly budget"))), vec![1502, 1501]);
+}

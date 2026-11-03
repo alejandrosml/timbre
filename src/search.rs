@@ -174,6 +174,44 @@ fn quote_fts(term: &str) -> Option<String> {
     Some(format!("\"{}\"", cleaned.replace('"', "\"\"")))
 }
 
+/// Sender address rows of everyone the user has written to (recipients of
+/// mail in Sent mailboxes), in a temporary table of this connection that is
+/// rebuilt every 10 minutes. Returns false when it cannot be built.
+fn refresh_correspondents(conn: &Connection, store: &Store) -> rusqlite::Result<bool> {
+    let now = now_unix();
+    let built: Option<i64> =
+        conn.query_row("SELECT built FROM temp.correspondents_meta", [], |r| r.get(0)).optional().unwrap_or(None);
+    if built.is_some_and(|t| (0..600).contains(&(now - t))) {
+        return Ok(true);
+    }
+    let Some(col) = store.schema.rec_msg_col.as_deref() else { return Ok(false) };
+    let sent = store.mailboxes_with_roles(&["sent".to_string()]);
+    if sent.is_empty() {
+        return Ok(false);
+    }
+    let list = sent.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    // Readers are query_only; temporary tables are private to the connection.
+    let query_only: bool = conn.query_row("PRAGMA query_only", [], |r| r.get(0))?;
+    conn.execute_batch("PRAGMA query_only = OFF;")?;
+    let built = conn.execute_batch(&format!(
+        "CREATE TEMP TABLE IF NOT EXISTS correspondents(addr INTEGER PRIMARY KEY);
+         CREATE TEMP TABLE IF NOT EXISTS correspondents_meta(built INTEGER);
+         DELETE FROM temp.correspondents;
+         DELETE FROM temp.correspondents_meta;
+         INSERT OR IGNORE INTO temp.correspondents(addr)
+             SELECT a2.ROWID FROM mail.addresses a2 WHERE lower(a2.address) IN (
+                 SELECT lower(a.address) FROM mail.recipients r
+                 JOIN mail.messages m ON m.ROWID = r.{col}
+                 JOIN mail.addresses a ON a.ROWID = r.address
+                 WHERE m.mailbox IN ({list}));
+         INSERT INTO temp.correspondents_meta(built) VALUES({now});"
+    ));
+    if query_only {
+        conn.execute_batch("PRAGMA query_only = ON;")?;
+    }
+    built.map(|_| true)
+}
+
 /// Keep the first `limit` distinct messages of `ranked`: copies sharing a
 /// Message-ID collapse into one, taking the copy with the lowest `preference`.
 /// Returns the kept ids and how many ranked ids were consumed (for paging).
@@ -393,9 +431,19 @@ pub fn search(
         let order = match sort.as_str() {
             "newest" => "m.date_received DESC".to_string(),
             "oldest" => "m.date_received ASC".to_string(),
-            // bm25 is negative (lower is better); recent messages get up to 1.5x.
-            _ => "bm25(fts, 4.0, 2.5, 1.0, 2.0) * (1.0 + 0.75 / (1.0 + MAX(0, ? - m.date_received) / 3888000.0)) ASC"
-                .to_string(),
+            // bm25 is negative (lower is better). Field weights: subject 4,
+            // people 2.5, body 1, attachment names 2. Recent mail gets up to
+            // 1.75x (45-day scale); people the user has written to, 1.5x.
+            _ => {
+                let affinity = if refresh_correspondents(conn, store).unwrap_or(false) {
+                    " * (CASE WHEN m.sender IN (SELECT addr FROM temp.correspondents) THEN 1.5 ELSE 1.0 END)"
+                } else {
+                    ""
+                };
+                format!(
+                    "bm25(fts, 4.0, 2.5, 1.0, 2.0) * (1.0 + 0.75 / (1.0 + MAX(0, ? - m.date_received) / 3888000.0)){affinity} ASC"
+                )
+            }
         };
         let args = vec![Value::Text(fts.clone().unwrap_or_default())];
         ("fts JOIN mail.messages m ON m.ROWID = fts.rowid".to_string(), args, order)
