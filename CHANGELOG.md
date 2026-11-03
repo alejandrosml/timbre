@@ -5,6 +5,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-03
+
 ### Fixed
 - Found by an independent review, each covered by a regression test:
   a forced rebuild now empties the index in one transaction, and tables
