@@ -15,10 +15,10 @@ Il est conçu pour la réalité d'un assistant qui lit des mails dont on ne conn
 
 ## Ce qu'il fait
 
-- **Tout retrouver.** Recherche plein texte dans les sujets, les personnes, le corps des messages et le nom des pièces jointes, classée par pertinence et par date, insensible aux accents et aux ligatures (`réunion` = `reunion`, `cœur` = `coeur`), avec des filtres et les opérateurs à la Gmail : `from:`, `to:`, `subject:`, `in:`, `is:unread`, `is:flagged`, `has:attachment`, `after:`, `before:`, `"expression exacte"`, `préfixe*` (3 lettres minimum), `-exclure`, `OR`.
+- **Tout retrouver.** Recherche plein texte dans les sujets, les personnes, le corps des messages et le nom des pièces jointes, classée par pertinence, par date et selon que vous échangez avec l'expéditeur, un seul résultat par message même quand Gmail le range sous plusieurs libellés, insensible aux accents et aux ligatures (`réunion` = `reunion`, `cœur` = `coeur`), avec des filtres et les opérateurs à la Gmail : `from:`, `to:`, `subject:`, `in:`, `is:unread`, `is:flagged`, `has:attachment`, `after:`, `before:`, `"expression exacte"`, `préfixe*` (3 lettres minimum), `-exclure`, `OR`.
 - **Lire sans risque.** Le texte que vous voyez dans Mail, sans le contenu HTML caché, avec des alertes sur l'authenticité de l'expéditeur et sur les pièces jointes dangereuses.
 - **Suivre une conversation.** Le fil entier, chaque message réduit à ce qu'il apporte de nouveau.
-- **Lire les pièces jointes.** Texte, HTML, CSV, invitations de calendrier, fiches contact et mails joints.
+- **Lire les pièces jointes.** PDF, Word, RTF et ODT (convertis par macOS dans un processus séparé), texte, HTML, CSV, invitations de calendrier, fiches contact et mails joints.
 - **Agir, de façon réversible.** Les brouillons (nouveau, réponse, réponse à tous, transfert) s'ouvrent dans Mail pour que vous les relisiez ; marquer lu ou non lu, poser un drapeau ; déplacer vers les archives, la corbeille ou n'importe quelle boîte — avec **annulation**.
 - **Envoyer, seulement si vous l'autorisez.** Désactivé par défaut. Une fois activé, chaque envoi demande deux étapes explicites, avec une liste facultative de destinataires autorisés et un plafond par heure.
 

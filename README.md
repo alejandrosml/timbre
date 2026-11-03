@@ -15,10 +15,10 @@ It is built for the reality of an AI assistant reading untrusted email: hidden i
 
 ## What it does
 
-- **Search everything.** Full-text over subjects, people, message bodies and attachment names, ranked by relevance and recency, accent- and ligature-insensitive (`réunion` = `reunion`, `cœur` = `coeur`), with filters and Gmail-style operators: `from:`, `to:`, `subject:`, `in:`, `is:unread`, `is:flagged`, `has:attachment`, `after:`, `before:`, `"exact phrase"`, `prefix*` (3 letters or more), `-exclude`, `OR`.
+- **Search everything.** Full-text over subjects, people, message bodies and attachment names, ranked by relevance, recency and whether you correspond with the sender, one result per message even when Gmail files it under several labels, accent- and ligature-insensitive (`réunion` = `reunion`, `cœur` = `coeur`), with filters and Gmail-style operators: `from:`, `to:`, `subject:`, `in:`, `is:unread`, `is:flagged`, `has:attachment`, `after:`, `before:`, `"exact phrase"`, `prefix*` (3 letters or more), `-exclude`, `OR`.
 - **Read safely.** The text a person sees in Mail, with hidden HTML content removed, sender-authenticity warnings and attachment risks.
 - **Follow conversations.** A whole thread, each message reduced to its new text.
-- **Read attachments.** Text, HTML, CSV, calendars, contact cards and attached emails.
+- **Read attachments.** PDF, Word, RTF and ODT (converted by macOS in a separate process), text, HTML, CSV, calendars, contact cards and attached emails.
 - **Act, reversibly.** Drafts (new, reply, reply all, forward) open in Mail for you to review; mark read/unread, flag; move to archive, trash or any mailbox — with **undo**.
 - **Send, only if you allow it.** Off by default. When enabled, every message takes two explicit steps, with an optional recipient allowlist and an hourly cap.
 
