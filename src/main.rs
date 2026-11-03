@@ -6,6 +6,8 @@
 mod actions;
 mod app;
 mod config;
+#[cfg(debug_assertions)]
+mod corpus;
 mod degraded;
 mod emlx;
 mod extract;
@@ -77,6 +79,14 @@ enum Command {
     #[cfg(debug_assertions)]
     #[command(hide = true)]
     DevFixture { dir: std::path::PathBuf },
+    /// Build a large synthetic store for benchmarks.
+    #[cfg(debug_assertions)]
+    #[command(hide = true)]
+    DevCorpus {
+        dir: std::path::PathBuf,
+        #[arg(default_value_t = 20_000)]
+        count: usize,
+    },
     /// Measure search latency on this Mac.
     Bench {
         #[arg(long, default_value_t = 30)]
@@ -105,6 +115,8 @@ fn main() -> Result<()> {
         Command::Doctor { automation } => doctor(cfg, automation),
         #[cfg(debug_assertions)]
         Command::DevFixture { dir } => fixture::build(&dir).map(|_| ()),
+        #[cfg(debug_assertions)]
+        Command::DevCorpus { dir, count } => corpus::build(&dir, count).map(|_| ()),
         Command::Bench { runs } => bench(cfg, runs),
     }
 }
@@ -128,6 +140,12 @@ fn serve(cfg: Config) -> Result<()> {
         }
     };
     drop(index::open(&cfg, &store, true)?);
+    // Parsing threads for the index: utility priority, and roomy stacks for
+    // hostile, deeply nested messages.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .stack_size(8 << 20)
+        .start_handler(|_| index::background_priority())
+        .build_global();
     let progress = Arc::new(index::Progress::default());
     let indexer = index::Indexer::new(cfg.clone(), store.clone(), progress.clone());
     std::thread::Builder::new().name("timbre-index".into()).spawn(move || indexer.run_forever())?;
@@ -191,6 +209,7 @@ fn run_index(cfg: Config, rebuild: bool) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::print_stdout)] // CLI output
 fn run_search(cfg: Config, query: String, limit: u32, json: bool) -> Result<()> {
     let ctx = open_ctx(cfg)?;
     let params = search::SearchParams { query: Some(query), limit: Some(limit), ..Default::default() };
@@ -214,6 +233,7 @@ fn run_search(cfg: Config, query: String, limit: u32, json: bool) -> Result<()> 
     Ok(())
 }
 
+#[allow(clippy::print_stdout)] // CLI output
 fn doctor(cfg: Config, automation: bool) -> Result<()> {
     println!("Timbre {}", env!("CARGO_PKG_VERSION"));
     println!("binary: {}", std::env::current_exe()?.display());
@@ -281,6 +301,7 @@ fn doctor(cfg: Config, automation: bool) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::print_stdout)] // CLI output
 fn bench(cfg: Config, runs: usize) -> Result<()> {
     let ctx = open_ctx(cfg)?;
     let queries =

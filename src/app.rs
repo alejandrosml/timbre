@@ -420,6 +420,7 @@ fn quarantine(path: &std::path::Path) {
         return;
     };
     // SAFETY: valid NUL-terminated strings and a correctly sized buffer.
+    #[allow(unsafe_code)]
     unsafe {
         libc::setxattr(p.as_ptr(), name.as_ptr(), value.as_ptr().cast(), value.len(), 0, 0);
     }

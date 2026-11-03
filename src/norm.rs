@@ -9,6 +9,25 @@ use std::borrow::Cow;
 
 use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfkc_quick};
 
+/// True for characters NFKC leaves unchanged on their own. Accented Latin
+/// letters and common punctuation answer without a table lookup.
+fn nfkc_stable(c: char) -> bool {
+    match c {
+        '\u{00C0}'..='\u{0131}' | '\u{0134}'..='\u{013E}' | '\u{0141}'..='\u{0148}' | '\u{014A}'..='\u{017E}' => true,
+        '\u{00A1}'..='\u{00A7}'
+        | '\u{00A9}'
+        | '\u{00AB}'..='\u{00AE}'
+        | '\u{00B0}'
+        | '\u{00B1}'
+        | '\u{00B6}'
+        | '\u{00B7}'
+        | '\u{00BB}'
+        | '\u{00BF}' => true,
+        '\u{2013}' | '\u{2014}' | '\u{2018}'..='\u{2022}' | '\u{20AC}' => true,
+        _ => is_nfkc_quick(std::iter::once(c)) == IsNormalized::Yes,
+    }
+}
+
 fn ligature(c: char) -> Option<&'static str> {
     Some(match c {
         'œ' => "oe",
@@ -24,22 +43,25 @@ fn ligature(c: char) -> Option<&'static str> {
 /// NFKC plus ligature folding. Borrows when nothing changes (ASCII text,
 /// the common case, costs one scan).
 pub fn fold(s: &str) -> Cow<'_, str> {
-    if s.is_ascii() {
+    let changes = |c: char| !c.is_ascii() && (ligature(c).is_some() || !nfkc_stable(c));
+    let Some(first) = s.char_indices().find(|&(_, c)| changes(c)).map(|(i, _)| i) else {
         return Cow::Borrowed(s);
-    }
-    let nfkc = is_nfkc_quick(s.chars()) == IsNormalized::Yes;
-    if nfkc && !s.chars().any(|c| ligature(c).is_some()) {
-        return Cow::Borrowed(s);
-    }
-    let mut out = String::with_capacity(s.len() + 8);
-    let mut push = |c: char| match ligature(c) {
-        Some(r) => out.push_str(r),
-        None => out.push(c),
     };
-    if nfkc {
-        s.chars().for_each(&mut push);
-    } else {
-        s.nfkc().for_each(&mut push);
+    // Characters are normalized one at a time: composition across characters
+    // (a letter followed by a combining accent) is left to the tokenizer,
+    // which removes diacritics anyway.
+    let mut out = String::with_capacity(s.len() + 8);
+    out.push_str(&s[..first]);
+    for c in s[first..].chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else if let Some(r) = ligature(c) {
+            out.push_str(r);
+        } else if nfkc_stable(c) {
+            out.push(c);
+        } else {
+            out.extend(std::iter::once(c).nfkc());
+        }
     }
     Cow::Owned(out)
 }
@@ -101,6 +123,16 @@ mod tests {
         assert_eq!(fold("ＡＢＣ"), "ABC");
         assert!(matches!(fold("déjà vu"), Cow::Borrowed(_)));
         assert!(matches!(fold("plain ascii"), Cow::Borrowed(_)));
+        assert_eq!(fold("prix\u{00A0}: 3\u{2026} ½"), "prix : 3... 1\u{2044}2");
+        for c in ('\u{A0}'..='\u{24F}').chain('\u{2000}'..='\u{206F}') {
+            let one = c.to_string();
+            let reference: String = one.nfkc().collect();
+            let expected = match ligature(c) {
+                Some(r) => r.to_string(),
+                None => reference,
+            };
+            assert_eq!(fold(&one), expected, "U+{:04X}", c as u32);
+        }
     }
 
     #[test]

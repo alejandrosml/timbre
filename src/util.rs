@@ -101,18 +101,22 @@ pub fn is_invisible(c: char) -> bool {
 
 /// Remove invisible characters, returning the cleaned text and the count removed.
 pub fn strip_invisible(s: &str) -> (String, usize) {
+    let Some(start) = s.bytes().position(|b| b >= 0x80) else {
+        return (s.to_string(), 0);
+    };
+    let Some(first) = s[start..].char_indices().find(|&(_, c)| is_invisible(c)).map(|(i, _)| start + i) else {
+        return (s.to_string(), 0);
+    };
+    let mut out = String::with_capacity(s.len());
+    out.push_str(&s[..first]);
     let mut removed = 0;
-    let out: String = s
-        .chars()
-        .filter(|c| {
-            if is_invisible(*c) {
-                removed += 1;
-                false
-            } else {
-                true
-            }
-        })
-        .collect();
+    for c in s[first..].chars() {
+        if is_invisible(c) {
+            removed += 1;
+        } else {
+            out.push(c);
+        }
+    }
     (out, removed)
 }
 
@@ -120,8 +124,9 @@ pub fn strip_invisible(s: &str) -> (String, usize) {
 pub fn tidy_whitespace(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut blank_run = 0;
+    let mut collapsed = String::new();
     for line in s.lines() {
-        let mut collapsed = String::with_capacity(line.len());
+        collapsed.clear();
         let mut prev_space = false;
         for c in line.chars() {
             let space = c == ' ' || c == '\t' || c == '\u{00A0}';

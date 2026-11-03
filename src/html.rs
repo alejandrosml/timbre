@@ -324,8 +324,9 @@ impl Walker<'_> {
                 }
             }
             Node::Element(e) => {
-                let name = e.name().to_ascii_lowercase();
-                if SKIP.contains(&name.as_str()) {
+                // html5ever lower-cases element names of HTML documents.
+                let name = e.name();
+                if SKIP.contains(&name) {
                     if name == "style" || name == "script" || name == "head" || name == "title" {
                         return;
                     }
@@ -336,7 +337,7 @@ impl Walker<'_> {
                     self.count_hidden(node);
                     return;
                 }
-                match name.as_str() {
+                match name {
                     "br" => {
                         self.out.push('\n');
                         return;
@@ -352,7 +353,7 @@ impl Walker<'_> {
                         self.out.push_str("• ");
                     }
                     "tr" => self.newline(),
-                    _ if BLOCK.contains(&name.as_str()) => self.newline(),
+                    _ if BLOCK.contains(&name) => self.newline(),
                     _ => {}
                 }
                 if self.depth >= MAX_DEPTH {
@@ -365,7 +366,7 @@ impl Walker<'_> {
                     self.walk(child);
                 }
                 self.depth -= 1;
-                match name.as_str() {
+                match name {
                     "a" => {
                         if let Some(href) = e.attr("href").map(str::trim) {
                             let visible = self.out[start..].trim().to_string();
@@ -395,7 +396,7 @@ impl Walker<'_> {
                     }
                     "td" | "th" => self.out.push(' '),
                     "tr" | "li" => self.newline(),
-                    _ if BLOCK.contains(&name.as_str()) => self.newline(),
+                    _ if BLOCK.contains(&name) => self.newline(),
                     _ => {}
                 }
             }

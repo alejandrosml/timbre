@@ -133,7 +133,17 @@ pub fn parse_auth(value: &str) -> Auth {
 }
 
 /// Parse a message. Returns `None` when the bytes are not a message at all.
+/// Parse a message for display, with every check.
 pub fn parse(raw: &[u8]) -> Option<Parsed> {
+    parse_inner(raw, true)
+}
+
+/// Parse a message for the index: skips checks only shown when reading.
+pub fn parse_for_index(raw: &[u8]) -> Option<Parsed> {
+    parse_inner(raw, false)
+}
+
+fn parse_inner(raw: &[u8], for_display: bool) -> Option<Parsed> {
     let msg = MessageParser::default().parse(raw)?;
     let mut p = Parsed {
         subject: msg.subject().unwrap_or("").trim().to_string(),
@@ -175,7 +185,7 @@ pub fn parse(raw: &[u8]) -> Option<Parsed> {
     match (html_body, text_body) {
         (Some(h), plain) if looks_like_html(&h) => {
             let t = html::to_text(&h);
-            p.plain_differs = plain.as_deref().is_some_and(|pt| plain_differs(pt, &t.text));
+            p.plain_differs = for_display && plain.as_deref().is_some_and(|pt| plain_differs(pt, &t.text));
             p.body = t.text;
             p.hidden_chars = t.hidden_chars;
             p.invisible_chars = t.invisible_chars;

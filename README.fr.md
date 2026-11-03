@@ -7,11 +7,11 @@ Recherche instantanée dans tout votre courrier, lecture, brouillons et rangemen
 
 ---
 
-Timbre permet à Claude de travailler avec le courrier que vous avez déjà dans Mail, quel que soit le compte (iCloud, Gmail, Exchange, IMAP…). Il lit directement les données de Mail sur le disque : une recherche parmi des centaines de milliers de messages, corps compris, répond en quelques millisecondes. Et quand vous lui demandez un brouillon, un rangement ou un drapeau, il agit dans Mail par l'interface de scripts officielle.
+Timbre permet à Claude de travailler avec le courrier que vous avez déjà dans Mail, quel que soit le compte (iCloud, Gmail, Exchange, IMAP…). Il lit directement les données de Mail sur le disque : une recherche parmi des centaines de milliers de messages, corps compris, répond en quelques dizaines de millisecondes. Et quand vous lui demandez un brouillon, un rangement ou un drapeau, il agit dans Mail par l'interface de scripts officielle.
 
 Il est conçu pour la réalité d'un assistant qui lit des mails dont on ne connaît pas l'auteur : les instructions cachées sont retirées et signalées, les expéditeurs usurpés sont repérés, rien n'est jamais supprimé définitivement, et rien n'est envoyé sans vous.
 
-> **État :** début de développement (v0.1), en test sur une vraie boîte de 250 000 messages. Vos retours sont bienvenus dans les [Issues](https://github.com/alejandrosml/timbre/issues).
+> **État :** début de développement (v0.2), en test sur une vraie boîte de 250 000 messages. Vos retours sont bienvenus dans les [Issues](https://github.com/alejandrosml/timbre/issues).
 
 ## Ce qu'il fait
 
@@ -46,6 +46,19 @@ Timbre reprend les meilleures idées des connecteurs Apple Mail open source exis
 - **Pièces jointes.** Les exécutables, les doubles extensions (`facture.pdf.app`) et les fichiers à macros sont signalés. Les fichiers enregistrés vont dans un seul dossier de votre choix, ne sont jamais écrasés et sont marqués pour que Gatekeeper les contrôle.
 - **Le minimum de droits.** Les outils de lecture sont déclarés en lecture seule, Claude peut donc s'en servir sans vous demander ; ceux qui modifient quelque chose sont déclarés comme tels ; les outils d'envoi n'existent même pas tant que vous ne les avez pas activés.
 - **Une permission, pour Timbre seul.** L'accès complet au disque est donné au binaire signé de Timbre, pas à un lanceur partagé avec d'autres extensions.
+
+## Performances
+
+Une boîte synthétique de 20 000 messages (788 Mo : lettres d'information en HTML, réponses avec historique cité, pièces jointes, textes en français, anglais et espagnol au vocabulaire réaliste), indexée sur une petite machine virtuelle à 2 cœurs :
+
+| | v0.1.0 | v0.2.0 |
+|---|---|---|
+| Construction complète de l'index | 28,6 s | 13,0 s |
+| Taille de l'index | 298 Mo | 124 Mo |
+| Recherche, médiane | 42 ms | 16 ms |
+| Recherche, 95ᵉ centile | 62 ms | 29 ms |
+
+Ce qui a fait la différence : les messages sont analysés sur tous les cœurs pendant qu'un seul fil d'écriture enregistre de grosses transactions, avec les fusions de FTS5 repoussées à la fin et une table de termes en attente de 64 Mio ; le texte gardé pour les extraits n'est stocké qu'une fois, compressé en zstd ; il n'y a plus d'index de préfixes ; extraits et détails ne sont calculés que pour la page renvoyée, et les requêtes très larges sont classées parmi leurs 10 000 résultats les plus récents. Les vérifications utiles seulement à la lecture d'un message ne sont plus faites à l'indexation. Pour reproduire : `timbre dev-corpus /tmp/corpus 20000` (compilation de débogage), puis `timbre index --rebuild` et `timbre bench` en compilation optimisée, avec `TIMBRE_MAIL_ROOT`, `TIMBRE_ACCOUNTS_DB` et `TIMBRE_DATA_DIR` pointant dessus. Les chiffres d'une vraie boîte de 250 000 messages sur Mac suivront.
 
 ## Installation
 

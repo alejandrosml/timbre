@@ -1,6 +1,6 @@
 [package]
 name = "timbre-mail"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
 description = "Timbre — the connector for Apple Mail and Claude: instant full-text search, safe reading and filing over MCP."
@@ -19,7 +19,8 @@ path = "src/main.rs"
 [dependencies]
 rmcp = { version = "3.8", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "process", "time", "sync"] }
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "functions"] }
+zstd = { version = "0.13", default-features = false }
 mail-parser = { version = "1", features = ["full_encoding"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -40,6 +41,14 @@ unicode-normalization = "0.1"
 [target.'cfg(target_os = "macos")'.dependencies]
 embed_plist = "1"
 libc = "0.2"
+
+[lints.rust]
+unsafe_code = "deny" # the few libc calls are allowed where they are made
+
+[lints.clippy]
+# stdout carries the MCP protocol: only CLI subcommands may print to it.
+print_stdout = "deny"
+dbg_macro = "deny"
 
 [profile.release]
 opt-level = 3

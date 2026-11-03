@@ -62,13 +62,36 @@ fn is_outlook_block(lines: &[&str], i: usize) -> bool {
     })
 }
 
+fn starts_ci(s: &str, prefix: &str) -> bool {
+    s.as_bytes().get(..prefix.len()).is_some_and(|h| h.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+/// Cheap tests that rule out most lines before the exact (allocating) ones.
+fn may_be_forward(t: &str) -> bool {
+    ["essage", "ESSAGE", "ensaje", "ENSAJE"].iter().any(|n| t.contains(n))
+}
+
+fn may_be_header(t: &str) -> bool {
+    starts_ci(t, "on ")
+        || starts_ci(t, "le ")
+        || starts_ci(t, "el ")
+        || t.starts_with("--")
+        || t.starts_with("__")
+        || starts_ci(t, "from:")
+        || starts_ci(t, "de:")
+        || starts_ci(t, "de :")
+}
+
 /// Return the new content of a message: quoted history and signature removed.
 pub fn strip_quotes(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let mut out: Vec<&str> = Vec::with_capacity(lines.len());
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim_start();
-        let lower = t.to_lowercase();
+        if t.starts_with('>') {
+            continue;
+        }
+        let lower = if may_be_forward(t) { t.to_lowercase() } else { String::new() };
         if lower.contains("forwarded message")
             || lower.contains("message transféré")
             || lower.contains("message réexpédié")
@@ -78,11 +101,8 @@ pub fn strip_quotes(text: &str) -> String {
             out.extend_from_slice(&lines[i..]);
             break;
         }
-        if is_reply_header(line, lines.get(i + 1).copied()) || is_outlook_block(&lines, i) {
+        if may_be_header(t) && (is_reply_header(line, lines.get(i + 1).copied()) || is_outlook_block(&lines, i)) {
             break;
-        }
-        if t.starts_with('>') {
-            continue;
         }
         if *line == "-- " || (line.trim() == "--" && lines.len() - i <= 15) {
             break;

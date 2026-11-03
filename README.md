@@ -7,11 +7,11 @@ Instant full-text search of all your mail, safe reading, drafting and filing —
 
 ---
 
-Timbre lets Claude work with the mail you already have in Apple Mail, whatever the account (iCloud, Gmail, Exchange, IMAP…). It reads Mail's own data on disk, so a search across hundreds of thousands of messages — bodies included — answers in milliseconds, and it acts in Mail through the official scripting interface when you ask it to draft, file or flag.
+Timbre lets Claude work with the mail you already have in Apple Mail, whatever the account (iCloud, Gmail, Exchange, IMAP…). It reads Mail's own data on disk, so a search across hundreds of thousands of messages — bodies included — answers in tens of milliseconds, and it acts in Mail through the official scripting interface when you ask it to draft, file or flag.
 
 It is built for the reality of an AI assistant reading untrusted email: hidden instructions are stripped and reported, forged senders are flagged, nothing is ever deleted for good, and nothing is sent without you.
 
-> **Status:** early development (v0.1), being tested on a real 250,000-message mailbox. Feedback welcome in [Issues](https://github.com/alejandrosml/timbre/issues).
+> **Status:** early development (v0.2), being tested on a real 250,000-message mailbox. Feedback welcome in [Issues](https://github.com/alejandrosml/timbre/issues).
 
 ## What it does
 
@@ -46,6 +46,19 @@ Timbre takes the best ideas of the existing open-source Apple Mail connectors an
 - **Attachments.** Executables, double extensions (`invoice.pdf.app`) and macro files are labelled; saved files go to one folder you choose, are never overwritten and are marked for Gatekeeper.
 - **Least privilege.** Read tools are marked read-only so Claude can use them without asking; tools that change anything are marked as such; sending tools do not even exist until you enable them.
 - **One permission, for Timbre only.** Full Disk Access is granted to Timbre's own signed binary, not to a launcher shared with other extensions.
+
+## Performance
+
+A synthetic mailbox of 20,000 messages (788 MB: HTML newsletters, replies with quoted history, attachments, French, English and Spanish text with a realistic vocabulary), indexed on a small 2-core virtual machine:
+
+| | v0.1.0 | v0.2.0 |
+|---|---|---|
+| Full index build | 28.6 s | 13.0 s |
+| Index size on disk | 298 MB | 124 MB |
+| Search, median | 42 ms | 16 ms |
+| Search, 95th percentile | 62 ms | 29 ms |
+
+What made the difference: messages are parsed on every core while a single writer commits large transactions, with FTS5's merging deferred and a 64 MiB pending-terms table; the text kept for snippets is stored once, compressed with zstd; there is no prefix index; snippets and details are computed for the returned page only, and very broad queries are ranked over their 10,000 most recent matches. Index-time work that only matters when reading a message is skipped. To reproduce: `timbre dev-corpus /tmp/corpus 20000` (debug build), then `timbre index --rebuild` and `timbre bench` from a release build with `TIMBRE_MAIL_ROOT`, `TIMBRE_ACCOUNTS_DB` and `TIMBRE_DATA_DIR` pointing at it. Figures from a real 250,000-message mailbox on a Mac will follow.
 
 ## Install
 

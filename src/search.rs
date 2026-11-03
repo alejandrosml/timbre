@@ -1,7 +1,9 @@
 //! Search: full-text over Timbre's index joined with Mail's live metadata,
 //! or metadata-only while the index is being built.
 
-use rusqlite::{Connection, types::Value};
+use std::collections::HashMap;
+
+use rusqlite::{Connection, OptionalExtension, types::Value};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -84,7 +86,9 @@ pub struct SearchResult {
     pub results: Vec<Hit>,
 }
 
-const COUNT_CAP: u64 = 10_000;
+const COUNT_CAP: u64 = 1_000;
+/// Broad queries are ranked over this many of their most recent matches.
+const RANK_WINDOW: usize = 10_000;
 
 /// Gmail-style operators pulled out of a free-text query.
 #[derive(Debug, Default, PartialEq)]
@@ -383,47 +387,81 @@ pub fn search(
     };
 
     let where_sql = f.sql.join(" AND ");
+    let fts_expr = fts.clone().unwrap_or_default();
     let fts_clause = if use_fts { "fts MATCH ? AND " } else { "" };
+    // Subjects and senders are joined only when a filter needs them.
+    let joins = if !use_fts || from.is_some() || subject.is_some() { Store::META_JOINS } else { "" };
+    let err = |e: rusqlite::Error| format!("search failed: {e}");
 
-    // Total (capped for speed).
+    // Total (capped: an exact count of a broad query costs more than the page).
     let count_sql = format!(
         "SELECT count(*) FROM (SELECT 1 FROM {from_sql} {joins} WHERE {fts_clause}{where_sql} LIMIT {cap})",
-        joins = Store::META_JOINS,
         cap = COUNT_CAP + 1
     );
     let mut count_args = select_args.clone();
     count_args.extend(f.args.iter().cloned());
     let total: u64 = conn
         .query_row(&count_sql, rusqlite::params_from_iter(count_args.iter()), |r| r.get::<_, i64>(0))
-        .map_err(|e| format!("search failed: {e}"))? as u64;
+        .map_err(err)? as u64;
 
-    let extra = if use_fts { "snippet(fts, -1, '«', '»', '…', 14), d.auth" } else { "NULL, d.auth" };
-    let select_sql = format!(
-        "SELECT {cols}, {extra} FROM {from_sql} {joins} LEFT JOIN docs d ON d.id = m.ROWID \
-         WHERE {fts_clause}{where_sql} ORDER BY {order} LIMIT ? OFFSET ?",
-        cols = store.meta_columns(),
-        joins = Store::META_JOINS,
-    );
+    // Very broad queries are ranked over their most recent matches only:
+    // bm25 costs a little for every match, and recency weighs in anyway.
+    let mut window = String::new();
+    if use_fts && order.contains("bm25") && (offset + limit) as usize <= RANK_WINDOW / 2 {
+        let floor: Option<i64> = conn
+            .query_row(
+                "SELECT rowid FROM fts WHERE fts MATCH ?1 ORDER BY rowid DESC LIMIT 1 OFFSET ?2",
+                rusqlite::params![fts_expr, RANK_WINDOW as i64 - 1],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(err)?;
+        if let Some(floor) = floor {
+            window = format!("fts.rowid >= {floor} AND ");
+        }
+    }
     select_args.extend(f.args.iter().cloned());
     if use_fts && order.contains('?') {
         select_args.push(Value::Integer(now_db));
     }
     select_args.push(Value::Integer(limit as i64));
     select_args.push(Value::Integer(offset as i64));
+    // Rank ids only. Metadata and snippets are read for the returned page
+    // alone: computing snippets for every match made searches 2.5x slower.
+    let rank = |window: &str| -> Result<Vec<i64>, String> {
+        let sql = format!(
+            "SELECT m.ROWID FROM {from_sql} {joins} WHERE {fts_clause}{window}{where_sql} ORDER BY {order} LIMIT ? OFFSET ?"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(err)?;
+        let ids = stmt.query_map(rusqlite::params_from_iter(select_args.iter()), |r| r.get(0)).map_err(err)?;
+        ids.collect::<rusqlite::Result<Vec<i64>>>().map_err(err)
+    };
+    let mut ids = rank(&window)?;
+    if !window.is_empty() && (ids.len() as u32) < limit && total > offset as u64 + ids.len() as u64 {
+        // Filters removed most of the window: rank every match instead.
+        ids = rank("")?;
+    }
 
-    let mut stmt = conn.prepare(&select_sql).map_err(|e| format!("search failed: {e}"))?;
+    let mut metas: HashMap<i64, Meta> = store
+        .get_metas(conn, &ids)
+        .map_err(|e| format!("search failed: {e}"))?
+        .into_iter()
+        .map(|m| (m.id, m))
+        .collect();
+    let mut snippet_stmt = conn
+        .prepare_cached("SELECT snippet(fts, -1, '«', '»', '…', 14) FROM fts WHERE fts MATCH ?1 AND rowid = ?2")
+        .map_err(err)?;
+    let mut auth_stmt = conn.prepare_cached("SELECT auth FROM docs WHERE id = ?1").map_err(err)?;
     let mailboxes = store.mailboxes();
-    let rows = stmt
-        .query_map(rusqlite::params_from_iter(select_args.iter()), |r| {
-            let meta: Meta = store.row_meta(r, 0)?;
-            let snippet: Option<String> = r.get(13)?;
-            let auth: Option<String> = r.get(14)?;
-            Ok((meta, snippet, auth))
-        })
-        .map_err(|e| format!("search failed: {e}"))?;
     let mut results = vec![];
-    for row in rows {
-        let (m, snippet, auth) = row.map_err(|e| format!("search failed: {e}"))?;
+    for id in ids {
+        let Some(m) = metas.remove(&id) else { continue };
+        let snippet: Option<String> = if use_fts {
+            snippet_stmt.query_row(rusqlite::params![fts_expr, id], |r| r.get(0)).optional().map_err(err)?.flatten()
+        } else {
+            None
+        };
+        let auth: Option<String> = auth_stmt.query_row([id], |r| r.get(0)).optional().map_err(err)?.flatten();
         let mb = mailboxes.get(&m.mailbox);
         results.push(Hit {
             id: m.id,

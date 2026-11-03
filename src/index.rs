@@ -25,10 +25,12 @@ use crate::quote;
 use crate::store::{self, Store};
 use crate::util::{clip, now_unix};
 
-pub const SCHEMA_VERSION: &str = "2";
+pub const SCHEMA_VERSION: &str = "3";
 /// Longest body text indexed per message (characters).
 const MAX_INDEXED_BODY: usize = 32_000;
 const CHUNK: usize = 256;
+/// Messages per write transaction during a full build.
+const COMMIT_EVERY: usize = 4096;
 
 pub const PHASE_IDLE: u8 = 0;
 pub const PHASE_SCANNING: u8 = 1;
@@ -112,7 +114,17 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
         | OpenFlags::SQLITE_OPEN_URI
         | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let path = cfg.index_path();
-    let conn = Connection::open_with_flags(&path, flags).with_context(|| format!("opening {}", path.display()))?;
+    let mut conn = Connection::open_with_flags(&path, flags).with_context(|| format!("opening {}", path.display()))?;
+    if writable && stale_schema(&conn, store) {
+        // A new index format: start from an empty file rather than dropping
+        // tables, which would leave the old file's size behind.
+        drop(conn);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        conn = Connection::open_with_flags(&path, flags).with_context(|| format!("opening {}", path.display()))?;
+    }
+    register_functions(&conn)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch(
         "PRAGMA temp_store = MEMORY;
@@ -125,14 +137,7 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
              PRAGMA synchronous = NORMAL;
              CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )?;
-        let version: Option<String> =
-            conn.query_row("SELECT value FROM meta WHERE key='schema'", [], |r| r.get(0)).optional()?;
-        let mail_dir: Option<String> =
-            conn.query_row("SELECT value FROM meta WHERE key='mail_dir'", [], |r| r.get(0)).optional()?;
         let current_dir = store.version_dir.to_string_lossy().to_string();
-        if version.as_deref() != Some(SCHEMA_VERSION) || mail_dir.as_deref().is_some_and(|d| d != current_dir) {
-            conn.execute_batch("DROP TABLE IF EXISTS docs; DROP TABLE IF EXISTS fts; DELETE FROM meta;")?;
-        }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS docs(
                  id INTEGER PRIMARY KEY,
@@ -146,8 +151,19 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
              );
              CREATE INDEX IF NOT EXISTS docs_msgid ON docs(msgid);
              CREATE INDEX IF NOT EXISTS docs_mailbox ON docs(mailbox);
+             -- What was indexed, kept for snippets; the body is zstd-compressed.
+             CREATE TABLE IF NOT EXISTS texts(
+                 id INTEGER PRIMARY KEY,
+                 subject TEXT NOT NULL,
+                 people TEXT NOT NULL,
+                 body BLOB,
+                 attachments TEXT NOT NULL
+             );
+             CREATE VIEW IF NOT EXISTS fts_src AS
+                 SELECT id, subject, people, timbre_unpack(body) AS body, attachments FROM texts;
              CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
                  subject, people, body, attachments,
+                 content = 'fts_src', content_rowid = 'id',
                  tokenize = 'unicode61 remove_diacritics 2'
              );",
         )?;
@@ -159,6 +175,67 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
         conn.execute_batch("PRAGMA query_only = ON;")?;
     }
     Ok((conn, mode))
+}
+
+/// True when the index file was written by another format or for another
+/// Mail store, and must be rebuilt.
+fn stale_schema(conn: &Connection, store: &Store) -> bool {
+    let read = |key: &str| -> Option<String> {
+        conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional().ok().flatten()
+    };
+    let has_meta = conn
+        .query_row("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'meta'", [], |_| Ok(()))
+        .optional()
+        .ok()
+        .flatten()
+        .is_some();
+    if !has_meta {
+        // A new file, or one from before any schema: rebuild unless empty.
+        return conn
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get::<_, i64>(0))
+            .map_or(true, |n| n > 0);
+    }
+    let current_dir = store.version_dir.to_string_lossy().to_string();
+    read("schema").as_deref() != Some(SCHEMA_VERSION) || read("mail_dir").is_some_and(|d| d != current_dir)
+}
+
+/// zstd level 1 with one reused context per thread. On mail text it beat
+/// DEFLATE level 1 on both ratio (3.5x vs 2.9x) and speed (2x) in our tests;
+/// a fresh DEFLATE compressor also zeroes ~300 KB of tables per message.
+pub fn pack(text: &str) -> Vec<u8> {
+    thread_local! {
+        static ZSTD: std::cell::RefCell<Option<zstd::bulk::Compressor<'static>>> = const { std::cell::RefCell::new(None) };
+    }
+    ZSTD.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = zstd::bulk::Compressor::new(1).ok();
+        }
+        slot.as_mut().and_then(|c| c.compress(text.as_bytes()).ok())
+    })
+    .unwrap_or_else(|| text.as_bytes().to_vec())
+}
+
+pub fn unpack(data: &[u8]) -> Result<String> {
+    let raw = zstd::bulk::decompress(data, 4 << 20).map_err(|e| anyhow::anyhow!("corrupt index text: {e}"))?;
+    Ok(String::from_utf8(raw)?)
+}
+
+/// SQL functions the index needs on every connection (`fts_src` uses them).
+fn register_functions(conn: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    use rusqlite::types::ValueRef;
+    conn.create_scalar_function(
+        "timbre_unpack",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| match ctx.get_raw(0) {
+            ValueRef::Blob(b) => unpack(b).map(Some).map_err(|e| rusqlite::Error::UserFunctionError(e.into())),
+            ValueRef::Text(t) => Ok(Some(String::from_utf8_lossy(t).into_owned())),
+            _ => Ok(None),
+        },
+    )?;
+    Ok(())
 }
 
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
@@ -186,6 +263,8 @@ pub struct DocRow {
     pub subject: String,
     pub people: String,
     pub body: String,
+    /// `body`, zstd-compressed for the `texts` table.
+    pub body_z: Vec<u8>,
     pub attachments: String,
 }
 
@@ -211,9 +290,10 @@ pub fn build_doc(version_dir: &Path, id: i64, mailbox: i64, loc: &Located) -> Do
         subject: String::new(),
         people: String::new(),
         body: String::new(),
+        body_z: vec![],
         attachments: String::new(),
     };
-    let parsed = emlx::read_message(&loc.path).ok().and_then(|raw| mime::parse(&raw));
+    let parsed = emlx::read_message(&loc.path).ok().and_then(|raw| mime::parse_for_index(&raw));
     if let Some(p) = parsed {
         let (body, _) = clip(&quote::strip_quotes(&p.body), MAX_INDEXED_BODY);
         let names: Vec<&str> = p.attachments.iter().filter(|a| !a.inline).map(|a| a.name.as_str()).collect();
@@ -221,6 +301,7 @@ pub fn build_doc(version_dir: &Path, id: i64, mailbox: i64, loc: &Located) -> Do
         row.subject = norm::fold(&p.subject).into_owned();
         row.people = norm::fold(&people_of(&p)).into_owned();
         row.body = norm::for_index(&body);
+        row.body_z = pack(&row.body);
         row.attachments = norm::fold(&names.join(" ")).into_owned();
         row.msgid = p.message_id.clone();
         row.auth = (!p.auth.is_empty()).then(|| p.auth.compact());
@@ -249,10 +330,22 @@ pub fn build_doc_guarded(version_dir: &Path, id: i64, mailbox: i64, loc: &Locate
                 subject: String::new(),
                 people: String::new(),
                 body: String::new(),
+                body_z: vec![],
                 attachments: String::new(),
             }
         }
     }
+}
+
+/// Mark the calling thread as utility work (macOS QoS): indexing then yields
+/// to whatever the user is doing, and still uses idle performance cores.
+pub fn background_priority() {
+    #[cfg(target_os = "macos")]
+    // SAFETY: only changes the scheduling class of the calling thread.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+    };
 }
 
 /// Runs one indexing step, turning a panic into an error so the loop goes on.
@@ -261,21 +354,31 @@ fn guarded<T>(what: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
         .unwrap_or_else(|_| Err(anyhow::anyhow!("{what} panicked")))
 }
 
+/// The FTS table only stores the inverted index: removing a document means
+/// handing FTS5 the exact text that was indexed, read back from `texts`.
+const UNINDEX: &str = "INSERT INTO fts(fts, rowid, subject, people, body, attachments) \
+     SELECT 'delete', id, subject, people, timbre_unpack(body), attachments FROM texts WHERE id = ?1";
+
 fn write_docs(conn: &mut Connection, rows: &[DocRow], replace: bool) -> Result<()> {
     let tx = conn.transaction()?;
     {
         let mut ins_doc = tx.prepare_cached(
             "INSERT OR REPLACE INTO docs(id, mailbox, path, partial, msgid, auth, hidden, status) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
-        let mut del_fts = tx.prepare_cached("DELETE FROM fts WHERE rowid = ?1")?;
+        let mut unindex = tx.prepare_cached(UNINDEX)?;
+        let mut del_text = tx.prepare_cached("DELETE FROM texts WHERE id = ?1")?;
+        let mut ins_text =
+            tx.prepare_cached("INSERT INTO texts(id, subject, people, body, attachments) VALUES(?1, ?2, ?3, ?4, ?5)")?;
         let mut ins_fts =
             tx.prepare_cached("INSERT INTO fts(rowid, subject, people, body, attachments) VALUES(?1, ?2, ?3, ?4, ?5)")?;
         for r in rows {
             ins_doc.execute(params![r.id, r.mailbox, r.path, r.partial as i64, r.msgid, r.auth, r.hidden, r.status])?;
             if replace {
-                del_fts.execute([r.id])?;
+                unindex.execute([r.id])?;
+                del_text.execute([r.id])?;
             }
             if r.status == 0 {
+                ins_text.execute(params![r.id, r.subject, r.people, r.body_z, r.attachments])?;
                 ins_fts.execute(params![r.id, r.subject, r.people, r.body, r.attachments])?;
             }
         }
@@ -287,11 +390,13 @@ fn write_docs(conn: &mut Connection, rows: &[DocRow], replace: bool) -> Result<(
 fn delete_docs(conn: &mut Connection, ids: &[i64]) -> Result<()> {
     let tx = conn.transaction()?;
     {
-        let mut d1 = tx.prepare_cached("DELETE FROM docs WHERE id = ?1")?;
-        let mut d2 = tx.prepare_cached("DELETE FROM fts WHERE rowid = ?1")?;
+        let mut unindex = tx.prepare_cached(UNINDEX)?;
+        let mut del_text = tx.prepare_cached("DELETE FROM texts WHERE id = ?1")?;
+        let mut del_doc = tx.prepare_cached("DELETE FROM docs WHERE id = ?1")?;
         for id in ids {
-            d1.execute([id])?;
-            d2.execute([id])?;
+            unindex.execute([id])?;
+            del_text.execute([id])?;
+            del_doc.execute([id])?;
         }
     }
     tx.commit()?;
@@ -321,7 +426,7 @@ impl Indexer {
         self.progress.phase.store(PHASE_SCANNING, Ordering::Relaxed);
         self.store.reload_mailboxes(conn)?;
         if force {
-            conn.execute_batch("DELETE FROM docs; DELETE FROM fts;")?;
+            conn.execute_batch("DELETE FROM docs; DELETE FROM texts; INSERT INTO fts(fts) VALUES('delete-all');")?;
         }
         let excluded = self.excluded_mailboxes();
         let live = self.store.live_messages(conn)?;
@@ -344,16 +449,71 @@ impl Indexer {
         self.progress.done.store(0, Ordering::Relaxed);
         self.progress.phase.store(PHASE_INDEXING, Ordering::Relaxed);
         let version_dir = self.store.version_dir.clone();
-        for chunk in todo.chunks(CHUNK) {
-            let rows: Vec<DocRow> =
-                chunk.par_iter().map(|(id, mb, loc)| build_doc_guarded(&version_dir, *id, *mb, loc)).collect();
-            write_docs(conn, &rows, false)?;
-            self.progress.done.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-            self.progress.docs.fetch_add(rows.iter().filter(|r| r.status == 0).count() as u64, Ordering::Relaxed);
-        }
+        tracing::info!("index: {} messages to parse, scan took {:.1}s", todo.len(), started.elapsed().as_secs_f64());
+        let phase = Instant::now();
+        // Parsing runs on all cores while this thread writes: a bounded
+        // channel keeps memory flat, and large transactions mean fewer FTS5
+        // segments to merge. Merging waits for the final 'optimize'.
+        // A 64 MiB pending-terms table (default 1 MiB) flushes one segment
+        // per transaction instead of dozens: 2.5x faster bulk loads in tests.
+        conn.execute_batch(
+            "INSERT INTO fts(fts, rank) VALUES('automerge', 0);
+             INSERT INTO fts(fts, rank) VALUES('hashsize', 67108864);",
+        )?;
+        let progress = &self.progress;
+        let written = std::thread::scope(|scope| -> Result<()> {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<DocRow>>(4);
+            let todo = &todo;
+            let version_dir = &version_dir;
+            scope.spawn(move || {
+                for chunk in todo.chunks(CHUNK) {
+                    let rows: Vec<DocRow> =
+                        chunk.par_iter().map(|(id, mb, loc)| build_doc_guarded(version_dir, *id, *mb, loc)).collect();
+                    if tx.send(rows).is_err() {
+                        return; // the writer failed
+                    }
+                }
+            });
+            let mut batch: Vec<DocRow> = Vec::with_capacity(COMMIT_EVERY + CHUNK);
+            let write_time = std::cell::Cell::new(Duration::ZERO);
+            let flush = |batch: &mut Vec<DocRow>, conn: &mut Connection| -> Result<()> {
+                let t = Instant::now();
+                write_docs(conn, batch, false)?;
+                write_time.set(write_time.get() + t.elapsed());
+                progress.done.fetch_add(batch.len() as u64, Ordering::Relaxed);
+                progress.docs.fetch_add(batch.iter().filter(|r| r.status == 0).count() as u64, Ordering::Relaxed);
+                batch.clear();
+                Ok(())
+            };
+            let mut waited = Duration::ZERO;
+            let mut t = Instant::now();
+            for rows in rx {
+                waited += t.elapsed();
+                batch.extend(rows);
+                if batch.len() >= COMMIT_EVERY {
+                    flush(&mut batch, conn)?;
+                }
+                t = Instant::now();
+            }
+            flush(&mut batch, conn)?;
+            tracing::info!(
+                "index: writer busy {:.1}s, waited for parsers {:.1}s",
+                write_time.get().as_secs_f64(),
+                waited.as_secs_f64()
+            );
+            Ok(())
+        });
+        conn.execute_batch(
+            "INSERT INTO fts(fts, rank) VALUES('automerge', 4);
+             INSERT INTO fts(fts, rank) VALUES('hashsize', 1048576);",
+        )?;
+        written?;
+        tracing::info!("index: parsed and written in {:.1}s", phase.elapsed().as_secs_f64());
         delete_docs(conn, &stale)?;
         if !todo.is_empty() {
+            let phase = Instant::now();
             conn.execute_batch("INSERT INTO fts(fts) VALUES('optimize');")?;
+            tracing::info!("index: optimized in {:.1}s", phase.elapsed().as_secs_f64());
         }
         set_meta(conn, "max_id", &max_live.to_string())?;
         set_meta(conn, "built", "1")?;
@@ -483,6 +643,7 @@ impl Indexer {
 
     /// Background loop used by the MCP server.
     pub fn run_forever(mut self) {
+        background_priority();
         if !self.cfg.index_enabled {
             self.progress.phase.store(PHASE_DISABLED, Ordering::Relaxed);
             return;

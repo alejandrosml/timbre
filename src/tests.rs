@@ -197,10 +197,19 @@ fn incremental_sync_adds_and_removes() {
     assert_eq!(n, 1);
     assert_eq!(ids(&search(&env, q("zebra"))), vec![1300]);
 
-    // It is deleted: a reconcile pass drops it.
+    // Index and stored text agree (FTS5 re-tokenizes the stored text).
+    let check = "INSERT INTO fts(fts, rank) VALUES('integrity-check', 1)";
+    conn.execute(check, []).unwrap();
+
+    // It is deleted: a reconcile pass drops it from the index itself.
     mail.execute("UPDATE messages SET deleted = 1 WHERE ROWID = 1300", []).unwrap();
     indexer.reconcile_now(&mut conn).unwrap();
     assert!(ids(&search(&env, q("zebra"))).is_empty());
+    let left: i64 = conn.query_row("SELECT count(*) FROM fts WHERE fts MATCH 'zebra'", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0);
+    let texts: i64 = conn.query_row("SELECT count(*) FROM texts WHERE id = 1300", [], |r| r.get(0)).unwrap();
+    assert_eq!(texts, 0);
+    conn.execute(check, []).unwrap();
 }
 
 #[test]
