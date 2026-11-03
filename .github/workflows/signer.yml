@@ -1,0 +1,61 @@
+# Exercises tools/signer on a real Mac with a throw-away self-signed identity:
+# key and request creation, certificate install into the dedicated keychain,
+# codesign with hardened runtime, repackaging, keychain search list restored.
+# Notarization needs Apple credentials and is not tested here.
+name: Signer
+
+on:
+  push:
+    paths: ["tools/signer/**", ".github/workflows/signer.yml"]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: MCP handshake
+        run: |
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"timbre_signing","arguments":{"action":"status"}}}' \
+            | node tools/signer/server/index.js | tee out.jsonl
+          grep -q '"signing identity: none' out.jsonl
+      - name: Prepare, install a throw-away identity, sign
+        run: |
+          set -euxo pipefail
+          S=tools/signer/server/sign.sh
+          mkdir -p ~/Downloads
+          before="$(security list-keychains -d user)"
+          bash $S prepare > req.csr
+          grep -q "BEGIN CERTIFICATE REQUEST" req.csr
+          KEY="$HOME/Library/Application Support/Timbre/signing/developer-id.key"
+          printf '[req]\ndistinguished_name=dn\n[dn]\n[v3]\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n' > ext.cnf
+          openssl req -new -x509 -key "$KEY" -subj "/CN=Developer ID Application: Timbre Test (TEST123456)" \
+            -days 2 -config ext.cnf -extensions v3 -outform DER -out test.cer
+          base64 -i test.cer | bash $S install | tee install.txt
+          grep -q "Installed: Developer ID Application: Timbre Test" install.txt
+          # A fake Timbre package around a real executable.
+          mkdir -p pkg/server
+          printf '{"name": "timbre", "version": "9.9.9"}\n' > pkg/manifest.json
+          printf 'int main(void){return 0;}\n' > m.c && clang -o pkg/server/timbre m.c
+          (cd pkg && zip -qr ../timbre-9.9.9.mcpb .) && mv timbre-9.9.9.mcpb ~/Downloads/
+          TIMBRE_SIGNER_TEST=1 bash $S sign-run timbre-9.9.9.mcpb || true
+          cat "$HOME/Library/Application Support/Timbre/signing/last-sign.log"
+          test -f ~/Downloads/timbre-9.9.9-test.mcpb
+          mkdir out && ditto -x -k ~/Downloads/timbre-9.9.9-test.mcpb out
+          codesign --verify --strict --verbose=2 out/server/timbre
+          codesign --display --verbose=2 out/server/timbre 2>&1 | tee sig.txt
+          grep -q "Authority=Developer ID Application: Timbre Test" sig.txt
+          grep -q "flags=0x10000(runtime)" sig.txt
+          codesign --display --entitlements - out/server/timbre 2>&1 | grep -q "automation.apple-events"
+          test -x out/server/timbre
+          after="$(security list-keychains -d user)"
+          [ "$before" = "$after" ] || { echo "keychain search list not restored"; exit 1; }
+          bash $S status
