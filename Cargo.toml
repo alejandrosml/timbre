@@ -20,7 +20,7 @@ path = "src/main.rs"
 rmcp = { version = "3.8", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "process", "time", "sync"] }
 rusqlite = { version = "0.41", features = ["bundled", "functions"] }
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14", default-features = false }
 mail-parser = { version = "1", features = ["full_encoding"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
