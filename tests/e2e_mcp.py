@@ -8,11 +8,15 @@ import json, os, subprocess, sys, tempfile, time
 binary = os.path.abspath(sys.argv[1])
 root = tempfile.mkdtemp(prefix="timbre-e2e-")
 subprocess.run([binary, "dev-fixture", root], check=True)
-env = dict(os.environ,
-           TIMBRE_MAIL_ROOT=f"{root}/Library/Mail",
-           TIMBRE_ACCOUNTS_DB=f"{root}/Library/Accounts/Accounts4.sqlite",
-           TIMBRE_DATA_DIR=f"{root}/data",
-           TIMBRE_ATTACHMENTS_DIR=f"{root}/attachments")
+def store_env(root, **extra):
+    return dict(os.environ,
+                TIMBRE_MAIL_ROOT=f"{root}/Library/Mail",
+                TIMBRE_ACCOUNTS_DB=f"{root}/Library/Accounts/Accounts4.sqlite",
+                TIMBRE_DATA_DIR=f"{root}/data",
+                TIMBRE_ATTACHMENTS_DIR=f"{root}/attachments",
+                TIMBRE_CHECK_UPDATES="0",  # no network in tests
+                **extra)
+env = store_env(root)
 p = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True)
 nid = 0
 def rpc(method, params=None, notify=False):
@@ -191,4 +195,57 @@ if sys.platform == "darwin":
     else:
         raise SystemExit("the server outlived its launcher")
     print("server exits with its launcher: ok")
+
+# Before Mail's data is readable: the same tools, each explaining what is
+# missing; once it is, Timbre restarts by itself within the same session.
+class Client:
+    def __init__(self, env):
+        self.log = tempfile.TemporaryFile(mode="w+")
+        self.p = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log,
+                                  env=env, text=True)
+        self.n = 1000
+
+    def rpc(self, method, params=None, notify=False):
+        msg = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            msg["params"] = params
+        if not notify:
+            self.n += 1
+            msg["id"] = self.n
+        self.p.stdin.write(json.dumps(msg) + "\n"); self.p.stdin.flush()
+        if notify:
+            return None
+        while True:
+            line = self.p.stdout.readline()
+            if not line:
+                self.log.seek(0)
+                raise SystemExit("server closed: " + self.log.read())
+            m = json.loads(line)
+            if m.get("id") == self.n:
+                if "error" in m:
+                    raise SystemExit(f"{method} failed: {m['error']}")
+                return m["result"]
+
+late = tempfile.mkdtemp(prefix="timbre-e2e-late-")
+c = Client(store_env(late, TIMBRE_LAUNCHER="1"))
+c.rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}})
+c.rpc("notifications/initialized", notify=True)
+waiting_tools = [t["name"] for t in c.rpc("tools/list")["tools"]]
+assert waiting_tools == names, (waiting_tools, names)
+r = c.rpc("tools/call", {"name": "search_mail", "arguments": {"query": "facture"}})
+assert r.get("isError") and "open_permission_settings" in r["content"][0]["text"], r
+print("before access: same tools, each says what to do")
+subprocess.run([binary, "dev-fixture", late], check=True)
+start = time.time()
+while True:
+    r = c.rpc("tools/call", {"name": "search_mail", "arguments": {"query": "facture"}})
+    if not r.get("isError") and (r.get("structuredContent") or {}).get("results"):
+        break
+    assert time.time() - start < 30, f"Timbre did not start working by itself: {r}"
+    time.sleep(0.5)
+print(f"after access: working {time.time() - start:.1f} s later, in the same session")
+assert [h["id"] for h in r["structuredContent"]["results"]] == [101]
+assert [t["name"] for t in c.rpc("tools/list")["tools"]] == names
+c.p.stdin.close()
+assert c.p.wait(timeout=10) == 0
 print("E2E OK")

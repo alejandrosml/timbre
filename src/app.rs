@@ -466,6 +466,9 @@ pub struct StatusView {
     pub send_allowlist: Vec<String>,
     pub excluded_from_search: Vec<String>,
     pub attachments_folder: String,
+    /// A newer Timbre, when the daily check found one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<crate::updates::UpdateView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
 }
@@ -503,6 +506,7 @@ pub fn status(ctx: &Ctx) -> Result<StatusView, String> {
         send_allowlist: ctx.cfg.send_allowlist.clone(),
         excluded_from_search: ctx.cfg.excluded_roles.clone(),
         attachments_folder: ctx.cfg.attachments_dir.display().to_string(),
+        update_available: crate::updates::available(),
         hints,
     })
 }

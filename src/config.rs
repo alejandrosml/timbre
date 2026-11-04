@@ -28,6 +28,8 @@ pub struct Config {
     pub excluded_roles: Vec<String>,
     /// Build and maintain the full-text index.
     pub index_enabled: bool,
+    /// Ask GitHub once a day whether a newer Timbre exists.
+    pub check_updates: bool,
 }
 
 fn env_str(key: &str) -> Option<String> {
@@ -87,6 +89,7 @@ impl Config {
                 .min(100),
             excluded_roles: excluded,
             index_enabled: env_bool("TIMBRE_INDEX", true),
+            check_updates: env_bool("TIMBRE_CHECK_UPDATES", true),
         }
     }
 

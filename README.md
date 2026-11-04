@@ -1,17 +1,42 @@
-<p align="center"><img src="assets/icon.png" width="128" alt="Timbre icon"></p>
+<p align="center"><img src="assets/icon.svg" width="128" height="128" alt="Timbre icon: a postage stamp with an envelope"></p>
 
 <h1 align="center">Timbre</h1>
 <p align="center"><b>The connector for Apple Mail and Claude</b><br>
-Instant full-text search of all your mail, safe reading, drafting and filing — on your Mac, nothing leaves it.</p>
+Instant full-text search of all your mail accounts, safe reading, drafting and filing — searched on your Mac, not on Google's servers.</p>
 <p align="center"><a href="README.fr.md">Français</a> · English</p>
 
 ---
 
-Timbre lets Claude work with the mail you already have in Apple Mail, whatever the account (iCloud, Gmail, Exchange, IMAP…). It reads Mail's own data on disk, so a search across hundreds of thousands of messages — bodies included — answers in tens of milliseconds, and it acts in Mail through the official scripting interface when you ask it to draft, file or flag.
+Timbre lets Claude work with the mail you already have in Apple Mail, whatever the account (iCloud, Gmail, Outlook and Exchange, Orange, La Poste, any IMAP…). It reads Mail's own data on disk, so a search across hundreds of thousands of messages — bodies included — answers in tens of milliseconds, and it acts in Mail through the official scripting interface when you ask it to draft, file or flag.
 
 It is built for the reality of an AI assistant reading untrusted email: hidden instructions are stripped and reported, forged senders are flagged, nothing is ever deleted for good, and nothing is sent without you.
 
-> **Status:** early development (v0.4), being tested on a real 250,000-message mailbox. Feedback welcome in [Issues](https://github.com/alejandrosml/timbre/issues).
+> **Status:** v0.5, in daily use on a real mailbox of 132,000 messages across six accounts. Feedback welcome in [Issues](https://github.com/alejandrosml/timbre/issues).
+
+## In practice
+
+Ask Claude in your own words; Timbre does the searching and reading:
+
+- *"Find September's electricity bill and tell me the amount."* Timbre finds it in whichever account it arrived, and reads the attached PDF.
+- *"What did the notary send me about the sale?"* Bodies and attachment names are searched too, accents and plurals included (*facture* finds *factures*).
+- *"Sum up my conversation with Sophie about the holidays."* The whole thread, each message reduced to what it adds.
+- *"Is this email from my bank genuine?"* Sender authentication, look-alike addresses, links that lie about where they go, hidden text.
+- *"Draft a reply saying Thursday works for me."* The draft opens in Mail for you to check; nothing is sent.
+- *"Archive last month's newsletters."* Moves can be undone.
+
+## Searched on your Mac, not on Google's servers
+
+Claude's Gmail connector sends each search to Google's servers through the Gmail API, and only reaches Gmail. Timbre searches an index kept on your Mac, built from the mail Apple Mail has already downloaded, for every account at once.
+
+| | **Timbre** | Gmail connector |
+|---|---|---|
+| Where a search runs | On your Mac | On Google's servers (Gmail API) |
+| Accounts | All of them: iCloud, Gmail, Outlook and Exchange, Orange, La Poste, any IMAP | Gmail only |
+| What Google receives | Nothing: Mail syncs your mail as usual | Every search and every message read |
+| Access you grant | Reading Mail's files on this Mac, to Timbre alone | Your Google account, through Google sign-in |
+| Search time on 132,000 messages | 15 to 30 ms | A network round trip per search |
+
+In both cases, what Claude reads goes to Claude to answer you.
 
 ## What it does
 
@@ -34,18 +59,38 @@ Timbre takes the best ideas of the existing open-source Apple Mail connectors an
 | Drafts, replies, forwards | ✅ | ✅ | ✅ | ❌ read-only | ✅ |
 | Move, archive, trash | ✅ with undo | ❌ | ✅ | ❌ | ✅ |
 | Sending | off by default, two-step | off by default | always available | — | with confirmation |
-| macOS permission held by | Timbre's own signed binary | the `uv` launcher shared by Python extensions | Node.js | Python / Terminal | Python |
+| macOS permission held by | Timbre's own signed app | the `uv` launcher shared by Python extensions | Node.js | Python / Terminal | Python |
 | Licence | MIT | MIT | MIT | GPL-3.0 | MIT |
 
 **New in Timbre**
 
+- **Every account, labels included.** Gmail keeps each message once, in All Mail: Timbre reads its labels, so Gmail's Inbox, Sent and your labels work like any mailbox. The sent mail of Orange, Wanadoo and La Poste (OUTBOX) and their spam (QUARANTAINE) are recognised too.
+- **Sensible ranking.** A vague search (*invoice*) puts recent mail first; mail from people you write to ranks higher; mail you send yourself does not.
+- **Nothing to restart.** Once you allow Full Disk Access, Timbre notices within seconds and starts working, in the same conversation. It also tells you when a new version is out.
 - **Hidden-text removal.** `display:none`, zero-size fonts, white-on-white, off-screen and transparent text, zero-width and bidi characters are removed from what Claude reads — and counted, and scanned for instructions aimed at an AI.
 - **What you see is what Claude reads.** Timbre reads the HTML part Mail displays, not the text/plain alternative an attacker can fill with different content (and warns when they differ).
 - **Sender checks.** SPF/DKIM/DMARC results, display names showing another address, reply-to on another domain, punycode domains, links whose text shows one domain but lead to another, and *first contact* (a sender you have never exchanged with).
 - **Spotlighting.** Every untrusted body is fenced with a random marker the sender cannot predict.
 - **Attachments.** Executables, double extensions (`invoice.pdf.app`) and macro files are labelled; saved files go to one folder you choose, are never overwritten and are marked for Gatekeeper.
 - **Least privilege.** Read tools are marked read-only so Claude can use them without asking; tools that change anything are marked as such; sending tools do not even exist until you enable them.
-- **One permission, for Timbre only.** Full Disk Access is granted to Timbre's own signed binary, not to Claude or a launcher shared with other extensions: Timbre tells macOS it answers for its own access.
+- **One permission, for Timbre only.** Full Disk Access is granted to Timbre's own signed app, with its name and icon, not to Claude or a launcher shared with other extensions: Timbre tells macOS it answers for its own access.
+
+## Signed and notarized
+
+Every release is signed with its author's Developer ID (Alejandro San Martin Lamas, team `4FQA525DB9`) and notarized by Apple. For you, that means:
+
+- **It comes from its author, unaltered.** macOS checks the signature when Timbre starts; a copy changed by anyone else fails the check.
+- **Checked by Apple.** Before publication, Apple's notary service scanned it for known malicious content. macOS opens it without the warning about an unidentified developer, and Apple can revoke it if a problem ever turns up.
+- **Your permission survives updates.** macOS ties Full Disk Access to Timbre's signature, not to one exact file: a new version keeps it.
+- **What it is not.** Notarization is an automated scan, not a review of what a program does. For that, Timbre's code is open.
+
+To check it yourself:
+
+```sh
+APP="$HOME/Library/Application Support/Claude/Claude Extensions/local.mcpb.alejandro-san-martin-lamas.timbre/server/Timbre.app"
+codesign -dv --verbose=2 "$APP" 2>&1 | grep Authority   # Developer ID Application: Alejandro San Martin Lamas (4FQA525DB9)
+spctl --assess -vv "$APP"                                # accepted, source=Notarized Developer ID
+```
 
 ## Performance
 
@@ -65,7 +110,7 @@ On a real Mac (Apple silicon, 132,000 messages across six accounts, Gmail includ
 ## Install
 
 1. Download `timbre-<version>.mcpb` from [Releases](https://github.com/alejandrosml/timbre/releases) and double-click it; Claude Desktop installs it. Releases are signed with a Developer ID and notarized by Apple.
-2. Give Timbre **Full Disk Access**. Ask Claude to *open Timbre's permission settings*: System Settings opens at Privacy & Security › Full Disk Access and Finder selects the file, which you drag into the list. Then turn the extension off and on in Claude's settings.
+2. Give Timbre **Full Disk Access**. Ask Claude to *open Timbre's permission settings*: System Settings opens at Privacy & Security › Full Disk Access and Finder selects Timbre (the stamp icon). Drag it into the list and switch it on. Timbre starts working by itself a few seconds later: nothing to restart.
 3. The first time you ask for a draft or a move, macOS asks whether Timbre may control Mail: click OK.
 
 The full-text index builds in the background on first launch (about a minute per 100,000 messages on a recent Mac); searches work meanwhile on subjects and senders. Afterwards, new mail is searchable within seconds.
@@ -79,7 +124,8 @@ The full-text index builds in the background on first launch (about a minute per
 | `get_thread` | A whole conversation | no |
 | `list_mailboxes` | Accounts and mailboxes with counts | no |
 | `read_attachment` | Text of an attachment: PDF, Word, RTF, ODT, text, HTML, CSV, calendar, attached mail | no |
-| `mail_status` | Permissions, index progress, settings | no |
+| `mail_status` | Permissions, index progress, settings, newer version | no |
+| `open_permission_settings` | Open Full Disk Access settings and show Timbre | opens System Settings |
 | `selected_mail` | Messages selected in Mail | no |
 | `open_in_mail` | Open a message in Mail | no |
 | `save_attachment` | Save to your attachments folder | adds a file |
@@ -90,11 +136,11 @@ The full-text index builds in the background on first launch (about a minute per
 
 ## Settings
 
-In Claude › Settings › Extensions › Timbre: read-only mode, allow sending, allowed recipients (`alice@example.com, @mycompany.com`), maximum messages per hour, mailboxes left out of search (default: junk, trash) and the attachments folder.
+In Claude › Settings › Extensions › Timbre: read-only mode, allow sending, allowed recipients (`alice@example.com, @mycompany.com`), maximum messages per hour, mailboxes left out of search (default: junk, trash), the attachments folder and the daily check for updates.
 
 ## Privacy
 
-Timbre makes no network connections and collects nothing. Its index (`~/Library/Application Support/Timbre`) contains the text of your messages for searching; delete that folder to remove it. Mail's own database is only ever opened read-only.
+Searching, reading and the index stay on your Mac: Timbre sends nothing about your mail anywhere and collects nothing. Its one network request is a daily check of the latest version number on GitHub; turn off *Check for updates* to stop it. What Claude reads goes to Claude, to answer you. The index (`~/Library/Application Support/Timbre`) contains the text of your messages for searching; delete that folder to remove it. Mail's own database is only ever opened read-only.
 
 ## Build from source
 

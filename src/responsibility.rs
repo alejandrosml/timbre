@@ -3,62 +3,14 @@
 //! macOS checks privacy permissions (Full Disk Access, control of Mail)
 //! against the *responsible* process. A program started by Claude Desktop
 //! inherits Claude as its responsible process, so the access the user gives
-//! to `timbre` in System Settings would be ignored and Claude's would apply.
+//! to Timbre in System Settings would be ignored and Claude's would apply.
 //!
-//! The server therefore starts itself once more with its responsibility
-//! disclaimed, the way Chromium and Qt Creator launch other programs. macOS
-//! then checks Timbre's own permissions. The first process only waits for the
-//! second and passes on its exit code; standard input and output are shared,
-//! so Claude talks to the second process directly.
-
-/// Set in the relaunched process. Set it by hand to keep the old behaviour.
-#[cfg(target_os = "macos")]
-const MARK: &str = "TIMBRE_DISCLAIMED";
-
-/// Starts the server again as a process responsible for itself, waits for it
-/// and returns its exit code. Returns `None` when this process should serve:
-/// it is the relaunched one, it is already responsible for itself, or macOS
-/// does not offer the mechanism.
-#[cfg(target_os = "macos")]
-pub fn relaunch() -> Option<i32> {
-    if std::env::var_os(MARK).is_some() || responsible_for_self() != Some(false) {
-        return None;
-    }
-    match spawn_disclaimed() {
-        Ok(pid) => Some(wait(pid)),
-        Err(e) => {
-            tracing::warn!("could not relaunch with its own permissions, Claude's apply: {e}");
-            None
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn relaunch() -> Option<i32> {
-    None
-}
-
-/// In the relaunched process: exit when the launcher is gone, in case Claude
-/// stops it without closing standard input.
-#[cfg(target_os = "macos")]
-pub fn watch_launcher() {
-    if std::env::var_os(MARK).is_none() {
-        return;
-    }
-    let launcher = std::os::unix::process::parent_id();
-    let _ = std::thread::Builder::new().name("timbre-launcher".into()).spawn(move || {
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            if std::os::unix::process::parent_id() != launcher {
-                tracing::info!("launcher gone, exiting");
-                std::process::exit(0);
-            }
-        }
-    });
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn watch_launcher() {}
+//! The launcher (launcher.rs) therefore starts the server with its
+//! responsibility disclaimed, the way Chromium and Qt Creator start other
+//! programs: macOS then checks Timbre's own permissions, and only Timbre's.
+//! The functions Apple uses for this are not declared in its public headers;
+//! they are looked up at run time, and a macOS without them keeps the old
+//! behaviour.
 
 /// The program whose permissions macOS checks for this process, for status
 /// reports. `None` where macOS does not say.
@@ -76,14 +28,20 @@ pub fn checked_for() -> Option<String> {
     None
 }
 
+/// Whether this process answers for its own permissions.
 #[cfg(target_os = "macos")]
-fn responsible_for_self() -> Option<bool> {
+pub fn responsible_for_self() -> Option<bool> {
     Some(responsible_pid()? == std::process::id() as libc::pid_t)
 }
 
+/// Whether this macOS lets a program start another one responsible for
+/// itself.
+#[cfg(target_os = "macos")]
+pub fn can_disclaim() -> bool {
+    symbol(c"responsibility_spawnattrs_setdisclaim").is_some()
+}
+
 /// Looks up a function of libSystem that Apple does not declare publicly.
-/// Looking it up at run time keeps the build independent of the SDK, and an
-/// older or newer macOS without it simply keeps the old behaviour.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 fn symbol(name: &std::ffi::CStr) -> Option<*mut libc::c_void> {
@@ -115,10 +73,47 @@ fn pid_path(pid: libc::pid_t) -> Option<String> {
     (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
 }
 
+/// A child started responsible for itself.
+#[cfg(target_os = "macos")]
+pub struct Disclaimed {
+    pub pid: libc::pid_t,
+    /// Its standard input and output, when started with pipes.
+    pub stdin: Option<std::fs::File>,
+    pub stdout: Option<std::fs::File>,
+}
+
+/// A pipe whose two ends close on exec: a child keeps only what its file
+/// actions give it.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn spawn_disclaimed() -> Result<libc::pid_t, String> {
+fn pipe() -> Result<(libc::c_int, libc::c_int), String> {
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: pipe writes two descriptors into the array; fcntl only sets
+    // flags on descriptors this function owns.
+    unsafe {
+        if libc::pipe(fds.as_mut_ptr()) != 0 {
+            return Err(format!("pipe: {}", std::io::Error::last_os_error()));
+        }
+        for fd in fds {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+    }
+    Ok((fds[0], fds[1]))
+}
+
+/// Starts this program again with `args`, responsible for itself, with
+/// `extra_env` added. With `pipes`, its standard input and output are new
+/// pipes returned to the caller; without, they and standard error are
+/// /dev/null. Standard error is shared otherwise.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub fn spawn_disclaimed(
+    args: &[std::ffi::OsString],
+    extra_env: &[(&str, &str)],
+    pipes: bool,
+) -> Result<Disclaimed, String> {
     use std::ffi::CString;
+    use std::os::fd::FromRawFd;
     use std::os::unix::ffi::OsStrExt;
 
     type SetDisclaim = unsafe extern "C" fn(*mut libc::posix_spawnattr_t, libc::c_int) -> libc::c_int;
@@ -127,44 +122,79 @@ fn spawn_disclaimed() -> Result<libc::pid_t, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let cstr = |b: &[u8]| CString::new(b).map_err(|_| "NUL byte in an argument or the environment".to_string());
     let path = cstr(exe.as_os_str().as_bytes())?;
-    let args = std::env::args_os().map(|a| cstr(a.as_bytes())).collect::<Result<Vec<_>, _>>()?;
+    let argv0 = std::env::args_os().next().unwrap_or_else(|| exe.clone().into_os_string());
+    let args = std::iter::once(&argv0).chain(args).map(|a| cstr(a.as_bytes())).collect::<Result<Vec<_>, _>>()?;
+    let overridden = |k: &std::ffi::OsStr| extra_env.iter().any(|(name, _)| k.as_bytes() == name.as_bytes());
     let mut env = std::env::vars_os()
-        .filter(|(k, _)| k != MARK)
+        .filter(|(k, _)| !overridden(k))
         .map(|(k, v)| cstr(&[k.as_bytes(), b"=", v.as_bytes()].concat()))
         .collect::<Result<Vec<_>, _>>()?;
-    env.push(cstr(format!("{MARK}=1").as_bytes())?);
+    for (k, v) in extra_env {
+        env.push(cstr(format!("{k}={v}").as_bytes())?);
+    }
     let argv: Vec<*mut libc::c_char> =
         args.iter().map(|a| a.as_ptr().cast_mut()).chain(std::iter::once(std::ptr::null_mut())).collect();
     let envp: Vec<*mut libc::c_char> =
         env.iter().map(|e| e.as_ptr().cast_mut()).chain(std::iter::once(std::ptr::null_mut())).collect();
+    let (child_in, parent_in, parent_out, child_out) = if pipes {
+        let (r_in, w_in) = pipe()?;
+        let (r_out, w_out) = pipe()?;
+        (r_in, w_in, r_out, w_out)
+    } else {
+        (-1, -1, -1, -1)
+    };
 
     // SAFETY: every pointer refers to a NUL-terminated string or array that
-    // outlives the call; the attributes are initialised before use and
-    // destroyed after. Without file actions the child shares our standard
-    // input, output and error (every other descriptor is close-on-exec).
+    // outlives the call; attributes and file actions are initialised before
+    // use and destroyed after; the descriptors wrapped in File are ours
+    // alone (the child's copies are dup2'ed onto 0 and 1, the originals
+    // close on exec).
     unsafe {
         let set: SetDisclaim = std::mem::transmute::<*mut libc::c_void, SetDisclaim>(set);
         let mut attr: libc::posix_spawnattr_t = std::ptr::null_mut();
-        if libc::posix_spawnattr_init(&mut attr) != 0 {
-            return Err("posix_spawnattr_init failed".into());
+        let mut actions: libc::posix_spawn_file_actions_t = std::ptr::null_mut();
+        if libc::posix_spawnattr_init(&mut attr) != 0 || libc::posix_spawn_file_actions_init(&mut actions) != 0 {
+            return Err("posix_spawn setup failed".into());
+        }
+        if pipes {
+            libc::posix_spawn_file_actions_adddup2(&mut actions, child_in, 0);
+            libc::posix_spawn_file_actions_adddup2(&mut actions, child_out, 1);
+        } else {
+            let null = c"/dev/null";
+            libc::posix_spawn_file_actions_addopen(&mut actions, 0, null.as_ptr(), libc::O_RDONLY, 0);
+            libc::posix_spawn_file_actions_addopen(&mut actions, 1, null.as_ptr(), libc::O_WRONLY, 0);
+            libc::posix_spawn_file_actions_addopen(&mut actions, 2, null.as_ptr(), libc::O_WRONLY, 0);
         }
         let mut pid: libc::pid_t = 0;
         let rc = match set(&mut attr, 1) {
-            0 => libc::posix_spawn(&mut pid, path.as_ptr(), std::ptr::null(), &attr, argv.as_ptr(), envp.as_ptr()),
+            0 => libc::posix_spawn(&mut pid, path.as_ptr(), &actions, &attr, argv.as_ptr(), envp.as_ptr()),
             e => e,
         };
+        libc::posix_spawn_file_actions_destroy(&mut actions);
         libc::posix_spawnattr_destroy(&mut attr);
+        if pipes {
+            libc::close(child_in);
+            libc::close(child_out);
+        }
         if rc != 0 {
+            if pipes {
+                libc::close(parent_in);
+                libc::close(parent_out);
+            }
             return Err(format!("posix_spawn: {}", std::io::Error::from_raw_os_error(rc)));
         }
-        Ok(pid)
+        Ok(Disclaimed {
+            pid,
+            stdin: pipes.then(|| std::fs::File::from_raw_fd(parent_in)),
+            stdout: pipes.then(|| std::fs::File::from_raw_fd(parent_out)),
+        })
     }
 }
 
-/// Waits for the relaunched server and returns the code to exit with.
+/// Waits for a child and returns the code to exit with.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn wait(pid: libc::pid_t) -> i32 {
+pub fn wait(pid: libc::pid_t) -> i32 {
     let mut status: libc::c_int = 0;
     loop {
         // SAFETY: waits for our own child and writes into a local.

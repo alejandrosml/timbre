@@ -38,6 +38,13 @@ jobs:
         run: cargo test --locked
       - name: MCP end-to-end
         run: cargo build --locked && python3 -I tests/e2e_mcp.py target/debug/timbre
+      - name: MCP end-to-end, from Timbre.app (signed ad hoc)
+        if: runner.os == 'macOS'
+        run: |
+          scripts/make-app.sh target/debug/timbre build
+          codesign --force --options runtime --entitlements packaging/Timbre.entitlements --sign - build/Timbre.app
+          codesign --verify --strict --deep --verbose=2 build/Timbre.app
+          python3 -I tests/e2e_mcp.py build/Timbre.app/Contents/MacOS/timbre
       - name: Versions agree
         run: python3 -I scripts/check-versions.py
 

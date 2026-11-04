@@ -1,17 +1,42 @@
-<p align="center"><img src="assets/icon.png" width="128" alt="Icône de Timbre"></p>
+<p align="center"><img src="assets/icon.svg" width="128" height="128" alt="Icône de Timbre : un timbre-poste avec une enveloppe"></p>
 
 <h1 align="center">Timbre</h1>
 <p align="center"><b>Le connecteur pour Mail et Claude</b><br>
-Recherche instantanée dans tout votre courrier, lecture, brouillons et rangement en toute sécurité — sur votre Mac, sans que rien n'en sorte.</p>
+Recherche instantanée dans tous vos comptes mail, lecture, brouillons et rangement en toute sécurité — la recherche se fait sur votre Mac, pas sur les serveurs de Google.</p>
 <p align="center">Français · <a href="README.md">English</a></p>
 
 ---
 
-Timbre permet à Claude de travailler avec le courrier que vous avez déjà dans Mail, quel que soit le compte (iCloud, Gmail, Exchange, IMAP…). Il lit directement les données de Mail sur le disque : une recherche parmi des centaines de milliers de messages, corps compris, répond en quelques dizaines de millisecondes. Et quand vous lui demandez un brouillon, un rangement ou un drapeau, il agit dans Mail par l'interface de scripts officielle.
+Timbre permet à Claude de travailler avec le courrier que vous avez déjà dans Mail, quel que soit le compte (iCloud, Gmail, Outlook et Exchange, Orange, La Poste, tout compte IMAP…). Il lit directement les données de Mail sur le disque : une recherche parmi des centaines de milliers de messages, corps compris, répond en quelques dizaines de millisecondes. Et quand vous lui demandez un brouillon, un rangement ou un drapeau, il agit dans Mail par l'interface de scripts officielle.
 
 Il est conçu pour la réalité d'un assistant qui lit des mails dont on ne connaît pas l'auteur : les instructions cachées sont retirées et signalées, les expéditeurs usurpés sont repérés, rien n'est jamais supprimé définitivement, et rien n'est envoyé sans vous.
 
-> **État :** début de développement (v0.4), en test sur une vraie boîte de 250 000 messages. Vos retours sont bienvenus dans les [Issues](https://github.com/alejandrosml/timbre/issues).
+> **État :** v0.5, utilisé chaque jour sur une vraie boîte de 132 000 messages répartis sur six comptes. Vos retours sont bienvenus dans les [Issues](https://github.com/alejandrosml/timbre/issues).
+
+## Concrètement
+
+Demandez à Claude avec vos mots ; Timbre se charge de chercher et de lire :
+
+- *« Retrouve la facture d'électricité de septembre et donne-moi le montant. »* Timbre la trouve, quel que soit le compte où elle est arrivée, et lit le PDF joint.
+- *« Qu'est-ce que le notaire m'a envoyé au sujet de la vente ? »* Le corps des messages et le nom des pièces jointes sont fouillés aussi, accents et pluriels compris (*facture* trouve *factures*).
+- *« Résume ma conversation avec Sophie sur les vacances. »* Le fil entier, chaque message réduit à ce qu'il apporte.
+- *« Ce mail de ma banque est-il authentique ? »* Authentification de l'expéditeur, adresses qui en imitent d'autres, liens qui mentent sur leur destination, texte caché.
+- *« Prépare une réponse pour dire que jeudi me va. »* Le brouillon s'ouvre dans Mail pour que vous le relisiez ; rien n'est envoyé.
+- *« Archive les lettres d'information du mois dernier. »* Les déplacements s'annulent.
+
+## La recherche se fait sur votre Mac, pas sur les serveurs de Google
+
+Le connecteur Gmail de Claude envoie chaque recherche aux serveurs de Google par l'API Gmail, et n'atteint que Gmail. Timbre cherche dans un index gardé sur votre Mac, construit à partir du courrier que Mail a déjà téléchargé, pour tous vos comptes à la fois.
+
+| | **Timbre** | Connecteur Gmail |
+|---|---|---|
+| Où se fait la recherche | Sur votre Mac | Sur les serveurs de Google (API Gmail) |
+| Comptes | Tous : iCloud, Gmail, Outlook et Exchange, Orange, La Poste, tout IMAP | Gmail seulement |
+| Ce que reçoit Google | Rien : Mail synchronise votre courrier comme d'habitude | Chaque recherche et chaque message lu |
+| Accès que vous accordez | La lecture des fichiers de Mail sur ce Mac, à Timbre seul | Votre compte Google, par la connexion Google |
+| Durée d'une recherche sur 132 000 messages | 15 à 30 ms | Un aller-retour réseau par recherche |
+
+Dans les deux cas, ce que Claude lit part chez Claude pour vous répondre.
 
 ## Ce qu'il fait
 
@@ -34,18 +59,38 @@ Timbre reprend les meilleures idées des connecteurs Apple Mail open source exis
 | Brouillons, réponses, transferts | ✅ | ✅ | ✅ | ❌ lecture seule | ✅ |
 | Déplacer, archiver, corbeille | ✅ avec annulation | ❌ | ✅ | ❌ | ✅ |
 | Envoi | désactivé par défaut, en deux étapes | désactivé par défaut | toujours disponible | — | avec confirmation |
-| Permission macOS accordée à | son propre binaire signé | le lanceur `uv` partagé par les extensions Python | Node.js | Python / Terminal | Python |
+| Permission macOS accordée à | sa propre application signée | le lanceur `uv` partagé par les extensions Python | Node.js | Python / Terminal | Python |
 | Licence | MIT | MIT | MIT | GPL-3.0 | MIT |
 
 **Ce que Timbre apporte de nouveau**
 
+- **Tous les comptes, libellés compris.** Gmail ne garde chaque message qu'une fois, dans « Tous les messages » : Timbre lit ses libellés, si bien que la boîte de réception, les envoyés et vos libellés Gmail fonctionnent comme n'importe quelle boîte. Les envoyés d'Orange, Wanadoo et La Poste (OUTBOX) et leurs indésirables (QUARANTAINE) sont reconnus aussi.
+- **Un classement sensé.** Une recherche vague (*facture*) met le courrier récent en tête ; les messages des personnes à qui vous écrivez remontent ; ceux que vous vous envoyez à vous-même, non.
+- **Rien à redémarrer.** Dès que vous accordez l'accès complet au disque, Timbre s'en aperçoit en quelques secondes et se met au travail, dans la même conversation. Il vous prévient aussi quand une nouvelle version sort.
 - **Texte caché retiré.** `display:none`, polices de taille nulle, blanc sur blanc, texte hors écran ou transparent, caractères invisibles et de contrôle bidirectionnel : tout cela est retiré de ce que lit Claude, compté, et analysé pour y repérer des instructions destinées à une IA.
 - **Claude lit ce que vous voyez.** Timbre lit la partie HTML que Mail affiche, et non la version texte brut qu'un attaquant peut remplir d'un autre contenu (et il prévient quand les deux diffèrent).
 - **Contrôle de l'expéditeur.** Résultats SPF, DKIM et DMARC, nom affiché contenant une autre adresse, réponse redirigée vers un autre domaine, domaines en punycode, liens dont le texte affiche un domaine mais qui mènent ailleurs, et *premier contact* (un expéditeur avec qui vous n'avez jamais échangé).
 - **Contenu balisé.** Chaque texte de mail est encadré par un marqueur aléatoire que l'expéditeur ne peut pas deviner.
 - **Pièces jointes.** Les exécutables, les doubles extensions (`facture.pdf.app`) et les fichiers à macros sont signalés. Les fichiers enregistrés vont dans un seul dossier de votre choix, ne sont jamais écrasés et sont marqués pour que Gatekeeper les contrôle.
 - **Le minimum de droits.** Les outils de lecture sont déclarés en lecture seule, Claude peut donc s'en servir sans vous demander ; ceux qui modifient quelque chose sont déclarés comme tels ; les outils d'envoi n'existent même pas tant que vous ne les avez pas activés.
-- **Une permission, pour Timbre seul.** L'accès complet au disque est donné au binaire signé de Timbre, ni à Claude ni à un lanceur partagé avec d'autres extensions : Timbre indique à macOS qu'il répond lui-même de ses accès.
+- **Une permission, pour Timbre seul.** L'accès complet au disque est donné à l'application signée de Timbre, avec son nom et son icône, ni à Claude ni à un lanceur partagé avec d'autres extensions : Timbre indique à macOS qu'il répond lui-même de ses accès.
+
+## Signé et notarisé
+
+Chaque version est signée avec le Developer ID de son auteur (Alejandro San Martin Lamas, équipe `4FQA525DB9`) et notarisée par Apple. Pour vous, cela signifie :
+
+- **Il vient bien de son auteur, sans modification.** macOS vérifie la signature au lancement ; une copie modifiée par quelqu'un d'autre échoue à ce contrôle.
+- **Contrôlé par Apple.** Avant publication, le service de notarisation d'Apple l'a analysé à la recherche de contenus malveillants connus. macOS l'ouvre sans l'avertissement sur les développeurs non identifiés, et Apple peut le révoquer si un problème apparaissait.
+- **Votre autorisation survit aux mises à jour.** macOS rattache l'accès complet au disque à la signature de Timbre, pas à un fichier précis : une nouvelle version le conserve.
+- **Ce que ce n'est pas.** La notarisation est une analyse automatique, pas un examen de ce que fait le programme. Pour cela, le code de Timbre est ouvert.
+
+Pour le vérifier vous-même :
+
+```sh
+APP="$HOME/Library/Application Support/Claude/Claude Extensions/local.mcpb.alejandro-san-martin-lamas.timbre/server/Timbre.app"
+codesign -dv --verbose=2 "$APP" 2>&1 | grep Authority   # Developer ID Application: Alejandro San Martin Lamas (4FQA525DB9)
+spctl --assess -vv "$APP"                                # accepted, source=Notarized Developer ID
+```
 
 ## Performances
 
@@ -65,7 +110,7 @@ Sur un vrai Mac (Apple silicon, 132 000 messages répartis sur six comptes, dont
 ## Installation
 
 1. Téléchargez `timbre-<version>.mcpb` dans les [Releases](https://github.com/alejandrosml/timbre/releases) et double-cliquez dessus : Claude Desktop l'installe. Les versions publiées sont signées avec un Developer ID et notarisées par Apple.
-2. Donnez à Timbre l'**accès complet au disque**. Demandez à Claude d'*ouvrir les réglages d'autorisation de Timbre* : Réglages Système s'ouvre sur Confidentialité et sécurité › Accès complet au disque et le Finder sélectionne le fichier, qu'il suffit de glisser dans la liste. Désactivez puis réactivez ensuite l'extension dans les réglages de Claude.
+2. Donnez à Timbre l'**accès complet au disque**. Demandez à Claude d'*ouvrir les réglages d'autorisation de Timbre* : Réglages Système s'ouvre sur Confidentialité et sécurité › Accès complet au disque et le Finder sélectionne Timbre (l'icône du timbre-poste). Glissez-le dans la liste et activez-le. Timbre se met au travail tout seul quelques secondes plus tard : rien à redémarrer.
 3. La première fois que vous demandez un brouillon ou un déplacement, macOS demande si Timbre peut contrôler Mail : cliquez sur OK.
 
 L'index plein texte se construit en arrière-plan au premier lancement (environ une minute pour 100 000 messages sur un Mac récent) ; en attendant, la recherche porte sur les sujets et les expéditeurs. Ensuite, un nouveau mail est cherchable en quelques secondes.
@@ -79,7 +124,8 @@ L'index plein texte se construit en arrière-plan au premier lancement (environ 
 | `get_thread` | Une conversation entière | non |
 | `list_mailboxes` | Comptes et boîtes, avec leurs compteurs | non |
 | `read_attachment` | Texte d'une pièce jointe : PDF, Word, RTF, ODT, texte, HTML, CSV, agenda, mail joint | non |
-| `mail_status` | Permissions, avancement de l'index, réglages | non |
+| `mail_status` | Permissions, avancement de l'index, réglages, nouvelle version | non |
+| `open_permission_settings` | Ouvrir les réglages d'accès complet au disque et montrer Timbre | ouvre Réglages Système |
 | `selected_mail` | Messages sélectionnés dans Mail | non |
 | `open_in_mail` | Ouvrir un message dans Mail | non |
 | `save_attachment` | Enregistrer dans votre dossier de pièces jointes | ajoute un fichier |
@@ -90,11 +136,11 @@ L'index plein texte se construit en arrière-plan au premier lancement (environ 
 
 ## Réglages
 
-Dans Claude › Réglages › Extensions › Timbre : mode lecture seule, autorisation d'envoi, destinataires autorisés (`alice@example.com, @monentreprise.fr`), nombre maximal de messages par heure, boîtes exclues de la recherche (par défaut : indésirables et corbeille) et dossier des pièces jointes.
+Dans Claude › Réglages › Extensions › Timbre : mode lecture seule, autorisation d'envoi, destinataires autorisés (`alice@example.com, @monentreprise.fr`), nombre maximal de messages par heure, boîtes exclues de la recherche (par défaut : indésirables et corbeille), dossier des pièces jointes et vérification quotidienne des mises à jour.
 
 ## Confidentialité
 
-Timbre n'établit aucune connexion réseau et ne collecte rien. Son index (`~/Library/Application Support/Timbre`) contient le texte de vos messages pour la recherche ; supprimez ce dossier pour l'effacer. La base de Mail n'est jamais ouverte qu'en lecture seule.
+La recherche, la lecture et l'index restent sur votre Mac : Timbre n'envoie rien de votre courrier nulle part et ne collecte rien. Sa seule requête réseau est une vérification quotidienne du numéro de la dernière version sur GitHub ; désactivez *Check for updates* pour l'arrêter. Ce que Claude lit part chez Claude, pour vous répondre. L'index (`~/Library/Application Support/Timbre`) contient le texte de vos messages pour la recherche ; supprimez ce dossier pour l'effacer. La base de Mail n'est jamais ouverte qu'en lecture seule.
 
 ## Compiler soi-même
 

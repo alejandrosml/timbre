@@ -5,6 +5,42 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-04
+
+### Added
+- **Timbre.app.** The server ships as a small app, so System Settings
+  (Full Disk Access) and Finder show Timbre's name and stamp icon instead
+  of a bare executable. Full Disk Access has to be given once more, to
+  Timbre.app; it then survives updates.
+- **Nothing to restart after granting access.** Under the launcher, a
+  server that cannot read Mail yet checks every few seconds from a fresh
+  process and asks for a restart once it can; the launcher replays the MCP
+  handshake and the unanswered requests, so Claude keeps its session. In
+  the meantime the server offers the same tools as the full one, each
+  explaining what to do, and `open_permission_settings` exists in both.
+- **New version notice.** Once a day Timbre asks GitHub for the number of
+  the latest release, through macOS's curl, and nothing else. `mail_status`
+  reports a newer version and the next search mentions it once. The
+  extension's *Check for updates* setting (`TIMBRE_CHECK_UPDATES`) turns it
+  off.
+- Icons drawn from one description (`scripts/make-icons.py`): a portable
+  `assets/icon.svg` (SVG 1.1 filters), `assets/icon-macos.svg` at Apple's
+  icon proportions, and `assets/Timbre.icns`.
+- Timbre Signer 0.2.0 signs, notarizes and staples the app.
+
+### Changed
+- **Gmail labels.** Gmail keeps each message once, in All Mail, and lists
+  its Inbox, Sent and labels in the Envelope Index's `labels` table: mailbox
+  filters, sent mail (correspondents, first-contact warnings) and mailbox
+  counts now include them, and results show a Gmail message's inbox or label
+  rather than All Mail.
+- OUTBOX (Orange, Wanadoo, La Poste) is recognised as sent mail, QUARANTAINE
+  as junk.
+- **Ranking.** The user's own addresses no longer count as correspondents,
+  so mail people send themselves stops ranking first; recency weighs more,
+  and more for broad queries (up to 16 times for today's mail when a query
+  matches a hundred messages or more).
+
 ## [0.4.3] - 2026-11-04
 
 ### Fixed

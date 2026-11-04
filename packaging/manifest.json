@@ -3,9 +3,9 @@
   "manifest_version": "0.3",
   "name": "timbre",
   "display_name": "Timbre",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "The connector for Apple Mail and Claude: instant full-text search of all your mail, safe reading, drafting and filing.",
-  "long_description": "Timbre reads Apple Mail's own data on your Mac, so Claude can search every message in milliseconds, including message bodies and attachment names, accent-insensitive.\n\n**Safe by design**\n- Hidden text in HTML emails (a common carrier for prompt injection) is removed and reported.\n- Sender authenticity (SPF, DKIM, DMARC), look-alike senders and reply-to tricks are flagged.\n- Drafts open in Mail for you to review; nothing is ever deleted permanently; moves can be undone.\n- Sending is off by default; when you turn it on, every message needs an explicit two-step confirmation, with an optional recipient allowlist and an hourly cap.\n\n**Requirements**\n- macOS 12 or later with Apple Mail.\n- Full Disk Access for Timbre (System Settings › Privacy & Security), to read Mail's data. The mail_status tool tells you exactly which file to add.\n- Automation permission for Mail, asked by macOS the first time Timbre drafts or files a message.\n\nNo network access, no telemetry: your mail never leaves your Mac.",
+  "long_description": "Timbre reads Apple Mail's own data on your Mac, so Claude can search every message in milliseconds, including message bodies and attachment names, accent-insensitive.\n\n**Safe by design**\n- Hidden text in HTML emails (a common carrier for prompt injection) is removed and reported.\n- Sender authenticity (SPF, DKIM, DMARC), look-alike senders and reply-to tricks are flagged.\n- Drafts open in Mail for you to review; nothing is ever deleted permanently; moves can be undone.\n- Sending is off by default; when you turn it on, every message needs an explicit two-step confirmation, with an optional recipient allowlist and an hourly cap.\n\n**Requirements**\n- macOS 12 or later with Apple Mail.\n- Full Disk Access for Timbre, to read Mail's data: ask Claude to open Timbre's permission settings, then drag Timbre into the list. Timbre starts working by itself a few seconds later.\n- Automation permission for Mail, asked by macOS the first time Timbre drafts or files a message.\n\nSearches run on your Mac, even offline: no query goes to Google, Apple or Microsoft. No telemetry; the only request Timbre makes is a daily check for a newer version (it can be turned off). Only what Claude reads from your mail goes to Claude.",
   "author": {
     "name": "Alejandro San Martin Lamas",
     "url": "https://github.com/alejandrosml"
@@ -19,40 +19,97 @@
   "support": "https://github.com/alejandrosml/timbre/issues",
   "license": "MIT",
   "icon": "icon.png",
-  "keywords": ["mail", "apple mail", "email", "search", "macos"],
+  "keywords": [
+    "mail",
+    "apple mail",
+    "email",
+    "search",
+    "macos"
+  ],
   "server": {
     "type": "binary",
-    "entry_point": "server/timbre",
+    "entry_point": "server/Timbre.app/Contents/MacOS/timbre",
     "mcp_config": {
-      "command": "${__dirname}/server/timbre",
-      "args": ["serve"],
+      "command": "${__dirname}/server/Timbre.app/Contents/MacOS/timbre",
+      "args": [
+        "serve"
+      ],
       "env": {
         "TIMBRE_READ_ONLY": "${user_config.read_only}",
         "TIMBRE_ALLOW_SEND": "${user_config.allow_send}",
         "TIMBRE_SEND_ALLOWLIST": "${user_config.send_allowlist}",
         "TIMBRE_MAX_SENDS_PER_HOUR": "${user_config.max_sends_per_hour}",
         "TIMBRE_EXCLUDED_MAILBOXES": "${user_config.excluded_mailboxes}",
-        "TIMBRE_ATTACHMENTS_DIR": "${user_config.attachments_dir}"
+        "TIMBRE_ATTACHMENTS_DIR": "${user_config.attachments_dir}",
+        "TIMBRE_CHECK_UPDATES": "${user_config.check_updates}"
       }
     }
   },
   "tools": [
-    {"name": "search_mail", "description": "Full-text search over all mail with filters."},
-    {"name": "read_mail", "description": "Read a message with sender-authenticity warnings; hidden text removed."},
-    {"name": "get_thread", "description": "Read a whole conversation."},
-    {"name": "list_mailboxes", "description": "Accounts and mailboxes with counts."},
-    {"name": "read_attachment", "description": "Extract the text of an attachment."},
-    {"name": "save_attachment", "description": "Save an attachment to your Timbre folder."},
-    {"name": "mail_status", "description": "Permissions, index progress and settings."},
-    {"name": "open_permission_settings", "description": "Open Full Disk Access settings and show Timbre's program (before access is granted)."},
-    {"name": "selected_mail", "description": "Messages selected in Mail."},
-    {"name": "open_in_mail", "description": "Open a message in Mail."},
-    {"name": "create_draft", "description": "New message, reply or forward as a draft in Mail. Never sends."},
-    {"name": "mark_mail", "description": "Mark read or unread, flag or unflag."},
-    {"name": "move_mail", "description": "Move to archive, trash or a mailbox, with undo."},
-    {"name": "undo_move", "description": "Undo a move."},
-    {"name": "prepare_send", "description": "Sending, step 1 (only when sending is enabled)."},
-    {"name": "confirm_send", "description": "Sending, step 2 (only when sending is enabled)."}
+    {
+      "name": "search_mail",
+      "description": "Full-text search over all mail with filters."
+    },
+    {
+      "name": "read_mail",
+      "description": "Read a message with sender-authenticity warnings; hidden text removed."
+    },
+    {
+      "name": "get_thread",
+      "description": "Read a whole conversation."
+    },
+    {
+      "name": "list_mailboxes",
+      "description": "Accounts and mailboxes with counts."
+    },
+    {
+      "name": "read_attachment",
+      "description": "Extract the text of an attachment."
+    },
+    {
+      "name": "save_attachment",
+      "description": "Save an attachment to your Timbre folder."
+    },
+    {
+      "name": "mail_status",
+      "description": "Permissions, index progress and settings."
+    },
+    {
+      "name": "open_permission_settings",
+      "description": "Open Full Disk Access settings and show Timbre, when it cannot read Mail yet."
+    },
+    {
+      "name": "selected_mail",
+      "description": "Messages selected in Mail."
+    },
+    {
+      "name": "open_in_mail",
+      "description": "Open a message in Mail."
+    },
+    {
+      "name": "create_draft",
+      "description": "New message, reply or forward as a draft in Mail. Never sends."
+    },
+    {
+      "name": "mark_mail",
+      "description": "Mark read or unread, flag or unflag."
+    },
+    {
+      "name": "move_mail",
+      "description": "Move to archive, trash or a mailbox, with undo."
+    },
+    {
+      "name": "undo_move",
+      "description": "Undo a move."
+    },
+    {
+      "name": "prepare_send",
+      "description": "Sending, step 1 (only when sending is enabled)."
+    },
+    {
+      "name": "confirm_send",
+      "description": "Sending, step 2 (only when sending is enabled)."
+    }
   ],
   "user_config": {
     "read_only": {
@@ -97,9 +154,18 @@
       "title": "Attachments folder",
       "description": "The only folder where Timbre saves attachments. Default: Downloads/Timbre.",
       "required": false
+    },
+    "check_updates": {
+      "type": "boolean",
+      "title": "Check for updates",
+      "description": "Once a day, ask GitHub for the number of the latest Timbre release (nothing else is sent), so Claude can tell you when a new version exists.",
+      "default": true,
+      "required": false
     }
   },
   "compatibility": {
-    "platforms": ["darwin"]
+    "platforms": [
+      "darwin"
+    ]
   }
 }

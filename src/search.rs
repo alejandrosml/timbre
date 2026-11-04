@@ -90,6 +90,9 @@ pub struct SearchResult {
     pub notice: Option<String>,
     pub took_ms: u64,
     pub results: Vec<Hit>,
+    /// A newer Timbre exists (said once per session).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timbre_update: Option<String>,
 }
 
 const COUNT_CAP: u64 = 1_000;
@@ -717,6 +720,7 @@ pub fn search(
         notice,
         took_ms: started.elapsed().as_millis() as u64,
         results,
+        timbre_update: None,
     })
 }
 

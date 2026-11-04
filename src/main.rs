@@ -15,6 +15,7 @@ mod extract;
 mod fixture;
 mod html;
 mod index;
+mod launcher;
 mod mailapp;
 mod mime;
 mod norm;
@@ -26,6 +27,7 @@ mod server;
 mod store;
 #[cfg(test)]
 mod tests;
+mod updates;
 mod util;
 
 use std::sync::Arc;
@@ -88,6 +90,9 @@ enum Command {
         #[arg(default_value_t = 20_000)]
         count: usize,
     },
+    /// Exit 0 when Mail's data can be opened (used by the launcher).
+    #[command(hide = true)]
+    Probe,
     /// Measure search latency on this Mac.
     Bench {
         #[arg(long, default_value_t = 30)]
@@ -110,12 +115,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Command::Serve);
     if matches!(command, Command::Serve) {
-        // Claude starts the server: run it with Timbre's own macOS
-        // permissions rather than Claude's (see responsibility.rs).
-        if let Some(code) = responsibility::relaunch() {
+        // Claude starts the server: on macOS it runs under the launcher,
+        // with Timbre's own permissions and restarted once they are granted.
+        if let Some(code) = launcher::run_if_needed() {
             std::process::exit(code);
         }
-        responsibility::watch_launcher();
+        launcher::watch_parent();
     }
     let cfg = Config::from_env();
     match command {
@@ -127,6 +132,7 @@ fn main() -> Result<()> {
         Command::DevFixture { dir } => fixture::build(&dir).map(|_| ()),
         #[cfg(debug_assertions)]
         Command::DevCorpus { dir, count } => corpus::build(&dir, count).map(|_| ()),
+        Command::Probe => std::process::exit(if store::Store::open(&cfg).is_ok() { 0 } else { 1 }),
         Command::Bench { runs } => bench(cfg, runs),
     }
 }
@@ -141,10 +147,13 @@ fn serve(cfg: Config) -> Result<()> {
     let store = match store::Store::open(&cfg) {
         Ok(s) => Arc::new(s),
         Err(e) => {
-            // Still start, so Claude can explain what is missing.
+            // Still start, so Claude can explain what is missing; under the
+            // launcher, restart by itself once Mail's data is readable.
             tracing::warn!("mail store unavailable: {e:#}");
+            launcher::restart_when_readable();
+            let service = degraded::Degraded::new(format!("{e:#}"), &cfg);
             return rt.block_on(async move {
-                let service = degraded::Degraded::new(format!("{e:#}")).serve(rmcp::transport::stdio()).await?;
+                let service = service.serve(rmcp::transport::stdio()).await?;
                 service.waiting().await?;
                 Ok(())
             });
@@ -163,6 +172,7 @@ fn serve(cfg: Config) -> Result<()> {
     let progress = Arc::new(index::Progress::default());
     let indexer = index::Indexer::new(cfg.clone(), store.clone(), progress.clone());
     std::thread::Builder::new().name("timbre-index".into()).spawn(move || indexer.run_forever())?;
+    updates::start(&cfg);
     let ctx = Arc::new(app::Ctx::new(cfg, store, progress)?);
     let result = rt.block_on(async move {
         let service = server::Timbre::new(ctx).serve(rmcp::transport::stdio()).await?;

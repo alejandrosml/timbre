@@ -60,6 +60,7 @@ jobs:
           lipo -create -output dist/timbre \
             target/aarch64-apple-darwin/release/timbre target/x86_64-apple-darwin/release/timbre
           lipo -info dist/timbre
+          scripts/make-app.sh dist/timbre dist
       - name: Sign (Developer ID)
         if: steps.secrets.outputs.run == 'true' && env.DRY_RUN != 'true'
         env:
@@ -86,15 +87,15 @@ jobs:
           codesign --force --timestamp --options runtime \
             --identifier io.github.alejandrosml.timbre \
             --entitlements packaging/Timbre.entitlements \
-            --keychain "$KEYCHAIN" --sign "$IDENTITY" dist/timbre
-          codesign --verify --strict --verbose=2 dist/timbre
-          codesign --display --verbose=2 dist/timbre 2>&1 | grep -E "Authority|TeamIdentifier|Timestamp|flags"
+            --keychain "$KEYCHAIN" --sign "$IDENTITY" dist/Timbre.app
+          codesign --verify --strict --deep --verbose=2 dist/Timbre.app
+          codesign --display --verbose=2 dist/Timbre.app 2>&1 | grep -E "Authority|TeamIdentifier|Timestamp|flags"
       - name: Sign (ad-hoc, dry run)
         if: steps.secrets.outputs.run == 'true' && env.DRY_RUN == 'true'
         run: |
           codesign --force --options runtime --identifier io.github.alejandrosml.timbre \
-            --entitlements packaging/Timbre.entitlements --sign - dist/timbre
-          codesign --verify --strict --verbose=2 dist/timbre
+            --entitlements packaging/Timbre.entitlements --sign - dist/Timbre.app
+          codesign --verify --strict --deep --verbose=2 dist/Timbre.app
       - name: Notarize
         if: steps.secrets.outputs.run == 'true' && env.DRY_RUN != 'true'
         env:
@@ -103,29 +104,28 @@ jobs:
           API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           echo "$API_KEY" | base64 --decode > "$RUNNER_TEMP/key.p8"
-          ditto -c -k --keepParent dist/timbre "$RUNNER_TEMP/timbre.zip"
+          ditto -c -k --keepParent dist/Timbre.app "$RUNNER_TEMP/timbre.zip"
           xcrun notarytool submit "$RUNNER_TEMP/timbre.zip" \
             --key "$RUNNER_TEMP/key.p8" --key-id "$API_KEY_ID" --issuer "$API_ISSUER" \
             --wait --timeout 30m --output-format json | tee "$RUNNER_TEMP/notary.json"
           rm "$RUNNER_TEMP/key.p8"
           python3 -c "import json,sys; s=json.load(open(sys.argv[1]))['status']; print('notarization:', s); sys.exit(s != 'Accepted')" "$RUNNER_TEMP/notary.json"
+          xcrun stapler staple dist/Timbre.app
       - name: Package the Claude extension
         if: steps.secrets.outputs.run == 'true'
         run: |
           npm install -g @anthropic-ai/mcpb@2.1.2
-          scripts/package-mcpb.sh dist/timbre
-          cd dist && shasum -a 256 timbre timbre-*.mcpb > SHA256SUMS && cat SHA256SUMS
+          scripts/package-mcpb.sh dist/Timbre.app
+          cd dist && shasum -a 256 timbre-*.mcpb > SHA256SUMS && cat SHA256SUMS
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         if: steps.secrets.outputs.run == 'true' && env.DRY_RUN != 'true'
         with:
-          subject-path: |
-            dist/timbre
-            dist/timbre-*.mcpb
+          subject-path: dist/timbre-*.mcpb
       - name: Publish
         if: steps.secrets.outputs.run == 'true' && env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist/timbre-*.mcpb dist/timbre dist/SHA256SUMS
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist/timbre-*.mcpb dist/SHA256SUMS
       - name: Keep the dry-run package
         if: steps.secrets.outputs.run == 'true' && env.DRY_RUN == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
