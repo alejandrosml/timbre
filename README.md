@@ -38,7 +38,7 @@ Claude's Gmail connector sends each search to Google's servers through the Gmail
 
 In both cases, what Claude reads goes to Claude to answer you.
 
-**Also using the Gmail connector?** No need to remove it: Timbre asks Claude to go through Timbre first for anything in your mail, Gmail included. Keep the Gmail connector for what Timbre does not do, such as sending from Gmail while sending is off in Timbre. If Claude still reaches for Gmail, just tell it "search with Timbre".
+**Also using the Gmail connector?** No need to remove it: Timbre asks Claude to go through Timbre first for anything in your mail, Gmail included. Keep the Gmail connector for what Timbre does not do, such as archiving Gmail mail or filing it under a label (Mail cannot do that for a script), or sending from Gmail while sending is off in Timbre. If Claude still reaches for Gmail, just tell it "search with Timbre".
 
 ## What it does
 
@@ -46,7 +46,7 @@ In both cases, what Claude reads goes to Claude to answer you.
 - **Read safely.** The text a person sees in Mail: hidden HTML content removed, and nothing that is shown lost (shops' MJML layouts, text after an attachment placed inside the message, the text version of mail made of pictures), with warnings about sender authenticity, deceptive links and risky attachments (programs, macros, web pages).
 - **Follow conversations.** A whole thread, each message reduced to its new text.
 - **Read attachments.** PDF, Word, RTF and ODT (converted by macOS in a separate process), text, HTML, CSV, calendars, contact cards and attached emails.
-- **Act, reversibly.** Drafts (new, reply, reply all, forward) open in Mail for you to review; mark read/unread, flag; move to archive, trash or any mailbox — with **undo**.
+- **Act, reversibly.** Drafts (new, reply, reply all, forward) open in Mail for you to review; mark read/unread, flag; move to archive, trash or any mailbox — with **undo**. An account with no archive mailbox is given one when Mail allows it, as with its Archive button. Gmail is the exception: Mail lets a script move Gmail mail to the trash or junk only, and Timbre says so rather than pretend.
 - **Send, only if you allow it.** Off by default. When enabled, every message takes two explicit steps, with an optional recipient allowlist and an hourly cap.
 
 ## How it compares
@@ -98,14 +98,14 @@ spctl --assess -vv "$APP"                                # accepted, source=Nota
 
 A synthetic mailbox of 20,000 messages (788 MB: HTML newsletters, replies with quoted history, attachments, French, English and Spanish text with a realistic vocabulary), indexed on a small 2-core virtual machine:
 
-| | v0.1.0 | v0.4.0 | v0.5.2 |
+| | v0.1.0 | v0.4.0 | v0.5.6 |
 |---|---|---|---|
 | Full index build | 28.6 s | 13.0 s | 16.0 s |
 | Index size on disk | 298 MB | 124 MB | 126 MB |
 | Search, median | 42 ms | 18 ms | 25 ms |
 | Search, 95th percentile | 62 ms | 30 ms | 46 ms |
 
-0.5.2 is a little slower for being more exact: it reads every part of each message and works out which text can be seen the way Mail's WebKit does, indexes junk and trash too (search still leaves them out), and ranks a broad query over its most recent matches by date rather than by the order Mail stored them in, so the mail of an account added later cannot push this month's out.
+0.5.6 is a little slower for being more exact: it reads every part of each message and works out which text can be seen the way Mail's WebKit does, indexes junk and trash too (search still leaves them out), and ranks a broad query over its most recent matches by date rather than by the order Mail stored them in, so the mail of an account added later cannot push this month's out.
 
 What made the difference: messages are parsed on every core while a single writer commits large transactions, with FTS5's merging deferred and a 64 MiB pending-terms table; the text kept for snippets is stored once, compressed with zstd; there is no prefix index; snippets and details are computed for the returned page only, and very broad queries are ranked over their 10,000 most recent matches. Index-time work that only matters when reading a message is skipped. To reproduce: `timbre dev-corpus /tmp/corpus 20000` (debug build), then `timbre index --rebuild` and `timbre bench` from a release build with `TIMBRE_MAIL_ROOT`, `TIMBRE_ACCOUNTS_DB` and `TIMBRE_DATA_DIR` pointing at it.
 
@@ -135,7 +135,7 @@ The full-text index builds in the background on first launch (about a minute per
 | `save_attachment` | Save to your attachments folder | adds a file |
 | `create_draft` | New, reply, reply all, forward — as a draft | adds a draft |
 | `mark_mail` | Read/unread, flag/unflag | yes |
-| `move_mail` / `undo_move` | Archive, trash, any mailbox — and back | yes, reversible |
+| `move_mail` / `undo_move` | Archive, trash, any mailbox — and back (Gmail: trash and junk) | yes, reversible |
 | `prepare_send` / `confirm_send` | Two-step sending (only when enabled) | sends |
 
 ## Settings

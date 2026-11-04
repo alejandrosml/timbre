@@ -948,14 +948,16 @@ pub fn search(
             None
         };
         let auth: Option<String> = auth_stmt.query_row([id], |r| r.get(0)).optional().map_err(err)?.flatten();
-        let mb = mailboxes.get(&store.display_mailbox(conn, m.id, m.mailbox));
+        let shown = store.display_mailbox(conn, m.id, m.mailbox);
+        // A mailbox Mail created since the list was read is read again.
+        let mb = mailboxes.get(&shown).cloned().or_else(|| store.mailbox_fresh(conn, shown));
         results.push(Hit {
             id: m.id,
             date: iso_local(m.date).unwrap_or_default(),
             from: m.from,
             subject: m.subject,
-            mailbox: mb.map(|x| x.display_path()).unwrap_or_default(),
-            account: mb.map(|x| x.account.clone()).unwrap_or_default(),
+            mailbox: mb.as_ref().map(|x| x.display_path()).unwrap_or_default(),
+            account: mb.map(|x| x.account).unwrap_or_default(),
             unread: m.unread,
             flagged: m.flagged,
             attachments: m.attachments,

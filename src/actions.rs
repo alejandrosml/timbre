@@ -17,7 +17,7 @@ use crate::app::Ctx;
 use crate::config::Config;
 use crate::mailapp::{self, Loc};
 use crate::mime;
-use crate::store::{Mailbox, Role};
+use crate::store::{Mailbox, Role, Store};
 use crate::util::{iso_local, now_unix};
 
 // ---------------------------------------------------------------- journals
@@ -116,9 +116,11 @@ fn source_of(ctx: &Ctx, id: i64) -> Result<Source, String> {
     if meta.deleted {
         return Err(format!("Message {id} was deleted in Mail: there is nothing to act on."));
     }
-    let stored = ctx.store.mailbox(meta.mailbox).ok_or_else(|| format!("message {id} is in an unknown mailbox"))?;
-    let shown_id = ctx.store.display_mailbox(&ctx.db(), id, meta.mailbox);
-    let shown = ctx.store.mailbox(shown_id).unwrap_or_else(|| stored.clone());
+    let conn = ctx.db();
+    let stored =
+        ctx.store.mailbox_fresh(&conn, meta.mailbox).ok_or_else(|| format!("message {id} is in an unknown mailbox"))?;
+    let shown_id = ctx.store.display_mailbox(&conn, id, meta.mailbox);
+    let shown = ctx.store.mailbox_fresh(&conn, shown_id).unwrap_or_else(|| stored.clone());
     Ok(Source { shown, stored })
 }
 
@@ -371,6 +373,10 @@ fn collect_failures(items: &[serde_json::Value]) -> (usize, Vec<Failure>) {
 /// them, and what was done is known.
 const CHUNK: usize = 25;
 
+/// How long Mail may take to make a mailbox on the server, then to list it.
+const MAKE_TIMEOUT: Duration = Duration::from_secs(90);
+const FIND_TIMEOUT: Duration = Duration::from_secs(40);
+
 pub async fn mark(ctx: &Ctx, p: &MarkParams) -> Result<BatchResult, String> {
     if p.ids.is_empty() || p.ids.len() > 500 {
         return Err("Give between 1 and 500 ids.".into());
@@ -428,25 +434,159 @@ pub struct MoveParams {
     pub account: Option<String>,
 }
 
-fn destination(ctx: &Ctx, src: &Mailbox, to: &str, account: Option<&str>) -> Result<Mailbox, String> {
+/// Where a move goes.
+struct Target {
+    mailbox: Mailbox,
+    /// The account has no archive mailbox: Mail creates it first, as its
+    /// Archive button does.
+    create: bool,
+}
+
+fn destination(ctx: &Ctx, src: &Mailbox, to: &str, account: Option<&str>) -> Result<Target, String> {
+    let found = |mailbox: Mailbox| Target { mailbox, create: false };
     if let Some(role) = Role::from_alias(to)
         && account.is_none()
     {
-        return ctx
-            .store
-            .role_mailbox_for_account(&src.account_id, &src.account, role)
-            .ok_or_else(|| format!("Account '{}' has no {} mailbox.", src.account, role.as_str()));
+        if let Some(m) = ctx.store.role_mailbox_for_account(&src.account_id, &src.account, role) {
+            return Ok(found(m));
+        }
+        if role == Role::Archive
+            && let Some(mailbox) = new_archive(&ctx.store, src)
+        {
+            return Ok(Target { mailbox, create: true });
+        }
+        return Err(format!("Account '{}' has no {} mailbox.", src.account, role.as_str()));
     }
     let ids = ctx.store.resolve_mailboxes(to, account);
     let all: Vec<Mailbox> = ids.iter().filter_map(|i| ctx.store.mailbox(*i)).collect();
     let same: Vec<&Mailbox> =
         all.iter().filter(|m| crate::store::same_account(m, &src.account_id, &src.account)).collect();
     match (same.len(), all.len()) {
-        (1, _) => Ok(same[0].clone()),
-        (0, 1) => Ok(all[0].clone()),
+        (1, _) => Ok(found(same[0].clone())),
+        (0, 1) => Ok(found(all[0].clone())),
         (0, 0) => Err(format!("No mailbox named '{to}'. Call list_mailboxes.")),
         _ => Err(format!("'{to}' matches several mailboxes: give 'account' or the full path.")),
     }
+}
+
+/// The archive mailbox Mail's Archive button makes for an IMAP account that
+/// has none: "Archive", at the top of the account as Mail shows it. Its
+/// path is where the server will keep it, beside the account's own
+/// mailboxes: inside INBOX on servers that keep everything there
+/// ("INBOX/DRAFT", "INBOX/TRASH" at La Poste and Orange). None where Mail
+/// would not make one: On My Mac, Exchange, Gmail (whose All Mail is the
+/// archive).
+pub(crate) fn new_archive(store: &Store, src: &Mailbox) -> Option<Mailbox> {
+    if src.local || !src.url.starts_with("imap://") || store.is_gmail(&src.account_id, &src.account) {
+        return None;
+    }
+    let mailboxes = store.mailboxes();
+    let own: Vec<&Mailbox> = mailboxes
+        .values()
+        .filter(|m| {
+            matches!(m.role, Role::Drafts | Role::Sent | Role::Trash | Role::Junk)
+                && crate::store::same_account(m, &src.account_id, &src.account)
+        })
+        .collect();
+    let inside = |m: &&Mailbox| m.path.len() >= 2 && m.path[0].eq_ignore_ascii_case("INBOX");
+    let path = match own.first() {
+        Some(first) if own.iter().all(inside) => vec![first.path[0].clone(), "Archive".to_string()],
+        _ => vec!["Archive".to_string()],
+    };
+    Some(Mailbox {
+        id: -1,
+        url: String::new(),
+        account_id: src.account_id.clone(),
+        account: src.account.clone(),
+        name: "Archive".into(),
+        path,
+        role: Role::Archive,
+        role_strength: 2,
+        local: false,
+    })
+}
+
+// What Mail does when a script moves a Gmail message, as tried on a real
+// account (macOS 26, November 2026). Mail keeps each Gmail message once, in
+// All Mail, and shows its labels (Inbox…) as mailboxes; a scripted move
+// takes the message from All Mail, never from the label it is shown under:
+// - to the Trash or Spam it goes, keeping its labels;
+// - from there to the inbox it comes out, labels kept, but lands in All
+//   Mail: Gmail gives it no Inbox label;
+// - out of the inbox or a label (to the archive, another label) nothing
+//   happens: the message is back within seconds. Only Mail's Archive button
+//   takes a message out of the Gmail inbox;
+// - from the Trash or Spam to All Mail, Gmail deletes it for good (Mail
+//   keeps a copy in "Recovered Messages", on the Mac only).
+const GMAIL_STAYS: &str = "Gmail: by script, Mail can only move a message to the trash or junk, and out of them to \
+All Mail; it cannot make this move (a message taken out of the inbox comes straight back). Gmail itself can (its \
+website or app, or a Gmail connector), and Mail's Archive button (Message > Archive) archives.";
+const GMAIL_DELETES: &str = "Gmail: out of the trash or junk, Mail can only move a message to the inbox by script; \
+anywhere else, Gmail would delete it for good.";
+const GMAIL_TRASHED: &str = "Gmail: undo_move takes them out of the trash or junk with their labels, but Mail \
+cannot put a Gmail message back in the inbox by script: those from the inbox will be in All Mail (the archive).";
+const GMAIL_RESCUED: &str = "Gmail: out of the trash or junk with their labels, but in All Mail (the archive), not \
+the inbox: Mail cannot put a Gmail message in the inbox by script. Mail may still list them in the inbox for a while.";
+const GMAIL_UNDONE: &str = "Gmail: out of the trash or junk with their labels, but Mail cannot put a Gmail message \
+back in the inbox by script: those that were in the inbox are in All Mail (the archive). Mail may still list them in \
+the inbox for a while.";
+const GMAIL_ELSEWHERE: &str = "Gmail may keep its own copy of messages moved to another account.";
+const GMAIL_ALL_MAIL: &str = "Gmail keeps every message in All Mail, so Timbre cannot tell whether this one is \
+still where it was moved: it is left where it is.";
+
+fn thrown(role: Role) -> bool {
+    matches!(role, Role::Trash | Role::Junk)
+}
+
+/// Whether Mail can make this move of a Gmail message, from the mailbox it
+/// is shown in: Ok with a note to pass on, or Err with why not. Moves that
+/// involve no Gmail account are not concerned.
+pub(crate) fn gmail_move(store: &Store, from: &Mailbox, to: &Mailbox) -> Result<Option<&'static str>, String> {
+    if !store.is_gmail(&from.account_id, &from.account) {
+        return Ok(None);
+    }
+    if !crate::store::same_account(to, &from.account_id, &from.account) {
+        return Ok(Some(GMAIL_ELSEWHERE));
+    }
+    match (thrown(from.role), thrown(to.role), to.role) {
+        (false, true, _) => Ok(Some(GMAIL_TRASHED)),
+        (true, false, Role::Inbox) => Ok(Some(GMAIL_RESCUED)),
+        (true, ..) => Err(GMAIL_DELETES.into()),
+        (false, false, _) => Err(GMAIL_STAYS.into()),
+    }
+}
+
+/// Where an undo can send a message back, for Gmail: out of the trash or
+/// junk only through the inbox (it keeps its labels, so one that was under
+/// a label is back there; one from the inbox lands in All Mail).
+pub(crate) fn gmail_undo(store: &Store, now_in: &Loc, back_to: &Loc) -> Result<(Loc, Option<&'static str>), String> {
+    if now_in.local || !store.is_gmail(&now_in.account_id, &now_in.account) {
+        return Ok((back_to.clone(), None));
+    }
+    let same = !back_to.local && back_to.account_id == now_in.account_id;
+    if !same {
+        return Ok((back_to.clone(), Some(GMAIL_ELSEWHERE)));
+    }
+    let role = |l: &Loc| {
+        store.mailbox_at(&l.account_id, &l.account, &l.path).map_or_else(|| Role::detect_scored(&l.path).0, |m| m.role)
+    };
+    let (from, to) = (role(now_in), role(back_to));
+    if thrown(from) {
+        if thrown(to) {
+            return Err(GMAIL_DELETES.into());
+        }
+        let inbox = store
+            .role_mailbox_for_account(&now_in.account_id, &now_in.account, Role::Inbox)
+            .ok_or_else(|| format!("Account '{}' has no inbox to bring it back through.", now_in.account))?;
+        return Ok((Loc::from(&inbox), Some(GMAIL_UNDONE)));
+    }
+    if from == Role::Archive {
+        return Err(GMAIL_ALL_MAIL.into());
+    }
+    if thrown(to) {
+        return Ok((back_to.clone(), None));
+    }
+    Err(GMAIL_STAYS.into())
 }
 
 pub async fn move_mail(ctx: &Ctx, p: &MoveParams) -> Result<BatchResult, String> {
@@ -455,17 +595,62 @@ pub async fn move_mail(ctx: &Ctx, p: &MoveParams) -> Result<BatchResult, String>
     }
     let mut items = vec![];
     let mut failed = vec![];
+    let mut notes: Vec<&str> = vec![];
+    let mut make: Vec<(Loc, String)> = vec![];
     for id in &p.ids {
         let r = source_of(ctx, *id)
             .and_then(|src| destination(ctx, &src.shown, &p.to, p.account.as_deref()).map(|d| (src, d)));
         match r {
-            Ok((src, dest)) if dest.id == src.shown.id => failed.push(Failure::of(*id, "already there")),
-            Ok((src, dest)) => {
-                let mut v = src.json(*id);
-                v["dest"] = json!(Loc::from(&dest));
-                items.push((*id, v, Loc::from(&src.shown), Loc::from(&dest)));
-            }
+            Ok((src, dest)) if dest.mailbox.id == src.shown.id => failed.push(Failure::of(*id, "already there")),
+            Ok((src, dest)) => match gmail_move(&ctx.store, &src.shown, &dest.mailbox) {
+                Err(why) => failed.push(Failure::of(*id, why)),
+                Ok(note) => {
+                    if let Some(n) = note
+                        && !notes.contains(&n)
+                    {
+                        notes.push(n);
+                    }
+                    let to = Loc::from(&dest.mailbox);
+                    if dest.create && !make.iter().any(|(l, _)| *l == to) {
+                        make.push((to.clone(), dest.mailbox.name.clone()));
+                    }
+                    let mut v = src.json(*id);
+                    v["dest"] = json!(to);
+                    items.push((*id, v, Loc::from(&src.shown), to));
+                }
+            },
             Err(e) => failed.push(Failure::of(*id, e)),
+        }
+    }
+    // An archive to make first, in its own call: Mail asks the server, which
+    // can take a while, and nothing is moved unless it is there.
+    for (loc, name) in make {
+        // Mail may have it already (made on the provider's website) before
+        // its database, which Timbre reads, does.
+        let has = mailapp::run(mailapp::FIND_MAILBOX, &json!({"loc": loc, "tries": 1}), FIND_TIMEOUT).await.is_ok();
+        let made = if has {
+            Ok(())
+        } else {
+            match mailapp::make_mailbox(&loc.account_id, &name, MAKE_TIMEOUT).await {
+                Ok(()) => mailapp::run(mailapp::FIND_MAILBOX, &json!({"loc": loc}), FIND_TIMEOUT).await.map(|_| ()),
+                Err(e) => Err(e),
+            }
+        };
+        if let Err(e) = made {
+            let why = format!(
+                "Mail could not make an archive mailbox for '{}' ({}). Nothing was moved. Make a mailbox \
+                 named Archive for this account once, on the provider's website or in Mail (Mailbox > New \
+                 Mailbox), and archiving will use it.",
+                loc.account,
+                e.to_string().trim_end_matches('.')
+            );
+            items.retain(|(id, .., to)| {
+                let keep = *to != loc;
+                if !keep {
+                    failed.push(Failure::of(*id, why.clone()));
+                }
+                keep
+            });
         }
     }
     if items.is_empty() {
@@ -547,7 +732,13 @@ pub async fn move_mail(ctx: &Ctx, p: &MoveParams) -> Result<BatchResult, String>
     {
         return Err(e);
     }
-    let note = undo_token.as_ref().map(|_| "To move them back, call undo_move with this undo_token.".to_string());
+    if done == 0 {
+        notes.clear();
+    }
+    if undo_token.is_some() {
+        notes.push("To move them back, call undo_move with this undo_token.");
+    }
+    let note = (!notes.is_empty()).then(|| notes.join(" "));
     Ok(BatchResult { done, failed, undo_token, note })
 }
 
@@ -647,11 +838,24 @@ pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
     let todo: Vec<&UndoItem> = entry.items.iter().filter(|i| !i.done).collect();
     let mut back: Vec<String> = vec![];
     let mut failed = vec![];
-    for chunk in todo.chunks(CHUNK) {
-        let items: Vec<_> = chunk
-            .iter()
-            .map(|i| json!({"message_id": i.message_id, "now_in": i.now_in, "back_to": i.back_to}))
-            .collect();
+    let mut notes: Vec<&str> = vec![];
+    // Where each goes back, the way Mail can take it (Gmail).
+    let mut routed = vec![];
+    for i in &todo {
+        match gmail_undo(&ctx.store, &i.now_in, &i.back_to) {
+            Ok((to, note)) => {
+                if let Some(n) = note
+                    && !notes.contains(&n)
+                {
+                    notes.push(n);
+                }
+                routed.push(json!({"message_id": i.message_id, "now_in": i.now_in, "back_to": to}));
+            }
+            Err(why) => failed.push(Failure { id: None, message_id: Some(i.message_id.clone()), error: why }),
+        }
+    }
+    for items in routed.chunks(CHUNK) {
+        let items = items.to_vec();
         let (tried, stop) =
             mailapp::run_batch(mailapp::MOVE_BACK, &json!({"items": items}), timeout_for(items.len() * 3)).await;
         for item in &tried {
@@ -685,17 +889,30 @@ pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
         save_undo(&ctx.cfg, &journal);
         complete
     };
-    let note = if complete {
+    // Those Mail cannot move back stay as they are: trying again changes nothing.
+    let refused = todo.len() - routed.len();
+    let retry = !complete && back.len() + refused < todo.len();
+    let mut note = if complete {
         format!("Undid: {}", entry.description)
-    } else {
+    } else if retry {
         format!(
             "Partly undone ({} of {}). Call undo_move again with undo_token {} to retry the others.",
             back.len(),
             todo.len(),
             entry.token
         )
+    } else if back.is_empty() {
+        "Nothing was moved back: see why in failed.".to_string()
+    } else {
+        format!("Partly undone ({} of {}): the others cannot be moved back, see why in failed.", back.len(), todo.len())
     };
-    let undo_token = (!complete).then(|| entry.token.clone());
+    if !back.is_empty() {
+        for n in notes {
+            note.push(' ');
+            note.push_str(n);
+        }
+    }
+    let undo_token = retry.then(|| entry.token.clone());
     Ok(BatchResult { done: back.len(), failed, undo_token, note: Some(note) })
 }
 

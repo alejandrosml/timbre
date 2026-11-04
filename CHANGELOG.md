@@ -5,7 +5,7 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
-## [0.5.2] - 2026-11-04
+## [0.5.6] - 2026-11-05
 
 A review of every part of Timbre, by four independent reviewers and on a
 real mailbox of 132,000 messages. After this update Timbre reads the
@@ -57,12 +57,28 @@ messages again in the background, newest first; search works meanwhile.
   page instead of an error, paging stops at the 50,000th result instead of
   repeating a page, and dates such as `2024/03/01` or
   `2024-03-01T10:00:00` are read.
-- **Gmail.** Moving and undoing act on the mailbox the message is shown in
-  (its inbox), not on All Mail: "archive" archives, and undo puts the
-  message back in the inbox. Trashed mail stays out of searches even when
-  Gmail keeps its labels. Two accounts with the same name ("Google") are
-  told apart. A trashed message that keeps its labels is shown, and acted
-  on, in the trash.
+- **Gmail moves.** Mail keeps each Gmail message in All Mail and, asked by
+  a script, moves it from there, never from the inbox or label it is shown
+  under: archiving or filing under a label did nothing (the message was back
+  in the inbox seconds later) while Timbre said it was done, and moving a
+  message from the trash to All Mail makes Gmail delete it for good. Timbre
+  now asks Mail only for what it can do with Gmail: to the trash or junk,
+  and back out of them. The other moves are refused, saying what can do
+  them (Gmail itself, or Mail's Archive button). Undo takes a Gmail message
+  out of the trash through the inbox, the one way Mail can: it keeps its
+  labels, and one that was in the inbox lands in All Mail, as the result
+  says. Trashed mail stays out of searches even when Gmail keeps its
+  labels. Two accounts with the same name ("Google") are told apart. A
+  trashed message that keeps its labels is shown, and acted on, in the
+  trash.
+- **Accounts without an archive.** Archiving the mail of an IMAP account
+  that has no archive mailbox asks Mail to make one first, "Archive", as
+  Mail's Archive button does. Where Mail will not make it for a script (La
+  Poste), nothing is moved and the result says how to make it once, on the
+  provider's website or in Mail; an Archive made on the website is used as
+  soon as Mail lists it.
+- **New mailboxes.** A mailbox Mail creates while Timbre runs ("Recovered
+  Messages", a new archive) is named in results instead of left blank.
 - **Mailbox roles.** Whole words only: "Présentations" or "Essentiel" are
   no longer taken for the sent mailbox; each account's usual mailbox is
   chosen, the same every time (Gmail's own before a label of the same

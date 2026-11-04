@@ -9,7 +9,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
@@ -355,6 +356,8 @@ pub struct Store {
     /// The user's addresses known from the account settings (lower case).
     pub account_addresses: Vec<String>,
     mailboxes: RwLock<Arc<HashMap<i64, Mailbox>>>,
+    /// When a mailbox nobody knew made the list be read again.
+    reread: Mutex<Option<Instant>>,
 }
 
 /// One message's metadata, straight from the Envelope Index.
@@ -561,6 +564,12 @@ fn load_accounts(path: &Path) -> HashMap<String, (String, Option<String>)> {
     out
 }
 
+/// One of Gmail's own folders: "[Gmail]/…", or "[Google Mail]/…" in the
+/// countries where Gmail goes by that name.
+pub fn gmail_folder(m: &Mailbox) -> bool {
+    !m.local && m.path.first().is_some_and(|p| p == "[Gmail]" || p == "[Google Mail]")
+}
+
 /// Is mailbox `m` in this account? By id when there is one ("On My Mac"
 /// has none), never by a name two accounts may share.
 pub fn same_account(m: &Mailbox, account_id: &str, account: &str) -> bool {
@@ -646,6 +655,7 @@ impl Store {
             accounts,
             account_addresses,
             mailboxes: RwLock::new(Arc::new(HashMap::new())),
+            reread: Mutex::new(None),
         };
         store.reload_mailboxes(&conn)?;
         Ok(store)
@@ -669,6 +679,34 @@ impl Store {
 
     pub fn mailbox(&self, id: i64) -> Option<Mailbox> {
         self.mailboxes().get(&id).cloned()
+    }
+
+    /// The mailbox with this id, reading Mail's list again when it is new to
+    /// Timbre: Mail creates mailboxes at any time ("Recovered Messages", an
+    /// archive). At most once a second, so unknown ids cost little.
+    pub fn mailbox_fresh(&self, conn: &Connection, id: i64) -> Option<Mailbox> {
+        if let Some(m) = self.mailbox(id) {
+            return Some(m);
+        }
+        {
+            let mut last = self.reread.lock().unwrap_or_else(|e| e.into_inner());
+            if last.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+                return None;
+            }
+            *last = Some(Instant::now());
+        }
+        let _ = self.reload_mailboxes(conn);
+        self.mailbox(id)
+    }
+
+    /// The mailbox at this place of an account, if Mail lists it.
+    pub fn mailbox_at(&self, account_id: &str, account: &str, path: &[String]) -> Option<Mailbox> {
+        self.mailboxes().values().find(|m| same_account(m, account_id, account) && m.path == path).cloned()
+    }
+
+    /// A Gmail account: one with Gmail's own folders.
+    pub fn is_gmail(&self, account_id: &str, account: &str) -> bool {
+        self.mailboxes().values().any(|m| gmail_folder(m) && same_account(m, account_id, account))
     }
 
     pub fn account_names(&self) -> Vec<String> {

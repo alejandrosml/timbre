@@ -1030,3 +1030,152 @@ fn parse_real_mail() {
     }
     assert!(panics.is_empty());
 }
+
+// ---------------------------------------------------------------- moves
+
+/// A Gmail account and a La Poste one, beside the fixture's iCloud.
+const GMAIL: &str = "0A0A0A0A-1111-4E5F-9A8B-00000000000A";
+const LAPOSTE: &str = "0B0B0B0B-1111-4E5F-9A8B-00000000000B";
+
+/// 101 is a Gmail message stored in All Mail and labelled Inbox, 102 is in
+/// the Gmail trash, 104 archived in Gmail (All Mail only), 1234 in La
+/// Poste's inbox, whose mailboxes all live inside INBOX.
+fn gmail_and_laposte(cfg: &crate::config::Config) {
+    let c = envelope_index(cfg);
+    for p in ["INBOX", "%5BGmail%5D/Tous%20les%20messages", "%5BGmail%5D/Corbeille", "%5BGmail%5D/Spam", "Perso"] {
+        c.execute("INSERT INTO mailboxes(url) VALUES(?1)", [format!("imap://{GMAIL}/{p}")]).unwrap();
+    }
+    for p in ["INBOX", "INBOX/DRAFT", "INBOX/OUTBOX", "INBOX/TRASH", "INBOX/QUARANTAINE"] {
+        c.execute("INSERT INTO mailboxes(url) VALUES(?1)", [format!("imap://{LAPOSTE}/{p}")]).unwrap();
+    }
+    let mb = |p: &str| format!("(SELECT ROWID FROM mailboxes WHERE url = 'imap://{p}')");
+    c.execute_batch(&format!(
+        "CREATE TABLE labels (message_id INTEGER NOT NULL REFERENCES messages(ROWID) ON DELETE CASCADE,
+             mailbox_id INTEGER NOT NULL REFERENCES mailboxes(ROWID) ON DELETE CASCADE,
+             PRIMARY KEY (message_id, mailbox_id)) WITHOUT ROWID;
+         UPDATE messages SET mailbox = {all} WHERE ROWID IN (101, 104);
+         INSERT INTO labels VALUES(101, {inbox});
+         UPDATE messages SET mailbox = {bin} WHERE ROWID = 102;
+         UPDATE messages SET mailbox = {lp} WHERE ROWID = 1234;",
+        all = mb(&format!("{GMAIL}/%5BGmail%5D/Tous%20les%20messages")),
+        inbox = mb(&format!("{GMAIL}/INBOX")),
+        bin = mb(&format!("{GMAIL}/%5BGmail%5D/Corbeille")),
+        lp = mb(&format!("{LAPOSTE}/INBOX")),
+    ))
+    .unwrap();
+}
+
+fn move_mail(env: &Env, ids: Vec<i64>, to: &str) -> Result<crate::actions::BatchResult, String> {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(crate::actions::move_mail(&env.ctx, &crate::actions::MoveParams { ids, to: to.into(), account: None }))
+}
+
+/// Mail, asked by a script, cannot take a Gmail message out of the inbox or
+/// a label (it comes straight back), and Gmail deletes for good what goes
+/// from its trash to All Mail: those moves are refused, with what to do.
+#[test]
+fn gmail_moves_mail_cannot_make_are_refused() {
+    let env = setup_with("gmailmoves", false, gmail_and_laposte);
+    let refused = |id: i64, to: &str, why: &str| {
+        let r = move_mail(&env, vec![id], to).unwrap();
+        assert_eq!((r.done, r.failed.len(), r.undo_token.is_none()), (0, 1, true), "{id} to {to}");
+        assert!(r.failed[0].error.contains(why), "{id} to {to}: {}", r.failed[0].error);
+    };
+    refused(101, "archive", "Archive button");
+    refused(101, "Perso", "Archive button");
+    refused(104, "inbox", "Archive button");
+    refused(102, "archive", "delete it for good");
+    refused(102, "junk", "delete it for good");
+    refused(102, "Perso", "delete it for good");
+    // To the trash, and out of it to the inbox, Mail can: here, on Linux,
+    // only Mail itself is missing.
+    for (id, to) in [(101, "trash"), (101, "junk"), (104, "trash"), (102, "inbox")] {
+        let e = move_mail(&env, vec![id], to).unwrap_err();
+        assert!(e.contains("macOS"), "{id} to {to}: {e}");
+    }
+    // The fixture's iCloud is no Gmail: archiving is planned as before.
+    let e = move_mail(&env, vec![103], "archive").unwrap_err();
+    assert!(e.contains("macOS"), "{e}");
+}
+
+/// Undo takes a Gmail message out of the trash the only way Mail can: to
+/// the inbox (it keeps its labels). What Gmail keeps in All Mail cannot be
+/// told apart from where it was moved, and is left alone.
+#[test]
+fn gmail_undo_goes_through_the_inbox() {
+    let env = setup_with("gmailundo", false, gmail_and_laposte);
+    let store = &env.ctx.store;
+    let loc = |account: &str, path: &[&str]| crate::mailapp::Loc {
+        account_id: account.to_string(),
+        account: account.to_string(),
+        path: path.iter().map(|p| p.to_string()).collect(),
+        local: false,
+    };
+    let inbox = loc(GMAIL, &["INBOX"]);
+    let bin = loc(GMAIL, &["[Gmail]", "Corbeille"]);
+    let all = loc(GMAIL, &["[Gmail]", "Tous les messages"]);
+    let perso = loc(GMAIL, &["Perso"]);
+    let icloud = loc(fixture::ACCOUNT, &["INBOX"]);
+    let undo = |now_in: &crate::mailapp::Loc, back_to: &crate::mailapp::Loc| {
+        crate::actions::gmail_undo(store, now_in, back_to)
+    };
+    // Out of the trash: through the inbox, whether it came from there or
+    // from a label (Gmail kept the label).
+    for back_to in [&inbox, &perso, &all] {
+        let (to, note) = undo(&bin, back_to).unwrap();
+        assert_eq!(to.path, vec!["INBOX"]);
+        assert!(note.unwrap().contains("All Mail"));
+    }
+    assert!(undo(&all, &bin).unwrap_err().contains("All Mail"));
+    assert!(undo(&bin, &loc(GMAIL, &["[Gmail]", "Spam"])).unwrap_err().contains("delete it for good"));
+    // Back into the trash, Mail can; out of the inbox to a label, not.
+    assert_eq!(undo(&inbox, &bin).unwrap(), (bin.clone(), None));
+    assert!(undo(&inbox, &perso).unwrap_err().contains("Archive button"));
+    // Another account: Mail copies it there; Gmail may keep its own.
+    assert!(undo(&inbox, &icloud).unwrap().1.unwrap().contains("own copy"));
+    // No Gmail involved: back where it was.
+    assert_eq!(undo(&icloud, &loc(fixture::ACCOUNT, &["Archive"])).unwrap().1, None);
+}
+
+/// An IMAP account without an archive mailbox gets one, as Mail's Archive
+/// button makes it: "Archive", beside the account's own mailboxes.
+#[test]
+fn a_missing_archive_is_made_beside_the_accounts_mailboxes() {
+    let env = setup_with("newarchive", false, gmail_and_laposte);
+    let store = &env.ctx.store;
+    let inbox_of = |account: &str| {
+        store.mailboxes().values().find(|m| m.account_id == account && m.path == ["INBOX"]).cloned().unwrap()
+    };
+    let laposte = crate::actions::new_archive(store, &inbox_of(LAPOSTE)).unwrap();
+    assert_eq!(
+        (laposte.path.clone(), laposte.role, laposte.local),
+        (vec!["INBOX".into(), "Archive".into()], Role::Archive, false)
+    );
+    // Mailboxes at the top: the archive too.
+    assert_eq!(crate::actions::new_archive(store, &inbox_of(fixture::ACCOUNT)).unwrap().path, vec!["Archive"]);
+    // Gmail's archive is All Mail; On My Mac has none to make.
+    assert!(crate::actions::new_archive(store, &inbox_of(GMAIL)).is_none());
+    let mut local = inbox_of(fixture::ACCOUNT);
+    local.local = true;
+    assert!(crate::actions::new_archive(store, &local).is_none());
+    // Archiving from La Poste makes the mailbox first; here Mail is missing,
+    // so nothing is moved and the result says why.
+    let r = move_mail(&env, vec![1234], "archive").unwrap();
+    assert_eq!((r.done, r.undo_token.is_none()), (0, true));
+    let why = &r.failed[0].error;
+    assert!(why.contains("archive mailbox for") && why.contains("macOS") && why.contains("Nothing was moved"), "{why}");
+}
+
+/// A mailbox Mail creates after Timbre read the list ("Recovered Messages")
+/// is named in results, not left blank.
+#[test]
+fn a_new_mailbox_is_named_in_results() {
+    let env = setup("newmailbox", true);
+    let c = envelope_index(&env.ctx.cfg);
+    c.execute("INSERT INTO mailboxes(url) VALUES(?1)", ["local:///Recovered%20Messages%20(iCloud)"]).unwrap();
+    c.execute("UPDATE messages SET mailbox = last_insert_rowid() WHERE ROWID = 101", []).unwrap();
+    drop(c);
+    let r = search(&env, q("facture"));
+    let hit = r.results.iter().find(|h| h.id == 101).expect("101 found");
+    assert_eq!((hit.mailbox.as_str(), hit.account.as_str()), ("Recovered Messages (iCloud)", "On My Mac"));
+}

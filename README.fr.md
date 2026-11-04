@@ -38,7 +38,7 @@ Le connecteur Gmail de Claude envoie chaque recherche aux serveurs de Google par
 
 Dans les deux cas, ce que Claude lit part chez Claude pour vous répondre.
 
-**Vous avez aussi le connecteur Gmail ?** Inutile de l'enlever : Timbre demande à Claude de passer par lui en premier pour tout ce qui touche à votre courrier, Gmail compris. Gardez le connecteur Gmail pour ce que Timbre ne fait pas, comme envoyer depuis Gmail quand l'envoi est désactivé dans Timbre. Si Claude part quand même vers Gmail, dites-lui simplement « cherche avec Timbre ».
+**Vous avez aussi le connecteur Gmail ?** Inutile de l'enlever : Timbre demande à Claude de passer par lui en premier pour tout ce qui touche à votre courrier, Gmail compris. Gardez le connecteur Gmail pour ce que Timbre ne fait pas, comme archiver le courrier Gmail ou le ranger sous un libellé (Mail ne le fait pas pour un script), ou envoyer depuis Gmail quand l'envoi est désactivé dans Timbre. Si Claude part quand même vers Gmail, dites-lui simplement « cherche avec Timbre ».
 
 ## Ce qu'il fait
 
@@ -46,7 +46,7 @@ Dans les deux cas, ce que Claude lit part chez Claude pour vous répondre.
 - **Lire sans risque.** Le texte que vous voyez dans Mail, sans le contenu HTML caché mais sans rien perdre de ce qui s'affiche (mises en page MJML des boutiques en ligne, texte après une pièce jointe insérée dans le message, version texte des mails faits d'images), avec des alertes sur l'authenticité de l'expéditeur, sur les liens trompeurs et sur les pièces jointes dangereuses (programmes, macros, pages web).
 - **Suivre une conversation.** Le fil entier, chaque message réduit à ce qu'il apporte de nouveau.
 - **Lire les pièces jointes.** PDF, Word, RTF et ODT (convertis par macOS dans un processus séparé), texte, HTML, CSV, invitations de calendrier, fiches contact et mails joints.
-- **Agir, de façon réversible.** Les brouillons (nouveau, réponse, réponse à tous, transfert) s'ouvrent dans Mail pour que vous les relisiez ; marquer lu ou non lu, poser un drapeau ; déplacer vers les archives, la corbeille ou n'importe quelle boîte — avec **annulation**.
+- **Agir, de façon réversible.** Les brouillons (nouveau, réponse, réponse à tous, transfert) s'ouvrent dans Mail pour que vous les relisiez ; marquer lu ou non lu, poser un drapeau ; déplacer vers les archives, la corbeille ou n'importe quelle boîte — avec **annulation**. Un compte sans boîte d'archives en reçoit une quand Mail le permet, comme avec son bouton Archiver. Gmail fait exception : Mail ne laisse un script déplacer le courrier Gmail que vers la corbeille ou les indésirables, et Timbre le dit au lieu de faire semblant.
 - **Envoyer, seulement si vous l'autorisez.** Désactivé par défaut. Une fois activé, chaque envoi demande deux étapes explicites, avec une liste facultative de destinataires autorisés et un plafond par heure.
 
 ## Ce qui change par rapport à l'existant
@@ -98,14 +98,14 @@ spctl --assess -vv "$APP"                                # accepted, source=Nota
 
 Une boîte synthétique de 20 000 messages (788 Mo : lettres d'information en HTML, réponses avec historique cité, pièces jointes, textes en français, anglais et espagnol au vocabulaire réaliste), indexée sur une petite machine virtuelle à 2 cœurs :
 
-| | v0.1.0 | v0.4.0 | v0.5.2 |
+| | v0.1.0 | v0.4.0 | v0.5.6 |
 |---|---|---|---|
 | Construction complète de l'index | 28,6 s | 13,0 s | 16,0 s |
 | Taille de l'index | 298 Mo | 124 Mo | 126 Mo |
 | Recherche, médiane | 42 ms | 18 ms | 25 ms |
 | Recherche, 95ᵉ centile | 62 ms | 30 ms | 46 ms |
 
-La 0.5.2 est un peu plus lente parce qu'elle est plus exacte : elle lit chaque partie de chaque message et détermine le texte visible comme le fait le moteur WebKit de Mail, elle indexe aussi les indésirables et la corbeille (que la recherche laisse toujours de côté), et elle classe une recherche large parmi ses résultats les plus récents selon leur date plutôt que selon l'ordre où Mail les a enregistrés : le courrier d'un compte ajouté après coup ne peut plus évincer celui du mois.
+La 0.5.6 est un peu plus lente parce qu'elle est plus exacte : elle lit chaque partie de chaque message et détermine le texte visible comme le fait le moteur WebKit de Mail, elle indexe aussi les indésirables et la corbeille (que la recherche laisse toujours de côté), et elle classe une recherche large parmi ses résultats les plus récents selon leur date plutôt que selon l'ordre où Mail les a enregistrés : le courrier d'un compte ajouté après coup ne peut plus évincer celui du mois.
 
 Ce qui a fait la différence : les messages sont analysés sur tous les cœurs pendant qu'un seul fil d'écriture enregistre de grosses transactions, avec les fusions de FTS5 repoussées à la fin et une table de termes en attente de 64 Mio ; le texte gardé pour les extraits n'est stocké qu'une fois, compressé en zstd ; il n'y a plus d'index de préfixes ; extraits et détails ne sont calculés que pour la page renvoyée, et les requêtes très larges sont classées parmi leurs 10 000 résultats les plus récents. Les vérifications utiles seulement à la lecture d'un message ne sont plus faites à l'indexation. Pour reproduire : `timbre dev-corpus /tmp/corpus 20000` (compilation de débogage), puis `timbre index --rebuild` et `timbre bench` en compilation optimisée, avec `TIMBRE_MAIL_ROOT`, `TIMBRE_ACCOUNTS_DB` et `TIMBRE_DATA_DIR` pointant dessus.
 
@@ -135,7 +135,7 @@ L'index plein texte se construit en arrière-plan au premier lancement (environ 
 | `save_attachment` | Enregistrer dans votre dossier de pièces jointes | ajoute un fichier |
 | `create_draft` | Nouveau, réponse, réponse à tous, transfert — en brouillon | ajoute un brouillon |
 | `mark_mail` | Lu ou non lu, drapeau | oui |
-| `move_mail` / `undo_move` | Archives, corbeille, n'importe quelle boîte — et retour | oui, réversible |
+| `move_mail` / `undo_move` | Archives, corbeille, n'importe quelle boîte — et retour (Gmail : corbeille et indésirables) | oui, réversible |
 | `prepare_send` / `confirm_send` | Envoi en deux étapes (seulement si activé) | envoie |
 
 ## Réglages

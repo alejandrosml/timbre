@@ -284,7 +284,7 @@ impl Timbre {
 
     #[tool(
         name = "move_mail",
-        description = "Move messages to archive, trash, inbox, junk or a named mailbox. Never deletes permanently; returns an undo_token.",
+        description = "Move messages to archive, trash, inbox, junk or a named mailbox. Never deletes permanently; returns an undo_token. For an account without an archive mailbox, Mail is asked to make one; if it will not, the result says how. Gmail: Mail can only move messages to the trash or junk by script (and out of them, to All Mail); other Gmail moves are refused with what to do instead.",
         annotations(
             title = "Move messages",
             read_only_hint = false,
@@ -299,7 +299,7 @@ impl Timbre {
 
     #[tool(
         name = "undo_move",
-        description = "Move messages back where they were before a move_mail call (by undo_token, or the latest move).",
+        description = "Move messages back where they were before a move_mail call (by undo_token, or the latest move). Gmail messages come out of the trash into All Mail, not the inbox.",
         annotations(
             title = "Undo a move",
             read_only_hint = false,

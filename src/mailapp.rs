@@ -179,6 +179,78 @@ function main(i) {
 }
 "#;
 
+/// Whether Mail has a mailbox, trying `tries` times half a second apart:
+/// Mail lists a mailbox made on the server a moment later, and one made
+/// elsewhere (on the provider's website) before its database has it.
+pub const FIND_MAILBOX: &str = r#"
+function main(i) {
+  const tries = i.tries || 40;
+  for (let k = 0; k < tries; k++) {
+    if (k > 0) delay(0.5);
+    try { mailbox(i.loc); return {found: true}; } catch (e) { if (fatal(e)) throw e; }
+  }
+  throw new Error('Mail does not list the mailbox');
+}
+"#;
+
+/// Make a mailbox at the top of an account, as Mail's own New Mailbox does:
+/// the `make` told to the account itself, the form that reaches IMAP
+/// servers. Mail names an IMAP account's mailboxes from its path prefix, so
+/// the bare name "Archive" lands where the server keeps the account's other
+/// mailboxes (inside INBOX at La Poste and Orange); made inside INBOX by
+/// script, Mail kept it on the Mac alone. Some servers' accounts refuse it
+/// (La Poste: -10000, from JavaScript's `push()` too), and the caller then
+/// says how to make it once. The account and the name are arguments, never
+/// script text.
+const MAKE_MAILBOX: &str = r#"
+on run argv
+	set accountId to item 1 of argv
+	set boxName to item 2 of argv
+	tell application "Mail"
+		tell account id accountId
+			make new mailbox with properties {name:boxName}
+		end tell
+	end tell
+	return "ok"
+end run
+"#;
+
+/// Ask Mail to make a mailbox at the top of an account.
+pub async fn make_mailbox(account_id: &str, name: &str, timeout: Duration) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        bail!("Mail.app scripting is only available on macOS");
+    }
+    let child = tokio::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(MAKE_MAILBOX)
+        .arg(account_id)
+        .arg(name)
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| anyhow!("could not start osascript: {e}"))?;
+    let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(r) => r?,
+        Err(_) => bail!("{NO_ANSWER} within {}s.", timeout.as_secs()),
+    };
+    if out.status.success() {
+        return Ok(());
+    }
+    bail!("{}", script_error(&String::from_utf8_lossy(&out.stderr)))
+}
+
+/// What an AppleScript run by osascript failed with, said as for JXA:
+/// "12:345: execution error: Mail got an error: … (-10000)".
+fn script_error(stderr: &str) -> String {
+    let number = stderr.rsplit_once('(').and_then(|(_, n)| n.trim().trim_end_matches(')').parse::<i64>().ok());
+    let msg = stderr.split_once("execution error:").map_or(stderr, |(_, m)| m).trim();
+    failure(&serde_json::json!({"error": msg, "number": number}))
+}
+
 pub const MOVE_BACK: &str = r#"
 function main(i) {
   const out = [];
@@ -375,6 +447,17 @@ pub fn open_message_url(message_id: &str) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn applescript_errors_read_like_jxa_ones() {
+        let e = script_error("12:345: execution error: Mail got an error: AppleEvent handler failed. (-10000)\n");
+        assert_eq!(e, "Mail refused: Mail got an error: AppleEvent handler failed. (-10000)");
+        assert!(
+            script_error("0:1: execution error: Not authorized to send Apple events to Mail. (-1743)")
+                .contains("open_permission_settings")
+        );
+        assert!(script_error("execution error: Mail isn't running. (-600)").contains("not running"));
+    }
 
     #[test]
     fn a_batch_stopped_by_mail_keeps_what_was_done() {

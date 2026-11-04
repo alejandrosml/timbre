@@ -140,8 +140,9 @@ impl Ctx {
 
     /// Mailbox path and account to show for a message (Gmail: its label).
     fn mailbox_names(&self, id: i64, mailbox: i64) -> (String, String) {
-        let shown = self.store.display_mailbox(&self.db(), id, mailbox);
-        self.store.mailbox(shown).map(|m| (m.display_path(), m.account)).unwrap_or_default()
+        let conn = self.db();
+        let shown = self.store.display_mailbox(&conn, id, mailbox);
+        self.store.mailbox_fresh(&conn, shown).map(|m| (m.display_path(), m.account)).unwrap_or_default()
     }
 }
 
