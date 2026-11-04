@@ -104,16 +104,14 @@ pub fn run_if_needed() -> Option<i32> {
     if launched() || std::env::var_os(LEGACY).is_some() {
         return None;
     }
+    // Always on macOS: even when this process already answers for its own
+    // permissions (Claude starting the executable of Timbre.app), the
+    // launcher is what lets the server restart once access is granted.
     let forced = std::env::var("TIMBRE_LAUNCHER").is_ok_and(|v| v == "1");
-    let spawner = Spawner::pick();
-    #[cfg(target_os = "macos")]
-    let wanted = forced
-        || (matches!(spawner, Spawner::Disclaimed) && crate::responsibility::responsible_for_self() == Some(false));
-    #[cfg(not(target_os = "macos"))]
-    let wanted = forced;
-    if !wanted {
+    if !(cfg!(target_os = "macos") || forced) {
         return None;
     }
+    let spawner = Spawner::pick();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     // The first start must work, or the server runs here instead.
     let first = match spawner.spawn(&args, true) {

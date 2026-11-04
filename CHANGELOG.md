@@ -5,6 +5,15 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-04
+
+### Fixed
+- Timbre restarts by itself once Full Disk Access is granted, also when
+  Claude starts Timbre.app's executable as a process that already answers
+  for its own permissions: on macOS the launcher now always runs, since it
+  is what makes the restart possible. The message about missing access names
+  Timbre.app rather than the executable inside it.
+
 ## [0.5.0] - 2026-11-04
 
 ### Added

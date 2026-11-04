@@ -175,6 +175,17 @@ pub fn domain_of(addr: &str) -> Option<String> {
     if d.is_empty() { None } else { Some(d) }
 }
 
+/// What the user adds to Full Disk Access: Timbre.app when the program runs
+/// from it (`.../Timbre.app/Contents/MacOS/timbre`), else the program itself.
+pub fn app_path() -> std::path::PathBuf {
+    let exe = std::env::current_exe().unwrap_or_default();
+    exe.ancestors()
+        .nth(3)
+        .filter(|p| p.extension().is_some_and(|e| e == "app"))
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or(exe)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

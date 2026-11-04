@@ -198,9 +198,9 @@ pub fn locate_version_dir(mail_root: &Path) -> Result<PathBuf> {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             anyhow!(
                 "Cannot read {} — Timbre needs Full Disk Access (System Settings › Privacy & Security › Full Disk Access). \
-                 Add this binary: {}",
+                 Add Timbre: {}",
                 mail_root.display(),
-                std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default()
+                crate::util::app_path().display()
             )
         } else {
             anyhow!("Cannot read {}: {e}", mail_root.display())

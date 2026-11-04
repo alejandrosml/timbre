@@ -7,8 +7,6 @@
 //! the launcher, Timbre then restarts by itself once access is granted, and
 //! Claude keeps the same session and tools.
 
-use std::path::{Path, PathBuf};
-
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult, PaginatedRequestParams,
     ServerConfig, Tool,
@@ -31,7 +29,7 @@ impl Degraded {
     }
 
     fn problem(&self) -> String {
-        let app = app_path();
+        let app = crate::util::app_path();
         let mut text = format!(
             "Timbre cannot read Mail's data yet: {}\n\n\
              How to fix it: call open_permission_settings. System Settings opens at Privacy & Security › \
@@ -55,20 +53,12 @@ impl Degraded {
     }
 }
 
-/// The Timbre app (or, for a bare executable, the program itself): what the
-/// user adds to Full Disk Access.
-pub fn app_path() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_default();
-    // .../Timbre.app/Contents/MacOS/timbre
-    exe.ancestors().nth(3).filter(|p| p.extension().is_some_and(|e| e == "app")).map(Path::to_path_buf).unwrap_or(exe)
-}
-
 /// Opens System Settings at Full Disk Access and selects Timbre in Finder.
 pub fn open_permission_settings() -> String {
     if !cfg!(target_os = "macos") {
         return "Only available on macOS.".into();
     }
-    let app = app_path();
+    let app = crate::util::app_path();
     let open = |args: &[&std::ffi::OsStr]| {
         std::process::Command::new("/usr/bin/open").args(args).status().is_ok_and(|s| s.success())
     };

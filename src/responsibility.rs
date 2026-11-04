@@ -28,12 +28,6 @@ pub fn checked_for() -> Option<String> {
     None
 }
 
-/// Whether this process answers for its own permissions.
-#[cfg(target_os = "macos")]
-pub fn responsible_for_self() -> Option<bool> {
-    Some(responsible_pid()? == std::process::id() as libc::pid_t)
-}
-
 /// Whether this macOS lets a program start another one responsible for
 /// itself.
 #[cfg(target_os = "macos")]
