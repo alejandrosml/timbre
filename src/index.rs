@@ -274,6 +274,18 @@ fn register_functions(conn: &Connection) -> Result<()> {
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx| Ok(ctx.get::<Option<String>>(0)?.map(|s| norm::for_match(&s))),
     )?;
+    // Weight of a message's age in the ranking: (1 + 3 / (1 + age / 60
+    // days)) ^ p, from 4^p for today's mail down to about 1 for old mail.
+    conn.create_scalar_function(
+        "timbre_recency",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let age = ctx.get::<Option<f64>>(0)?.unwrap_or(0.0).max(0.0);
+            let p = ctx.get::<f64>(1)?;
+            Ok((1.0 + 3.0 / (1.0 + age / 5_184_000.0)).powf(p))
+        },
+    )?;
     Ok(())
 }
 

@@ -28,8 +28,14 @@ mod tempdir {
 }
 
 fn setup(tag: &str, build_index: bool) -> Env {
+    setup_with(tag, build_index, |_| {})
+}
+
+/// Like `setup`, with a chance to change the synthetic store first.
+fn setup_with(tag: &str, build_index: bool, prepare: impl FnOnce(&crate::config::Config)) -> Env {
     let dir = tempdir::new(tag);
     let cfg = fixture::build(&dir.0).expect("fixture");
+    prepare(&cfg);
     let store = Arc::new(Store::open(&cfg).expect("store"));
     let progress = Arc::new(Progress::default());
     let mut conn = index::open(&cfg, &store, true).expect("index");
@@ -501,4 +507,149 @@ fn fields_left_out_are_optional_in_schemas() {
         }
     }
     assert!(checked > 20, "the scan found the attributes ({checked})");
+}
+
+fn envelope_index(cfg: &crate::config::Config) -> rusqlite::Connection {
+    rusqlite::Connection::open(cfg.mail_root.join("V10/MailData/Envelope Index")).expect("envelope index")
+}
+
+/// Gmail keeps each message once, in All Mail; its Inbox, Sent and labels
+/// are rows of the `labels` table.
+#[test]
+fn gmail_labels_count_as_mailboxes() {
+    let env = setup_with("labels", true, |cfg| {
+        envelope_index(cfg)
+            .execute_batch(
+                "CREATE TABLE labels (message_id INTEGER NOT NULL REFERENCES messages(ROWID) ON DELETE CASCADE,
+                     mailbox_id INTEGER NOT NULL REFERENCES mailboxes(ROWID) ON DELETE CASCADE,
+                     PRIMARY KEY (message_id, mailbox_id)) WITHOUT ROWID;
+                 INSERT INTO addresses(address, comment) VALUES('zoe@example.com', 'Zoé');
+                 INSERT INTO recipients(message, address, type, position) VALUES(104, last_insert_rowid(), 0, 1);
+                 INSERT INTO labels SELECT 104, ROWID FROM mailboxes
+                     WHERE url LIKE '%/INBOX' OR url LIKE '%/Sent%20Messages';",
+            )
+            .unwrap();
+    });
+    let store = &env.ctx.store;
+    assert_eq!(store.schema.labels.as_deref(), Some("m.ROWID"));
+    // 104 is stored in Archive and labelled Inbox: found, shown and counted there.
+    let inbox = search(&env, SearchParams { mailbox: Some("inbox".into()), ..Default::default() });
+    assert!(ids(&inbox).contains(&104), "{:?}", ids(&inbox));
+    let r = search(&env, q("in:inbox comite"));
+    assert_eq!(ids(&r), vec![104]);
+    assert_eq!(r.results[0].mailbox, "INBOX");
+    let m = app::read_mail(&env.ctx, &ReadParams { id: 104, max_chars: None, strip_quotes: None }).unwrap();
+    assert_eq!(m.mailbox, "INBOX");
+    let counts = store.mailbox_counts(&env.ctx.db()).unwrap();
+    let only = |role: &str| store.mailboxes_with_roles(&[role.to_string()])[0];
+    assert_eq!(counts[&only("inbox")].0, 4, "3 stored + 1 labelled");
+    assert_eq!(counts[&only("archive")].0, 1, "104 is still stored in Archive");
+    assert_eq!(counts[&only("sent")].0, 2, "103 stored + 104 labelled");
+    // Labelled Sent: its recipients count as people the user wrote to.
+    assert_eq!(store.sender_history(&env.ctx.db(), "zoe@example.com", 0).unwrap(), (0, 1));
+}
+
+/// Mail people send themselves must not rank as mail from a correspondent.
+#[test]
+fn own_addresses_are_not_correspondents() {
+    let env = setup_with("own", true, |cfg| {
+        // The reply 103 also went to the user's own address.
+        envelope_index(cfg)
+            .execute_batch(
+                "INSERT INTO addresses(address, comment) VALUES('Moi@iCloud.com', '');
+                 INSERT INTO recipients(message, address, type, position) VALUES(103, last_insert_rowid(), 1, 1);",
+            )
+            .unwrap();
+    });
+    let conn = env.ctx.db();
+    assert!(search::refresh_correspondents(&conn, &env.ctx.store).unwrap());
+    let correspondent = |addr: &str| -> bool {
+        conn.query_row(
+            "SELECT count(*) FROM temp.correspondents c JOIN mail.addresses a ON a.ROWID = c.addr WHERE lower(a.address) = ?1",
+            [addr],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    };
+    assert!(correspondent("ann@example.com"));
+    assert!(!correspondent("moi@icloud.com"));
+}
+
+/// A recent message outranks an old one that repeats the words, as in a
+/// mailbox where years-old messages carry "Factures" in the subject and
+/// "Facture" in every attachment name.
+#[test]
+fn recent_mail_outranks_old_repetitions() {
+    let now = crate::util::now_unix();
+    let env = setup_with("recency", true, |cfg| {
+        let conn = envelope_index(cfg);
+        let v10 = cfg.mail_root.join("V10");
+        let add = |id: i64, from: (&'static str, &'static str), subject: &str, date: i64, body: &str, extra: &str| {
+            let raw = format!(
+                "From: {} <{}>\r\nTo: moi@icloud.com\r\nSubject: {subject}\r\nMessage-ID: <m{id}@example.com>\r\n\
+                 MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n\
+                 --b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}\r\n{extra}--b--\r\n",
+                from.0, from.1
+            );
+            let m = fixture::Msg {
+                id,
+                mailbox: "Archive",
+                from,
+                to: "moi@icloud.com",
+                subject: Box::leak(subject.to_string().into_boxed_str()),
+                date,
+                read: true,
+                conversation: id,
+                partial: false,
+                raw,
+            };
+            fixture::write_message(&v10, &conn, &m).unwrap();
+        };
+        let attachment = |name: &str| {
+            format!(
+                "--b\r\nContent-Type: text/plain; name=\"{name}\"\r\nContent-Disposition: attachment; filename=\"{name}\"\r\n\r\nx\r\n"
+            )
+        };
+        let year = 365 * 86_400;
+        add(
+            900,
+            ("Moi", "moi@icloud.com"),
+            "Factures",
+            fixture::T0 - 13 * year,
+            "Factures",
+            &(attachment("Facture 4.doc") + &attachment("Facture 5.doc")),
+        );
+        add(
+            901,
+            ("EDF", "service@edf.fr"),
+            "Votre facture est disponible",
+            now - 3 * 86_400,
+            "Bonjour, votre facture d'electricite du mois est disponible dans votre espace client. \
+             Le montant sera preleve le 15 du mois. Merci de votre confiance, le service clients.",
+            "",
+        );
+        // The rest of a mailbox, older: invoices, a few plurals, other mail.
+        let from = ("Fournisseur", "compta@example.com");
+        for i in 0..380 {
+            let (subject, body) = match i % 19 {
+                0..=2 => {
+                    (format!("Facture {i}"), "Veuillez trouver la facture du trimestre, payable sous trente jours.")
+                }
+                3 => (format!("Vos factures {i}"), "Vos factures du semestre sont disponibles en ligne."),
+                _ => {
+                    (format!("Nouvelles {i}"), "Les nouvelles de la semaine, le programme et les rendez-vous du club.")
+                }
+            };
+            add(3000 + i, from, &subject, fixture::T0 - (1 + i % 9) * year, body, "");
+        }
+    });
+    let found = ids(&search(&env, q("facture")));
+    let pos = |id: i64| found.iter().position(|&x| x == id).unwrap_or_else(|| panic!("{id} missing from {found:?}"));
+    // The two recent invoices (October's from Orange, this week's from EDF)
+    // come first, before the 2013 message that repeats the word.
+    let mut top = found[..2].to_vec();
+    top.sort_unstable();
+    assert_eq!(top, vec![101, 901], "{found:?}");
+    assert!(pos(900) > 1);
 }

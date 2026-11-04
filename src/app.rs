@@ -95,8 +95,10 @@ impl Ctx {
         Ok((raw, loc))
     }
 
-    fn mailbox_names(&self, mailbox: i64) -> (String, String) {
-        self.store.mailbox(mailbox).map(|m| (m.display_path(), m.account)).unwrap_or_default()
+    /// Mailbox path and account to show for a message (Gmail: its label).
+    fn mailbox_names(&self, id: i64, mailbox: i64) -> (String, String) {
+        let shown = self.store.display_mailbox(&self.db(), id, mailbox);
+        self.store.mailbox(shown).map(|m| (m.display_path(), m.account)).unwrap_or_default()
     }
 }
 
@@ -156,7 +158,7 @@ fn is_zero(v: &usize) -> bool {
 
 pub fn read_mail(ctx: &Ctx, p: &ReadParams) -> Result<MailView, String> {
     let meta = ctx.meta(p.id)?;
-    let (mailbox, account) = ctx.mailbox_names(meta.mailbox);
+    let (mailbox, account) = ctx.mailbox_names(meta.id, meta.mailbox);
     let max = p.max_chars.unwrap_or(12_000).clamp(200, 100_000) as usize;
     let mut view = MailView {
         id: meta.id,
@@ -267,7 +269,7 @@ pub fn get_thread(ctx: &Ctx, p: &ThreadParams) -> Result<ThreadView, String> {
     let metas = ctx.store.get_metas(&ctx.db(), &ids).map_err(|e| e.to_string())?;
     let mut messages = vec![];
     for m in metas {
-        let (mailbox, _) = ctx.mailbox_names(m.mailbox);
+        let (mailbox, _) = ctx.mailbox_names(m.id, m.mailbox);
         let text = ctx
             .raw(m.id)
             .ok()

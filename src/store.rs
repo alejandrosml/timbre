@@ -93,6 +93,8 @@ impl Role {
             || has("indésirable")
             || has("indesirable")
             || has("no deseado")
+            || has("quarantaine")
+            || has("quarantine")
             || word("bulk")
         {
             Role::Junk
@@ -105,7 +107,8 @@ impl Role {
             || word("bin")
         {
             Role::Trash
-        } else if has("sent") || has("envoy") || has("enviad") {
+        } else if has("sent") || has("envoy") || has("enviad") || word("outbox") {
+            // Orange and La Poste name the sent mailbox OUTBOX.
             Role::Sent
         } else if has("archiv") || n == "all mail" || n == "tous les messages" || n == "todos" {
             Role::Archive
@@ -152,6 +155,10 @@ pub struct Schema {
     pub conversation: String,
     pub rec_msg_col: Option<String>,
     pub rec_type_col: Option<String>,
+    /// Gmail keeps each message once, in All Mail, and lists its other
+    /// mailboxes (Inbox, Sent, labels) in the `labels` table: the messages
+    /// column that `labels.message_id` refers to, when the table exists.
+    pub labels: Option<String>,
 }
 
 pub struct Store {
@@ -161,6 +168,8 @@ pub struct Store {
     pub epoch_offset: i64,
     pub open_mode: OpenMode,
     accounts: HashMap<String, String>,
+    /// The user's addresses known from the account settings (lower case).
+    pub account_addresses: Vec<String>,
     mailboxes: RwLock<Arc<HashMap<i64, Mailbox>>>,
 }
 
@@ -286,7 +295,52 @@ fn detect_schema(conn: &Connection) -> Result<Schema> {
             None
         },
         rec_type_col: if rhas("type") { Some("type".into()) } else { None },
+        labels: {
+            let l = table_columns(conn, "labels").unwrap_or_default();
+            (l.iter().any(|c| c == "message_id") && l.iter().any(|c| c == "mailbox_id"))
+                .then(|| labels_join(conn, has("message_id")))
+        },
     })
+}
+
+/// The messages column that `labels.message_id` refers to. Mail declares
+/// `REFERENCES messages(ROWID)`; without that declaration, the column that
+/// matches more of a sample of labels wins.
+fn labels_join(conn: &Connection, messages_have_message_id: bool) -> String {
+    let sql: String = conn
+        .query_row("SELECT sql FROM mail.sqlite_master WHERE type = 'table' AND name = 'labels'", [], |r| r.get(0))
+        .unwrap_or_default();
+    let compact: String = sql.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.contains("referencesmessages(rowid)") || !messages_have_message_id {
+        return "m.ROWID".into();
+    }
+    let hits = |col: &str| {
+        conn.query_row(
+            &format!(
+                "SELECT count(*) FROM (SELECT message_id FROM mail.labels LIMIT 200) l \
+                 JOIN mail.messages m ON {col} = l.message_id"
+            ),
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+    };
+    if hits("m.message_id") > hits("m.ROWID") { "m.message_id".into() } else { "m.ROWID".into() }
+}
+
+/// Addresses of the accounts set up on this Mac, from the account settings.
+fn load_account_addresses(path: &Path) -> Vec<String> {
+    let Ok(conn) =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    else {
+        return vec![];
+    };
+    let Ok(mut stmt) =
+        conn.prepare("SELECT DISTINCT lower(trim(ZUSERNAME)) FROM ZACCOUNT WHERE ZUSERNAME LIKE '%_@_%'")
+    else {
+        return vec![];
+    };
+    stmt.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
 }
 
 fn load_accounts(path: &Path) -> HashMap<String, String> {
@@ -351,6 +405,7 @@ impl Store {
         let max_date: Option<f64> = conn.query_row("SELECT MAX(date_received) FROM mail.messages", [], |r| r.get(0))?;
         let epoch_offset = if max_date.unwrap_or(0.0) > 1.0e9 { 0 } else { MAC_EPOCH_OFFSET };
         let accounts = load_accounts(&cfg.accounts_db);
+        let account_addresses = load_account_addresses(&cfg.accounts_db);
         let store = Store {
             version_dir,
             db_path,
@@ -358,6 +413,7 @@ impl Store {
             epoch_offset,
             open_mode,
             accounts,
+            account_addresses,
             mailboxes: RwLock::new(Arc::new(HashMap::new())),
         };
         store.reload_mailboxes(&conn)?;
@@ -521,12 +577,64 @@ impl Store {
         Ok(if ids.is_empty() { vec![id] } else { ids })
     }
 
-    /// (total, unread) per mailbox id.
-    pub fn mailbox_counts(&self, conn: &Connection) -> Result<HashMap<i64, (i64, i64)>> {
+    /// SQL condition on a message (alias `m`): it is stored in one of `ids`
+    /// or, for Gmail, carries one of them as a label.
+    pub fn in_mailboxes(&self, ids: &[i64]) -> String {
+        let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        match &self.schema.labels {
+            Some(col) => format!(
+                "(m.mailbox IN ({list}) OR EXISTS (SELECT 1 FROM mail.labels l \
+                 WHERE l.message_id = {col} AND l.mailbox_id IN ({list})))"
+            ),
+            None => format!("m.mailbox IN ({list})"),
+        }
+    }
+
+    /// The mailbox to show for a message: for Gmail, its inbox or most
+    /// telling label rather than All Mail.
+    pub fn display_mailbox(&self, conn: &Connection, id: i64, stored: i64) -> i64 {
+        let Some(col) = &self.schema.labels else { return stored };
         let sql = format!(
-            "SELECT m.mailbox, COUNT(*), SUM(CASE WHEN {} THEN 1 ELSE 0 END) FROM mail.messages m WHERE {} GROUP BY m.mailbox",
-            self.schema.unread, self.schema.not_deleted
+            "SELECT l.mailbox_id FROM mail.labels l JOIN mail.messages m ON {col} = l.message_id WHERE m.ROWID = ?1"
         );
+        let Ok(mut stmt) = conn.prepare_cached(&sql) else { return stored };
+        let Ok(labels) = stmt.query_map([id], |r| r.get::<_, i64>(0)).map(|rows| rows.flatten().collect::<Vec<_>>())
+        else {
+            return stored;
+        };
+        let mailboxes = self.mailboxes();
+        let rank = |mb: i64| match mailboxes.get(&mb) {
+            Some(m) => match m.role {
+                Role::Inbox => 0,
+                Role::Sent => 1,
+                // The user's own labels, not Gmail's Important or Starred.
+                Role::Other if !m.path.first().is_some_and(|p| p.starts_with('[')) => 2,
+                Role::Drafts => 3,
+                Role::Junk | Role::Trash => 4,
+                _ => 5,
+            },
+            None => 6,
+        };
+        labels.into_iter().chain([stored]).min_by_key(|&mb| (rank(mb), mb != stored)).unwrap_or(stored)
+    }
+
+    /// (total, unread) per mailbox id, Gmail labels included.
+    pub fn mailbox_counts(&self, conn: &Connection) -> Result<HashMap<i64, (i64, i64)>> {
+        let (unread, live) = (&self.schema.unread, &self.schema.not_deleted);
+        let sql = match &self.schema.labels {
+            Some(col) => format!(
+                "SELECT mb, COUNT(*), SUM(u) FROM (
+                    SELECT m.mailbox AS mb, CASE WHEN {unread} THEN 1 ELSE 0 END AS u FROM mail.messages m WHERE {live}
+                    UNION ALL
+                    SELECT l.mailbox_id, CASE WHEN {unread} THEN 1 ELSE 0 END FROM mail.labels l
+                    JOIN mail.messages m ON {col} = l.message_id WHERE {live} AND l.mailbox_id != m.mailbox
+                 ) GROUP BY mb"
+            ),
+            None => format!(
+                "SELECT m.mailbox, COUNT(*), SUM(CASE WHEN {unread} THEN 1 ELSE 0 END) FROM mail.messages m \
+                 WHERE {live} GROUP BY m.mailbox"
+            ),
+        };
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?.unwrap_or(0)))
@@ -598,11 +706,11 @@ impl Store {
         let sent = self.mailboxes_with_roles(&["sent".to_string()]);
         let to = match &self.schema.rec_msg_col {
             Some(col) if !sent.is_empty() => {
-                let ids = sent.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+                let in_sent = self.in_mailboxes(&sent);
                 conn.query_row(
                     &format!(
                         "SELECT count(*) FROM mail.recipients r JOIN mail.addresses ra ON ra.ROWID = r.address
-                         JOIN mail.messages m ON m.ROWID = r.{col} WHERE ra.address = ?1 COLLATE NOCASE AND m.mailbox IN ({ids})"
+                         JOIN mail.messages m ON m.ROWID = r.{col} WHERE ra.address = ?1 COLLATE NOCASE AND {in_sent}"
                     ),
                     [addr],
                     |r| r.get(0),
@@ -656,5 +764,9 @@ mod tests {
         assert_eq!(r("Brouillons"), Role::Drafts);
         assert_eq!(r("Archive"), Role::Archive);
         assert_eq!(r("Combined"), Role::Other);
+        // Orange, Wanadoo and La Poste.
+        assert_eq!(Role::detect(&["INBOX".into(), "OUTBOX".into()]), Role::Sent);
+        assert_eq!(Role::detect(&["INBOX".into(), "QUARANTAINE".into()]), Role::Junk);
+        assert_eq!(Role::detect(&["INBOX".into(), "DRAFT".into()]), Role::Drafts);
     }
 }
