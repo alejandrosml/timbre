@@ -45,7 +45,7 @@ Timbre reprend les meilleures idées des connecteurs Apple Mail open source exis
 - **Contenu balisé.** Chaque texte de mail est encadré par un marqueur aléatoire que l'expéditeur ne peut pas deviner.
 - **Pièces jointes.** Les exécutables, les doubles extensions (`facture.pdf.app`) et les fichiers à macros sont signalés. Les fichiers enregistrés vont dans un seul dossier de votre choix, ne sont jamais écrasés et sont marqués pour que Gatekeeper les contrôle.
 - **Le minimum de droits.** Les outils de lecture sont déclarés en lecture seule, Claude peut donc s'en servir sans vous demander ; ceux qui modifient quelque chose sont déclarés comme tels ; les outils d'envoi n'existent même pas tant que vous ne les avez pas activés.
-- **Une permission, pour Timbre seul.** L'accès complet au disque est donné au binaire signé de Timbre, pas à un lanceur partagé avec d'autres extensions.
+- **Une permission, pour Timbre seul.** L'accès complet au disque est donné au binaire signé de Timbre, ni à Claude ni à un lanceur partagé avec d'autres extensions : Timbre indique à macOS qu'il répond lui-même de ses accès.
 
 ## Performances
 
@@ -63,7 +63,7 @@ Ce qui a fait la différence : les messages sont analysés sur tous les cœurs p
 ## Installation
 
 1. Téléchargez `timbre-<version>.mcpb` dans les [Releases](https://github.com/alejandrosml/timbre/releases) et double-cliquez dessus : Claude Desktop l'installe. Les versions publiées sont signées avec un Developer ID et notarisées par Apple.
-2. Donnez à Timbre l'**accès complet au disque** (Réglages Système › Confidentialité et sécurité › Accès complet au disque › +). Demandez à Claude l'*état de Timbre* : il vous indique le fichier exact à ajouter. Désactivez puis réactivez ensuite l'extension dans les réglages de Claude.
+2. Donnez à Timbre l'**accès complet au disque**. Demandez à Claude d'*ouvrir les réglages d'autorisation de Timbre* : Réglages Système s'ouvre sur Confidentialité et sécurité › Accès complet au disque et le Finder sélectionne le fichier, qu'il suffit de glisser dans la liste. Désactivez puis réactivez ensuite l'extension dans les réglages de Claude.
 3. La première fois que vous demandez un brouillon ou un déplacement, macOS demande si Timbre peut contrôler Mail : cliquez sur OK.
 
 L'index plein texte se construit en arrière-plan au premier lancement (environ une minute pour 100 000 messages sur un Mac récent) ; en attendant, la recherche porte sur les sujets et les expéditeurs. Ensuite, un nouveau mail est cherchable en quelques secondes.

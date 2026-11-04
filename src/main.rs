@@ -19,6 +19,7 @@ mod mailapp;
 mod mime;
 mod norm;
 mod quote;
+mod responsibility;
 mod search;
 mod security;
 mod server;
@@ -107,8 +108,17 @@ fn main() -> Result<()> {
         tracing::error!("panic in thread {}: {info}{bt}", std::thread::current().name().unwrap_or("?"));
     }));
     let cli = Cli::parse();
+    let command = cli.command.unwrap_or(Command::Serve);
+    if matches!(command, Command::Serve) {
+        // Claude starts the server: run it with Timbre's own macOS
+        // permissions rather than Claude's (see responsibility.rs).
+        if let Some(code) = responsibility::relaunch() {
+            std::process::exit(code);
+        }
+        responsibility::watch_launcher();
+    }
     let cfg = Config::from_env();
-    match cli.command.unwrap_or(Command::Serve) {
+    match command {
         Command::Serve => serve(cfg),
         Command::Index { rebuild } => run_index(cfg, rebuild),
         Command::Search { query, limit, json } => run_search(cfg, query.join(" "), limit, json),
@@ -241,6 +251,9 @@ fn run_search(cfg: Config, query: String, limit: u32, json: bool) -> Result<()> 
 fn doctor(cfg: Config, automation: bool) -> Result<()> {
     println!("Timbre {}", env!("CARGO_PKG_VERSION"));
     println!("binary: {}", std::env::current_exe()?.display());
+    if let Some(who) = responsibility::checked_for() {
+        println!("permissions checked for: {who}");
+    }
     match store::Store::open(&cfg) {
         Err(e) => {
             println!("mail store: NOT ACCESSIBLE\n  {e:#}");

@@ -5,6 +5,17 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-04
+
+### Fixed
+- Full Disk Access given to `timbre` now takes effect. macOS checks the
+  permissions of the *responsible* process, which for a program started by
+  Claude Desktop is Claude itself. The server now relaunches itself once
+  with its responsibility disclaimed, as Chromium and Qt Creator do for the
+  programs they start, so macOS checks Timbre's own access and Claude needs
+  none. `mail_status` and `timbre doctor` say whose access macOS checks.
+  Set `TIMBRE_DISCLAIMED=1` to keep the old behaviour.
+
 ### Changed
 - `from:`, `to:` and `subject:` filters ignore accents, ligatures and case
   (`from:helene` finds Hélène), like the full-text search.

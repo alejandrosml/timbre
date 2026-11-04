@@ -64,6 +64,10 @@ for _ in range(50):  # wait for the background index
     time.sleep(0.2)
 print("status:", st["messages"], "messages, index", st["index"]["state"], st["index"]["indexed_messages"])
 assert st["index"]["state"] == "ready"
+if sys.platform == "darwin":
+    # macOS must check Timbre's own Full Disk Access, not its launcher's.
+    print("permissions checked for:", st.get("permissions_checked_for"))
+    assert st.get("permissions_checked_for") == "timbre (this program)"
 r = call("search_mail", {"query": "facture"})
 print("search facture:", [(h["id"], h["subject"]) for h in r["results"]], r["engine"])
 assert [h["id"] for h in r["results"]] == [101]
@@ -103,5 +107,28 @@ while time.time() - start < 20:
 lag = time.time() - start
 print(f"new mail searchable after {lag:.1f} s")
 assert lag < 6, "new mail should be indexed within a few seconds"
-p.stdin.close(); p.wait(timeout=5)
+p.stdin.close()
+assert p.wait(timeout=5) == 0, "closing standard input stops the server cleanly"
+
+if sys.platform == "darwin":
+    # The server runs in a relaunched child. If Claude stops the launcher
+    # without closing standard input, the child must not linger.
+    q = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+    child = None
+    for _ in range(50):
+        out = subprocess.run(["pgrep", "-P", str(q.pid)], capture_output=True, text=True).stdout.split()
+        if out:
+            child = int(out[0]); break
+        time.sleep(0.1)
+    assert child, "the launcher relaunches the server as its child"
+    q.terminate(); q.wait(timeout=5)
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        raise SystemExit("the server outlived its launcher")
+    print("server exits with its launcher: ok")
 print("E2E OK")

@@ -18,6 +18,9 @@ pub struct Degraded {
 pub struct Problem {
     pub problem: String,
     pub how_to_fix: Vec<String>,
+    /// The program whose Full Disk Access macOS checks (macOS only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions_checked_for: Option<String>,
 }
 
 #[tool_router]
@@ -33,15 +36,21 @@ impl Degraded {
     )]
     async fn mail_status(&self) -> Result<Json<Problem>, String> {
         let binary = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
-        Ok(Json(Problem {
-            problem: self.error.clone(),
-            how_to_fix: vec![
-                "Claude can open the right settings pane and show the file: call open_permission_settings.".into(),
-                "Open System Settings › Privacy & Security › Full Disk Access.".into(),
-                format!("Click +, press ⌘⇧G, paste this path and enable it: {binary}"),
-                "Then turn the Timbre extension off and on again in Claude's settings.".into(),
-            ],
-        }))
+        let checked_for = crate::responsibility::checked_for();
+        let mut how_to_fix = vec![
+            "Claude can open the right settings pane and show the file: call open_permission_settings.".into(),
+            "Open System Settings › Privacy & Security › Full Disk Access.".into(),
+            format!("Click +, press ⌘⇧G, paste this path and enable it: {binary}"),
+            "Then turn the Timbre extension off and on again in Claude's settings.".into(),
+        ];
+        if let Some(other) = checked_for.as_deref().filter(|w| !w.starts_with("timbre ")) {
+            // The relaunch did not happen: macOS checks the launching app.
+            how_to_fix.push(format!(
+                "macOS checks the access of {other}, which started Timbre, instead of Timbre's own: \
+                 give Full Disk Access to that program, or update Timbre."
+            ));
+        }
+        Ok(Json(Problem { problem: self.error.clone(), how_to_fix, permissions_checked_for: checked_for }))
     }
 
     #[tool(

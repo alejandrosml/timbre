@@ -447,6 +447,9 @@ fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
 pub struct StatusView {
     pub version: String,
     pub binary: String,
+    /// The program whose Full Disk Access macOS checks (macOS only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions_checked_for: Option<String>,
     pub mail_store: String,
     pub open_mode: String,
     pub messages: i64,
@@ -485,6 +488,7 @@ pub fn status(ctx: &Ctx) -> Result<StatusView, String> {
     Ok(StatusView {
         version: env!("CARGO_PKG_VERSION").to_string(),
         binary: std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
+        permissions_checked_for: crate::responsibility::checked_for(),
         mail_store: ctx.store.version_dir.display().to_string(),
         open_mode: format!("{:?}", ctx.store.open_mode).to_lowercase(),
         messages,

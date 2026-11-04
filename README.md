@@ -45,7 +45,7 @@ Timbre takes the best ideas of the existing open-source Apple Mail connectors an
 - **Spotlighting.** Every untrusted body is fenced with a random marker the sender cannot predict.
 - **Attachments.** Executables, double extensions (`invoice.pdf.app`) and macro files are labelled; saved files go to one folder you choose, are never overwritten and are marked for Gatekeeper.
 - **Least privilege.** Read tools are marked read-only so Claude can use them without asking; tools that change anything are marked as such; sending tools do not even exist until you enable them.
-- **One permission, for Timbre only.** Full Disk Access is granted to Timbre's own signed binary, not to a launcher shared with other extensions.
+- **One permission, for Timbre only.** Full Disk Access is granted to Timbre's own signed binary, not to Claude or a launcher shared with other extensions: Timbre tells macOS it answers for its own access.
 
 ## Performance
 
@@ -63,7 +63,7 @@ What made the difference: messages are parsed on every core while a single write
 ## Install
 
 1. Download `timbre-<version>.mcpb` from [Releases](https://github.com/alejandrosml/timbre/releases) and double-click it; Claude Desktop installs it. Releases are signed with a Developer ID and notarized by Apple.
-2. Give Timbre **Full Disk Access** (System Settings › Privacy & Security › Full Disk Access › +). Ask Claude for *Timbre status*: it tells you the exact file to add. Then turn the extension off and on in Claude's settings.
+2. Give Timbre **Full Disk Access**. Ask Claude to *open Timbre's permission settings*: System Settings opens at Privacy & Security › Full Disk Access and Finder selects the file, which you drag into the list. Then turn the extension off and on in Claude's settings.
 3. The first time you ask for a draft or a move, macOS asks whether Timbre may control Mail: click OK.
 
 The full-text index builds in the background on first launch (about a minute per 100,000 messages on a recent Mac); searches work meanwhile on subjects and senders. Afterwards, new mail is searchable within seconds.
