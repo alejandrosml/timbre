@@ -59,19 +59,26 @@ function mailbox(loc) {
     try { let cur = container; for (const p of loc.path) { cur = cur.mailboxes.byName(p); } cur.name(); found = cur; } catch (e) {}
   }
   if (!found) {
+    // Only when the name leaves no doubt: never another mailbox that
+    // happens to share the last part of the path.
     const leaf = loc.path[loc.path.length - 1];
     const hits = container.mailboxes.whose({name: leaf})();
-    if (hits.length > 0) found = hits[0];
+    if (hits.length === 1) found = hits[0];
   }
   if (!found) throw new Error('Mailbox not found in Mail: ' + (loc.account ? loc.account + ' / ' : '') + full);
   _mb[key] = found;
   return found;
 }
-function message(loc, id) {
-  const m = mailbox(loc).messages.byId(id);
+// A message by id in the mailbox the user sees it in; for Gmail, where
+// Mail stores it (All Mail) if not found there. Returns [message, alt used].
+function find(loc, id, alt) {
+  try { const m = mailbox(loc).messages.byId(id); m.id(); return [m, false]; }
+  catch (e) { if (fatal(e) || !alt) throw e; }
+  const m = mailbox(alt).messages.byId(id);
   m.id();
-  return m;
+  return [m, true];
 }
+function message(loc, id, alt) { return find(loc, id, alt)[0]; }
 function addRecipients(msg, i) {
   for (const a of (i.to || [])) msg.toRecipients.push(Mail.ToRecipient({address: a}));
   for (const a of (i.cc || [])) msg.ccRecipients.push(Mail.CcRecipient({address: a}));
@@ -81,9 +88,20 @@ function describe(msg) {
   const list = (r) => { try { return r.address(); } catch (e) { return []; } };
   return {outgoing_id: msg.id(), subject: msg.subject(), to: list(msg.toRecipients), cc: list(msg.ccRecipients), bcc: list(msg.bccRecipients)};
 }
+// Errors that concern every message, not one: Automation not allowed
+// (-1743), Mail not answering (-1712), Mail not running (-600). They stop
+// the script so Timbre can say what to do.
+function fatal(e) {
+  const n = e && e.errorNumber;
+  return n === -1743 || n === -1712 || n === -600 || n === -609;
+}
+function errorText(e) { return String(e && e.message ? e.message : e); }
+// A batch stops at an error that concerns every message, returning what
+// was done before it, so Timbre still records (and can undo) that.
+function stop(out, e) { return {items: out, fatal: {error: errorText(e), number: (e && e.errorNumber) || null}}; }
 function run(argv) {
   try { return JSON.stringify({ok: true, result: main(readInput())}); }
-  catch (e) { return JSON.stringify({ok: false, error: String(e && e.message ? e.message : e), number: (e && e.errorNumber) || null}); }
+  catch (e) { return JSON.stringify({ok: false, error: errorText(e), number: (e && e.errorNumber) || null}); }
 }
 "#;
 
@@ -104,7 +122,7 @@ function main(i) {
 
 pub const DRAFT_REPLY: &str = r#"
 function main(i) {
-  const orig = message(i.loc, i.id);
+  const orig = message(i.loc, i.id, i.alt);
   const r = Mail.reply(orig, {openingWindow: true, replyToAll: !!i.reply_all});
   r.content = i.body;
   addRecipients(r, {cc: i.cc, bcc: i.bcc});
@@ -115,12 +133,15 @@ function main(i) {
 
 pub const DRAFT_FORWARD: &str = r#"
 function main(i) {
-  const orig = message(i.loc, i.id);
+  const orig = message(i.loc, i.id, i.alt);
   const f = Mail.forward(orig, {openingWindow: true});
   addRecipients(f, i);
-  if (i.body) { try { const cur = f.content(); f.content = i.body + '\n\n' + cur; } catch (e) {} }
+  let added = false;
+  if (i.body) { try { const cur = f.content(); f.content = i.body + '\n\n' + cur; added = true; } catch (e) {} }
   try { f.save(); } catch (e) {}
-  return describe(f);
+  const d = describe(f);
+  d.text_added = added;
+  return d;
 }
 "#;
 
@@ -129,15 +150,15 @@ function main(i) {
   const out = [];
   for (const it of i.items) {
     try {
-      const m = message(it.loc, it.id);
+      const m = message(it.loc, it.id, it.alt);
       if (i.action === 'read') m.readStatus = true;
       else if (i.action === 'unread') m.readStatus = false;
       else if (i.action === 'flag') { m.flaggedStatus = true; if (typeof i.color === 'number') m.flagIndex = i.color; }
       else if (i.action === 'unflag') m.flaggedStatus = false;
       out.push({id: it.id, ok: true});
-    } catch (e) { out.push({id: it.id, ok: false, error: String(e && e.message ? e.message : e)}); }
+    } catch (e) { if (fatal(e)) return stop(out, e); out.push({id: it.id, ok: false, error: errorText(e)}); }
   }
-  return out;
+  return {items: out, fatal: null};
 }
 "#;
 
@@ -146,14 +167,15 @@ function main(i) {
   const out = [];
   for (const it of i.items) {
     try {
-      const m = message(it.loc, it.id);
+      const [m, viaAlt] = find(it.loc, it.id, it.alt);
+      if (viaAlt && JSON.stringify(it.alt) === JSON.stringify(it.dest)) throw new Error('already there');
       let mid = null;
-      try { mid = m.messageId(); } catch (e) {}
+      try { mid = m.messageId(); } catch (e) { if (fatal(e)) throw e; }
       Mail.move(m, {to: mailbox(it.dest)});
       out.push({id: it.id, ok: true, message_id: mid});
-    } catch (e) { out.push({id: it.id, ok: false, error: String(e && e.message ? e.message : e)}); }
+    } catch (e) { if (fatal(e)) return stop(out, e); out.push({id: it.id, ok: false, error: errorText(e)}); }
   }
-  return out;
+  return {items: out, fatal: null};
 }
 "#;
 
@@ -163,20 +185,25 @@ function main(i) {
   for (const it of i.items) {
     try {
       const src = mailbox(it.now_in);
-      const hits = src.messages.whose({messageId: it.message_id})();
+      let hits = src.messages.whose({messageId: it.message_id})();
+      if (hits.length === 0) hits = src.messages.whose({messageId: '<' + it.message_id + '>'})();
       if (hits.length === 0) throw new Error('message not found where it was moved');
-      Mail.move(hits[0], {to: mailbox(it.back_to)});
+      // Copies with the same Message-ID: the one moved last has the highest id.
+      let pick = hits[0];
+      for (const h of hits) { try { if (h.id() > pick.id()) pick = h; } catch (e) {} }
+      Mail.move(pick, {to: mailbox(it.back_to)});
       out.push({message_id: it.message_id, ok: true});
-    } catch (e) { out.push({message_id: it.message_id, ok: false, error: String(e && e.message ? e.message : e)}); }
+    } catch (e) { if (fatal(e)) return stop(out, e); out.push({message_id: it.message_id, ok: false, error: errorText(e)}); }
   }
-  return out;
+  return {items: out, fatal: null};
 }
 "#;
 
 pub const SELECTION: &str = r#"
 function main(i) {
+  if (!Mail.running()) throw new Error('Mail is not open, so nothing is selected. Ask the user to open Mail and select the messages.');
   let sel = [];
-  try { sel = Mail.selection(); } catch (e) { return []; }
+  try { sel = Mail.selection(); } catch (e) { if (fatal(e)) throw e; return []; }
   const out = [];
   for (let k = 0; k < Math.min(sel.length, 50); k++) {
     try { out.push({id: sel[k].id(), subject: sel[k].subject()}); } catch (e) {}
@@ -188,13 +215,24 @@ function main(i) {
 pub const SEND_OUTGOING: &str = r#"
 function main(i) {
   const msg = Mail.outgoingMessages.byId(i.outgoing_id);
-  const d = describe(msg);
-  const all = [].concat(d.to, d.cc, d.bcc).map(x => String(x).toLowerCase());
+  // Read strictly: a recipient list that cannot be read is not an empty one.
+  const all = [].concat(msg.toRecipients.address(), msg.ccRecipients.address(), msg.bccRecipients.address())
+    .map(x => String(x).trim().toLowerCase());
+  if (all.length === 0) throw new Error('the draft has no recipient any more');
   for (const a of all) { if (i.allowed.indexOf(a) < 0) throw new Error('recipient changed since preparation: ' + a); }
+  for (const a of i.allowed) { if (all.indexOf(a) < 0) throw new Error('recipient removed since preparation: ' + a); }
+  if (String(msg.subject()) !== String(i.subject)) throw new Error('the subject changed since preparation');
+  const d = describe(msg);
   msg.send();
   return {sent: true, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject};
 }
 "#;
+
+/// How the errors begin when Mail may have acted without saying so.
+const NO_ANSWER: &str = "Mail did not answer";
+
+const NOT_ALLOWED: &str = "macOS has not allowed Timbre to act in Mail (Automation). Call open_permission_settings \
+with pane \"automation\" and ask the user to switch on Mail under Timbre, then try again.";
 
 /// Run one JXA script with `input` as JSON on stdin.
 pub async fn run(script: &str, input: &Value, timeout: Duration) -> Result<Value> {
@@ -225,7 +263,7 @@ pub async fn run(script: &str, input: &Value, timeout: Duration) -> Result<Value
     let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(r) => r?,
         Err(_) => bail!(
-            "Mail did not answer within {}s. The action may or may not have been applied: check Mail before retrying.",
+            "{NO_ANSWER} within {}s. The action may or may not have been applied: check Mail before retrying.",
             timeout.as_secs()
         ),
     };
@@ -233,9 +271,7 @@ pub async fn run(script: &str, input: &Value, timeout: Duration) -> Result<Value
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stdout.trim().is_empty() {
         if stderr.contains("-1743") || stderr.contains("Not authorized") {
-            bail!(
-                "macOS has not allowed Timbre to control Mail. Allow it in System Settings › Privacy & Security › Automation."
-            );
+            bail!("{NOT_ALLOWED}");
         }
         bail!("Mail scripting failed: {}", stderr.trim());
     }
@@ -244,14 +280,57 @@ pub async fn run(script: &str, input: &Value, timeout: Duration) -> Result<Value
     if v.get("ok").and_then(Value::as_bool) == Some(true) {
         Ok(v.get("result").cloned().unwrap_or(Value::Null))
     } else {
-        let msg = v.get("error").and_then(Value::as_str).unwrap_or("unknown error");
-        let num = v.get("number").and_then(Value::as_i64);
-        if num == Some(-1743) {
-            bail!(
-                "macOS has not allowed Timbre to control Mail. Allow it in System Settings › Privacy & Security › Automation."
-            );
+        bail!("{}", failure(&v))
+    }
+}
+
+/// What a script that failed said, as a sentence telling what to do.
+fn failure(v: &Value) -> String {
+    let msg = v.get("error").and_then(Value::as_str).unwrap_or("unknown error");
+    match v.get("number").and_then(Value::as_i64) {
+        Some(-1743) => NOT_ALLOWED.to_string(),
+        Some(-600 | -609) => "Mail is not running: ask the user to open Mail, then try again.".into(),
+        Some(-1712) => format!(
+            "{NO_ANSWER} in time (busy?). The action may or may not have been applied: check Mail before retrying."
+        ),
+        _ => format!("Mail refused: {msg}"),
+    }
+}
+
+/// Why a batch stopped before its end.
+#[derive(Debug, Clone)]
+pub struct Stop {
+    /// What to tell Claude.
+    pub text: String,
+    /// The message Mail was at when it stopped may have been acted on.
+    pub maybe_applied: bool,
+    /// Mail gave no account of the batch at all: any of it may have been
+    /// done.
+    pub unreported: bool,
+}
+
+/// The items a batch script went through and, when it stopped early on an
+/// error that concerns every message (permission, Mail closed), why.
+pub fn batch(v: &Value) -> (Vec<Value>, Option<Stop>) {
+    let items = v.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+    let stop = v.get("fatal").filter(|f| f.is_object()).map(|f| Stop {
+        text: failure(f),
+        maybe_applied: f.get("number").and_then(Value::as_i64) == Some(-1712),
+        unreported: false,
+    });
+    (items, stop)
+}
+
+/// Run a batch script: the items Mail went through, and why it stopped
+/// early if it did.
+pub async fn run_batch(script: &str, input: &Value, timeout: Duration) -> (Vec<Value>, Option<Stop>) {
+    match run(script, input, timeout).await {
+        Ok(r) => batch(&r),
+        Err(e) => {
+            let text = e.to_string();
+            let maybe_applied = text.starts_with(NO_ANSWER);
+            (vec![], Some(Stop { text, maybe_applied, unreported: maybe_applied }))
         }
-        bail!("Mail refused: {msg}")
     }
 }
 
@@ -290,4 +369,29 @@ pub fn open_message_url(message_id: &str) -> Result<()> {
         bail!("Mail could not open the message");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_batch_stopped_by_mail_keeps_what_was_done() {
+        let r = json!({"items": [{"id": 1, "ok": true, "message_id": "<a@x>"}],
+                       "fatal": {"error": "Not authorized", "number": -1743}});
+        let (items, stop) = batch(&r);
+        assert_eq!(items.len(), 1);
+        let stop = stop.unwrap();
+        assert!(stop.text.contains("open_permission_settings") && !stop.maybe_applied);
+        let (items, stop) = batch(&json!({"items": [{"id": 1, "ok": true}], "fatal": null}));
+        assert_eq!(items.len(), 1);
+        assert!(stop.is_none());
+        let closed = batch(&json!({"items": [], "fatal": {"error": "x", "number": -600}})).1.unwrap();
+        assert!(closed.text.contains("not running"), "{}", closed.text);
+        let busy = batch(&json!({"items": [], "fatal": {"error": "x", "number": -1712}})).1.unwrap();
+        assert!(busy.maybe_applied && !busy.unreported);
+        let other = batch(&json!({"items": [], "fatal": {"error": "boom"}})).1.unwrap();
+        assert_eq!(other.text, "Mail refused: boom");
+    }
 }

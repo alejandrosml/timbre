@@ -27,6 +27,9 @@ pub struct UndoItem {
     pub message_id: String,
     pub now_in: Loc,
     pub back_to: Loc,
+    /// Moved back already (an undo can partly fail and be retried).
+    #[serde(default)]
+    pub done: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,14 +81,45 @@ fn token() -> String {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Failure {
-    pub id: i64,
+    /// The message id, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    /// The message's Message-ID header (undo_move failures).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     pub error: String,
 }
 
-fn loc_of(ctx: &Ctx, id: i64) -> Result<(Loc, Mailbox), String> {
+impl Failure {
+    fn of(id: i64, error: impl Into<String>) -> Failure {
+        Failure { id: Some(id), message_id: None, error: error.into() }
+    }
+}
+
+/// Where a message is, for acting on it in Mail: the mailbox the user sees
+/// it in (for Gmail its inbox or label, not All Mail where Mail stores it)
+/// and, when different, the stored one.
+struct Source {
+    shown: Mailbox,
+    stored: Mailbox,
+}
+
+impl Source {
+    fn json(&self, id: i64) -> serde_json::Value {
+        let alt = (self.stored.id != self.shown.id).then(|| Loc::from(&self.stored));
+        json!({"id": id, "loc": Loc::from(&self.shown), "alt": alt})
+    }
+}
+
+fn source_of(ctx: &Ctx, id: i64) -> Result<Source, String> {
     let meta = ctx.meta(id)?;
-    let mb = ctx.store.mailbox(meta.mailbox).ok_or_else(|| format!("message {id} is in an unknown mailbox"))?;
-    Ok((Loc::from(&mb), mb))
+    if meta.deleted {
+        return Err(format!("Message {id} was deleted in Mail: there is nothing to act on."));
+    }
+    let stored = ctx.store.mailbox(meta.mailbox).ok_or_else(|| format!("message {id} is in an unknown mailbox"))?;
+    let shown_id = ctx.store.display_mailbox(&ctx.db(), id, meta.mailbox);
+    let shown = ctx.store.mailbox(shown_id).unwrap_or_else(|| stored.clone());
+    Ok(Source { shown, stored })
 }
 
 fn timeout_for(n: usize) -> Duration {
@@ -122,18 +156,53 @@ pub struct DraftResult {
     pub note: String,
 }
 
+/// Split a recipient field on commas and semicolons that are not inside
+/// quotes or angle brackets: "Jean <j@x.fr>, \"Doe, Ann\" <a@y.fr>".
+fn split_recipients(s: &str) -> Vec<&str> {
+    let (mut out, mut start, mut quoted, mut angle) = (vec![], 0, false, false);
+    for (i, c) in s.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '<' if !quoted => angle = true,
+            '>' if !quoted => angle = false,
+            ',' | ';' if !quoted && !angle => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out.into_iter().map(str::trim).filter(|p| !p.is_empty()).collect()
+}
+
+/// One plain address `local@domain`, nothing that Mail could read as two.
+fn plain_address(a: &str) -> Option<String> {
+    let (local, domain) = a.split_once('@')?;
+    let bad = |c: char| c.is_whitespace() || c.is_control() || "<>(),;:\"[]\\@".contains(c);
+    let ok = !local.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && a.len() <= 254
+        && !local.chars().any(bad)
+        && !domain.chars().any(bad);
+    ok.then(|| a.to_string())
+}
+
 fn valid_addresses(list: &Option<Vec<String>>) -> Result<Vec<String>, String> {
-    let mut out = vec![];
-    for a in list.iter().flatten() {
-        let a = a.trim();
-        if a.is_empty() {
-            continue;
+    let mut out: Vec<String> = vec![];
+    for entry in list.iter().flatten() {
+        for part in split_recipients(entry) {
+            let addr = match part.rsplit_once('<') {
+                Some((_, r)) => r.trim_end().strip_suffix('>').unwrap_or(r).trim(),
+                None => part,
+            };
+            let addr = plain_address(addr).ok_or_else(|| format!("'{part}' is not an email address"))?;
+            if !out.iter().any(|o| o.eq_ignore_ascii_case(&addr)) {
+                out.push(addr);
+            }
         }
-        let addr = a.rsplit_once('<').map(|(_, r)| r.trim_end_matches('>')).unwrap_or(a).trim();
-        if !addr.contains('@') || addr.contains(char::is_whitespace) || addr.len() > 254 {
-            return Err(format!("'{a}' is not an email address"));
-        }
-        out.push(addr.to_string());
     }
     Ok(out)
 }
@@ -191,20 +260,31 @@ async fn compose(ctx: &Ctx, p: &DraftParams) -> Result<serde_json::Value, String
         }
         "reply" | "reply_all" => {
             let id = p.id.ok_or("'id' of the message to reply to is required")?;
-            let (loc, _) = loc_of(ctx, id)?;
-            let body = reply_body(ctx, id, &p.body);
-            (
-                mailapp::DRAFT_REPLY,
-                json!({"loc": loc, "id": id, "reply_all": mode == "reply_all", "cc": cc, "bcc": bcc, "body": body}),
-            )
+            let mut input = source_of(ctx, id)?.json(id);
+            input["reply_all"] = json!(mode == "reply_all");
+            input["cc"] = json!(cc);
+            input["bcc"] = json!(bcc);
+            input["body"] = json!(reply_body(ctx, id, &p.body));
+            (mailapp::DRAFT_REPLY, input)
         }
         "forward" => {
             let id = p.id.ok_or("'id' of the message to forward is required")?;
             if to.is_empty() {
                 return Err("A forward needs at least one recipient in 'to'.".into());
             }
-            let (loc, _) = loc_of(ctx, id)?;
-            (mailapp::DRAFT_FORWARD, json!({"loc": loc, "id": id, "to": to, "cc": cc, "bcc": bcc, "body": p.body}))
+            let mut input = source_of(ctx, id)?.json(id);
+            input["to"] = json!(to);
+            input["cc"] = json!(cc);
+            input["bcc"] = json!(bcc);
+            // Mail drops a forward's attachments when a script replaces its
+            // text: with attachments, the text is left for the user to type.
+            let attached = ctx
+                .raw(id)
+                .ok()
+                .and_then(|(raw, _)| mime::parse(&raw))
+                .is_some_and(|m| m.attachments.iter().any(|a| !a.inline));
+            input["body"] = json!(if attached { "" } else { p.body.as_str() });
+            (mailapp::DRAFT_FORWARD, input)
         }
         other => return Err(format!("Unknown mode '{other}': use new, reply, reply_all or forward.")),
     };
@@ -220,13 +300,23 @@ fn strings(v: &serde_json::Value, key: &str) -> Vec<String> {
 
 pub async fn create_draft(ctx: &Ctx, p: &DraftParams) -> Result<DraftResult, String> {
     let r = compose(ctx, p).await?;
+    let mut note = "The draft is open in Mail for the user to review. Nothing was sent.".to_string();
+    let text_left_out = p.mode.trim().eq_ignore_ascii_case("forward")
+        && !p.body.trim().is_empty()
+        && r.get("text_added").and_then(|v| v.as_bool()) == Some(false);
+    if text_left_out {
+        note.push_str(
+            " The forwarded message has attachments, which Mail would drop if Timbre changed the text: \
+             ask the user to type the text above the forwarded message in the open draft.",
+        );
+    }
     Ok(DraftResult {
         status: "draft_open_in_mail".into(),
         subject: r.get("subject").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
         to: strings(&r, "to"),
         cc: strings(&r, "cc"),
         bcc: strings(&r, "bcc"),
-        note: "The draft is open in Mail for the user to review. Nothing was sent.".into(),
+        note,
     })
 }
 
@@ -260,21 +350,26 @@ fn color_index(c: &str) -> Option<i64> {
         .map(|i| i as i64)
 }
 
-fn collect_failures(r: &serde_json::Value) -> (usize, Vec<Failure>) {
+fn collect_failures(items: &[serde_json::Value]) -> (usize, Vec<Failure>) {
     let mut ok = 0;
     let mut failed = vec![];
-    for item in r.as_array().into_iter().flatten() {
+    for item in items {
         if item.get("ok").and_then(|v| v.as_bool()) == Some(true) {
             ok += 1;
         } else {
             failed.push(Failure {
-                id: item.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
+                id: item.get("id").and_then(|v| v.as_i64()),
+                message_id: item.get("message_id").and_then(|v| v.as_str()).map(str::to_string),
                 error: item.get("error").and_then(|v| v.as_str()).unwrap_or("failed").to_string(),
             });
         }
     }
     (ok, failed)
 }
+
+/// Messages per call to Mail: a slow Mail stops one batch, not all of
+/// them, and what was done is known.
+const CHUNK: usize = 25;
 
 pub async fn mark(ctx: &Ctx, p: &MarkParams) -> Result<BatchResult, String> {
     if p.ids.is_empty() || p.ids.len() > 500 {
@@ -291,20 +386,32 @@ pub async fn mark(ctx: &Ctx, p: &MarkParams) -> Result<BatchResult, String> {
     let mut items = vec![];
     let mut failed = vec![];
     for id in &p.ids {
-        match loc_of(ctx, *id) {
-            Ok((loc, _)) => items.push(json!({"id": id, "loc": loc})),
-            Err(e) => failed.push(Failure { id: *id, error: e }),
+        match source_of(ctx, *id) {
+            Ok(src) => items.push((*id, src.json(*id))),
+            Err(e) => failed.push(Failure::of(*id, e)),
         }
     }
-    let r = mailapp::run(
-        mailapp::MARK,
-        &json!({"items": items, "action": action, "color": color}),
-        timeout_for(items.len()),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let (done, mut f2) = collect_failures(&r);
-    failed.append(&mut f2);
+    let mut done = 0;
+    let mut stopped: Option<String> = None;
+    let mut chunks = items.chunks(CHUNK);
+    for chunk in chunks.by_ref() {
+        let batch: Vec<_> = chunk.iter().map(|(_, v)| v.clone()).collect();
+        let input = json!({"items": batch, "action": action, "color": color});
+        let (tried, stop) = mailapp::run_batch(mailapp::MARK, &input, timeout_for(batch.len())).await;
+        let (n, mut f) = collect_failures(&tried);
+        done += n;
+        failed.append(&mut f);
+        if let Some(stop) = stop {
+            if done == 0 && failed.is_empty() {
+                return Err(stop.text);
+            }
+            failed.extend(chunk[tried.len().min(chunk.len())..].iter().map(|(id, _)| Failure::of(*id, &stop.text)));
+            stopped = Some(stop.text);
+            break;
+        }
+    }
+    let why = stopped.unwrap_or_default();
+    failed.extend(chunks.flatten().map(|(id, _)| Failure::of(*id, format!("not tried: {why}"))));
     Ok(BatchResult { done, failed, undo_token: None, note: None })
 }
 
@@ -332,7 +439,8 @@ fn destination(ctx: &Ctx, src: &Mailbox, to: &str, account: Option<&str>) -> Res
     }
     let ids = ctx.store.resolve_mailboxes(to, account);
     let all: Vec<Mailbox> = ids.iter().filter_map(|i| ctx.store.mailbox(*i)).collect();
-    let same: Vec<&Mailbox> = all.iter().filter(|m| m.account == src.account).collect();
+    let same: Vec<&Mailbox> =
+        all.iter().filter(|m| crate::store::same_account(m, &src.account_id, &src.account)).collect();
     match (same.len(), all.len()) {
         (1, _) => Ok(same[0].clone()),
         (0, 1) => Ok(all[0].clone()),
@@ -346,57 +454,170 @@ pub async fn move_mail(ctx: &Ctx, p: &MoveParams) -> Result<BatchResult, String>
         return Err("Give between 1 and 200 ids.".into());
     }
     let mut items = vec![];
-    let mut plan: HashMap<i64, (Loc, Loc)> = HashMap::new();
     let mut failed = vec![];
     for id in &p.ids {
-        let r = loc_of(ctx, *id)
-            .and_then(|(loc, mb)| destination(ctx, &mb, &p.to, p.account.as_deref()).map(|d| (loc, mb, d)));
+        let r = source_of(ctx, *id)
+            .and_then(|src| destination(ctx, &src.shown, &p.to, p.account.as_deref()).map(|d| (src, d)));
         match r {
-            Ok((_, mb, dest)) if dest.id == mb.id => failed.push(Failure { id: *id, error: "already there".into() }),
-            Ok((loc, _, dest)) => {
-                let d = Loc::from(&dest);
-                items.push(json!({"id": id, "loc": loc, "dest": d}));
-                plan.insert(*id, (loc, d));
+            Ok((src, dest)) if dest.id == src.shown.id => failed.push(Failure::of(*id, "already there")),
+            Ok((src, dest)) => {
+                let mut v = src.json(*id);
+                v["dest"] = json!(Loc::from(&dest));
+                items.push((*id, v, Loc::from(&src.shown), Loc::from(&dest)));
             }
-            Err(e) => failed.push(Failure { id: *id, error: e }),
+            Err(e) => failed.push(Failure::of(*id, e)),
         }
     }
     if items.is_empty() {
         return Ok(BatchResult { done: 0, failed, undo_token: None, note: None });
     }
-    let r = mailapp::run(mailapp::MOVE, &json!({"items": items}), timeout_for(items.len()))
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut undo_items = vec![];
-    for item in r.as_array().into_iter().flatten() {
-        if item.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-            continue;
-        }
-        let id = item.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
-        if let (Some(mid), Some((from, to))) = (item.get("message_id").and_then(|v| v.as_str()), plan.get(&id)) {
-            undo_items.push(UndoItem { message_id: mid.to_string(), now_in: to.clone(), back_to: from.clone() });
-        }
-    }
-    let (done, mut f2) = collect_failures(&r);
-    failed.append(&mut f2);
-    let undo_token = if undo_items.is_empty() {
-        None
-    } else {
-        let t = token();
-        let mut journal = ctx.undo.lock().unwrap_or_else(|e| e.into_inner());
+    // The Message-IDs Timbre read, so each batch is journaled before Mail is
+    // asked: if Mail stops half-way, what it moved can still be undone.
+    let known = message_ids(ctx, &items.iter().map(|(id, ..)| *id).collect::<Vec<_>>());
+    let token = token();
+    journal_edit(ctx, |journal| {
         journal.push(UndoEntry {
-            token: t.clone(),
+            token: token.clone(),
             created: now_unix(),
-            description: format!("moved {} message(s) to {}", undo_items.len(), p.to),
-            items: undo_items,
+            description: String::new(),
+            items: vec![],
             undone: false,
         });
         let excess = journal.len().saturating_sub(50);
         journal.drain(..excess);
-        save_undo(&ctx.cfg, &journal);
-        Some(t)
+    });
+    let mut done = 0;
+    let mut stopped: Option<String> = None;
+    let mut chunks = items.chunks(CHUNK);
+    for chunk in chunks.by_ref() {
+        let planned: Vec<UndoItem> = chunk
+            .iter()
+            .filter_map(|(id, _, from, to)| {
+                known.get(id).map(|mid| UndoItem {
+                    message_id: mid.clone(),
+                    now_in: to.clone(),
+                    back_to: from.clone(),
+                    done: false,
+                })
+            })
+            .collect();
+        let mut before = 0;
+        journal_edit(ctx, |journal| {
+            if let Some(e) = journal.iter_mut().find(|e| e.token == token) {
+                before = e.items.len();
+                e.items.extend(planned.iter().cloned());
+            }
+        });
+        let batch: Vec<_> = chunk.iter().map(|(_, v, _, _)| v.clone()).collect();
+        let (tried, stop) = mailapp::run_batch(mailapp::MOVE, &json!({"items": batch}), timeout_for(batch.len())).await;
+        let (n, keep, mut f) = settle(chunk, &tried, stop.as_ref(), &known);
+        done += n;
+        failed.append(&mut f);
+        // This batch's planned moves give way to what Mail said of them;
+        // earlier batches' stay as they are.
+        journal_edit(ctx, |journal| {
+            if let Some(e) = journal.iter_mut().find(|e| e.token == token) {
+                e.items.truncate(before);
+                e.items.extend(keep);
+            }
+        });
+        if let Some(stop) = stop {
+            stopped = Some(stop.text);
+            break;
+        }
+    }
+    if let Some(why) = &stopped {
+        failed.extend(chunks.flatten().map(|(id, ..)| Failure::of(*id, format!("not tried: {why}"))));
+    }
+    // The entry stays only if it holds something to undo.
+    let mut undo_token = None;
+    journal_edit(ctx, |journal| {
+        if let Some(pos) = journal.iter().position(|e| e.token == token) {
+            if journal[pos].items.is_empty() {
+                journal.remove(pos);
+            } else {
+                journal[pos].description = format!("moved {} message(s) to {}", journal[pos].items.len(), p.to);
+                undo_token = Some(token.clone());
+            }
+        }
+    });
+    if done == 0
+        && undo_token.is_none()
+        && let Some(e) = stopped
+    {
+        return Err(e);
+    }
+    let note = undo_token.as_ref().map(|_| "To move them back, call undo_move with this undo_token.".to_string());
+    Ok(BatchResult { done, failed, undo_token, note })
+}
+
+type Planned = (i64, serde_json::Value, Loc, Loc);
+
+/// What a batch of moves did, from what Mail said of each message: how
+/// many moved, the moves to journal (those done, and those Mail may have
+/// done before it stopped answering), and the failures.
+fn settle(
+    chunk: &[Planned],
+    tried: &[serde_json::Value],
+    stop: Option<&mailapp::Stop>,
+    known: &HashMap<i64, String>,
+) -> (usize, Vec<UndoItem>, Vec<Failure>) {
+    let (mut done, mut keep, mut failed) = (0, vec![], vec![]);
+    for (pos, (id, _, from, to)) in chunk.iter().enumerate() {
+        let reported = tried.iter().find(|t| t.get("id").and_then(|v| v.as_i64()) == Some(*id));
+        let item = |mid: &str| UndoItem {
+            message_id: mid.trim_matches(['<', '>']).to_string(),
+            now_in: to.clone(),
+            back_to: from.clone(),
+            done: false,
+        };
+        match reported {
+            Some(t) if t.get("ok").and_then(|v| v.as_bool()) == Some(true) => {
+                done += 1;
+                let mid = t.get("message_id").and_then(|v| v.as_str()).or(known.get(id).map(String::as_str));
+                keep.extend(mid.map(item));
+            }
+            Some(t) => failed.push(Failure::of(*id, t.get("error").and_then(|v| v.as_str()).unwrap_or("failed"))),
+            None => {
+                let maybe = stop.is_some_and(|s| s.unreported || (s.maybe_applied && pos == tried.len()));
+                let why = stop.map_or("Mail stopped answering", |s| s.text.as_str());
+                match known.get(id) {
+                    Some(mid) if maybe => {
+                        keep.push(item(mid));
+                        failed.push(Failure::of(
+                            *id,
+                            format!("{why} It may have been moved: undo_move with the undo_token moves it back if so."),
+                        ));
+                    }
+                    _ => failed.push(Failure::of(*id, why)),
+                }
+            }
+        }
+    }
+    (done, keep, failed)
+}
+
+/// Change the undo journal and save it.
+fn journal_edit(ctx: &Ctx, change: impl FnOnce(&mut Vec<UndoEntry>)) {
+    let mut journal = ctx.undo.lock().unwrap_or_else(|e| e.into_inner());
+    change(&mut journal);
+    save_undo(&ctx.cfg, &journal);
+}
+
+/// The Message-IDs Timbre read in these messages (without angle brackets).
+fn message_ids(ctx: &Ctx, ids: &[i64]) -> HashMap<i64, String> {
+    if ids.is_empty() {
+        return HashMap::new();
+    }
+    let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    let conn = ctx.db();
+    let Ok(mut stmt) = conn.prepare(&format!("SELECT id, msgid FROM docs WHERE msgid IS NOT NULL AND id IN ({list})"))
+    else {
+        return HashMap::new();
     };
-    Ok(BatchResult { done, failed, undo_token, note: Some("Use undo with undo_token to move them back.".into()) })
+    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map(|rows| rows.flatten().map(|(id, m)| (id, m.trim_matches(['<', '>']).to_string())).collect())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -410,30 +631,72 @@ pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
         let journal = ctx.undo.lock().unwrap_or_else(|e| e.into_inner());
         let found = match &p.token {
             Some(t) => journal.iter().rev().find(|e| &e.token == t),
-            None => journal.iter().rev().find(|e| !e.undone),
+            // Without a token, only the latest move: never an older one the
+            // user has forgotten about.
+            None => journal.last(),
         };
         found.cloned().ok_or("Nothing to undo with that token.")?
     };
     if entry.undone {
-        return Err("This move was already undone.".into());
+        return Err(if p.token.is_some() {
+            "This move was already undone.".into()
+        } else {
+            "The latest move was already undone. To undo an earlier one, give its undo_token.".into()
+        });
     }
-    let items: Vec<_> = entry
-        .items
-        .iter()
-        .map(|i| json!({"message_id": i.message_id, "now_in": i.now_in, "back_to": i.back_to}))
-        .collect();
-    let r = mailapp::run(mailapp::MOVE_BACK, &json!({"items": items}), timeout_for(items.len() * 3))
-        .await
-        .map_err(|e| e.to_string())?;
-    let (done, failed) = collect_failures(&r);
-    {
+    let todo: Vec<&UndoItem> = entry.items.iter().filter(|i| !i.done).collect();
+    let mut back: Vec<String> = vec![];
+    let mut failed = vec![];
+    for chunk in todo.chunks(CHUNK) {
+        let items: Vec<_> = chunk
+            .iter()
+            .map(|i| json!({"message_id": i.message_id, "now_in": i.now_in, "back_to": i.back_to}))
+            .collect();
+        let (tried, stop) =
+            mailapp::run_batch(mailapp::MOVE_BACK, &json!({"items": items}), timeout_for(items.len() * 3)).await;
+        for item in &tried {
+            if item.get("ok").and_then(|v| v.as_bool()) == Some(true)
+                && let Some(mid) = item.get("message_id").and_then(|v| v.as_str())
+            {
+                back.push(mid.to_string());
+            }
+        }
+        failed.append(&mut collect_failures(&tried).1);
+        if let Some(stop) = stop {
+            if back.is_empty() && failed.is_empty() {
+                return Err(stop.text);
+            }
+            failed.push(Failure { id: None, message_id: None, error: stop.text });
+            break;
+        }
+    }
+    let complete = {
         let mut journal = ctx.undo.lock().unwrap_or_else(|e| e.into_inner());
+        let mut complete = false;
         if let Some(e) = journal.iter_mut().find(|e| e.token == entry.token) {
-            e.undone = true;
+            for mid in &back {
+                if let Some(item) = e.items.iter_mut().find(|i| !i.done && &i.message_id == mid) {
+                    item.done = true;
+                }
+            }
+            e.undone = e.items.iter().all(|i| i.done);
+            complete = e.undone;
         }
         save_undo(&ctx.cfg, &journal);
-    }
-    Ok(BatchResult { done, failed, undo_token: None, note: Some(format!("Undid: {}", entry.description)) })
+        complete
+    };
+    let note = if complete {
+        format!("Undid: {}", entry.description)
+    } else {
+        format!(
+            "Partly undone ({} of {}). Call undo_move again with undo_token {} to retry the others.",
+            back.len(),
+            todo.len(),
+            entry.token
+        )
+    };
+    let undo_token = (!complete).then(|| entry.token.clone());
+    Ok(BatchResult { done: back.len(), failed, undo_token, note: Some(note) })
 }
 
 // ---------------------------------------------------------------- sending
@@ -533,24 +796,26 @@ pub async fn confirm_send(ctx: &Ctx, p: &ConfirmParams) -> Result<SentResult, St
         }
         pending
     };
-    let r = mailapp::run(
-        mailapp::SEND_OUTGOING,
-        &json!({"outgoing_id": pending.outgoing_id, "allowed": pending.recipients}),
-        Duration::from_secs(60),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    // Counted and logged before Mail answers: a send that times out may
+    // still have gone out.
     {
         let mut st = ctx.sends.lock().unwrap_or_else(|e| e.into_inner());
         st.sent.push_back(now_unix());
     }
-    audit_send(&ctx.cfg, &pending);
+    let r = mailapp::run(
+        mailapp::SEND_OUTGOING,
+        &json!({"outgoing_id": pending.outgoing_id, "allowed": pending.recipients, "subject": pending.subject}),
+        Duration::from_secs(60),
+    )
+    .await;
+    audit_send(&ctx.cfg, &pending, r.as_ref().err().map(|e| e.to_string()));
+    let r = r.map_err(|e| e.to_string())?;
     Ok(SentResult { status: "sent".into(), to: strings(&r, "to"), subject: pending.subject })
 }
 
-fn audit_send(cfg: &Config, p: &PendingSend) {
+fn audit_send(cfg: &Config, p: &PendingSend, error: Option<String>) {
     use std::io::Write;
-    let line = json!({"at": now_unix(), "to": p.recipients, "subject": p.subject});
+    let line = json!({"at": now_unix(), "to": p.recipients, "subject": p.subject, "error": error});
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(cfg.data_dir.join("sent.log")) {
         let _ = writeln!(f, "{line}");
     }
@@ -581,8 +846,9 @@ pub async fn selected(_ctx: &Ctx) -> Result<Vec<Selected>, String> {
 pub fn open_in_mail(ctx: &Ctx, id: i64) -> Result<String, String> {
     let loc = {
         let conn = ctx.db();
-        ctx.locator.locate(&conn, &ctx.store, id)
+        ctx.locator.locate_fast(&conn, &ctx.store, id)
     }
+    .or_else(|| ctx.locator.locate_by_scan(&ctx.store, id))
     .ok_or_else(|| format!("The content of message {id} is not on this Mac."))?;
     let headers = crate::emlx::read_headers(&loc.path).map_err(|e| e.to_string())?;
     let mid =
@@ -596,6 +862,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn moves_are_journaled_even_when_mail_stops() {
+        let loc =
+            |p: &str| Loc { account_id: "A".into(), account: "iCloud".into(), path: vec![p.into()], local: false };
+        let chunk: Vec<Planned> = (1..=4).map(|id| (id, json!({}), loc("INBOX"), loc("Archive"))).collect();
+        let known: HashMap<i64, String> = (1..=4).map(|id| (id, format!("m{id}@x"))).collect();
+        let ids = |keep: &[UndoItem]| keep.iter().map(|i| i.message_id.clone()).collect::<Vec<_>>();
+        // All moved: Mail's own Message-IDs are kept.
+        let tried: Vec<_> =
+            (1..=4).map(|id| json!({"id": id, "ok": true, "message_id": format!("<M{id}@x>")})).collect();
+        let (done, keep, failed) = settle(&chunk, &tried, None, &known);
+        assert_eq!(
+            (done, ids(&keep), failed.len()),
+            (4, vec!["M1@x".into(), "M2@x".into(), "M3@x".into(), "M4@x".into()], 0)
+        );
+        // Mail busy at the third: the first two moved, the third may have.
+        let busy =
+            mailapp::Stop { text: "Mail did not answer in time.".into(), maybe_applied: true, unreported: false };
+        let tried =
+            vec![json!({"id": 1, "ok": true, "message_id": "m1@x"}), json!({"id": 2, "ok": false, "error": "gone"})];
+        let (done, keep, failed) = settle(&chunk, &tried, Some(&busy), &known);
+        assert_eq!((done, ids(&keep)), (1, vec!["m1@x".to_string(), "m3@x".to_string()]));
+        assert_eq!(failed.len(), 3);
+        assert!(failed[1].error.contains("may have been moved"));
+        // No answer at all: any of them may have moved.
+        let silent =
+            mailapp::Stop { text: "Mail did not answer within 23s.".into(), maybe_applied: true, unreported: true };
+        let (done, keep, _) = settle(&chunk, &[], Some(&silent), &known);
+        assert_eq!((done, keep.len()), (0, 4));
+        // Permission refused: nothing moved, nothing to undo.
+        let refused = mailapp::Stop { text: "not allowed".into(), maybe_applied: false, unreported: false };
+        let (done, keep, failed) = settle(&chunk, &[], Some(&refused), &known);
+        assert_eq!((done, keep.len(), failed.len()), (0, 0, 4));
+    }
+
+    #[test]
     fn quote_header_language() {
         assert!(quote_header("Bonjour, merci pour votre message", "d", "f").starts_with("Le d, f a écrit"));
         assert!(quote_header("Hola, gracias", "d", "f").starts_with("El d"));
@@ -606,6 +907,15 @@ mod tests {
     fn addresses_validated() {
         assert_eq!(valid_addresses(&Some(vec!["Ann <ann@x.com>".into()])).unwrap(), vec!["ann@x.com"]);
         assert!(valid_addresses(&Some(vec!["not an address".into()])).is_err());
+        // Several in one field, quoted names with commas: none is lost.
+        assert_eq!(
+            valid_addresses(&Some(vec!["Jean <jean@x.fr>, \"Doe, Ann\" <ann@y.fr>; bob@z.org".into()])).unwrap(),
+            vec!["jean@x.fr", "ann@y.fr", "bob@z.org"]
+        );
+        // Nothing Mail could read as two addresses, or as something else.
+        for bad in ["evil@x.com@corp.fr", "a b@x.fr", "ann@localhost", "<>@x.fr", "@x.fr", "ann@.fr", "a\"b@x.fr"] {
+            assert!(valid_addresses(&Some(vec![bad.into()])).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -1345,14 +1345,16 @@ dependencies = [
 
 [[package]]
 name = "timbre-mail"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "cssparser",
  "ego-tree",
  "embed_plist",
  "encoding_rs",
+ "html5ever",
  "libc",
  "mail-parser",
  "rayon",
@@ -1360,6 +1362,7 @@ dependencies = [
  "rusqlite",
  "schemars",
  "scraper",
+ "selectors",
  "serde",
  "serde_json",
  "thiserror",

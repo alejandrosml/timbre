@@ -38,10 +38,12 @@ Claude's Gmail connector sends each search to Google's servers through the Gmail
 
 In both cases, what Claude reads goes to Claude to answer you.
 
+**Also using the Gmail connector?** No need to remove it: Timbre asks Claude to go through Timbre first for anything in your mail, Gmail included. Keep the Gmail connector for what Timbre does not do, such as sending from Gmail while sending is off in Timbre. If Claude still reaches for Gmail, just tell it "search with Timbre".
+
 ## What it does
 
-- **Search everything.** Full-text over subjects, people, message bodies and attachment names, ranked by relevance, recency and whether you correspond with the sender, one result per message even when Gmail files it under several labels, accent- and ligature-insensitive (`réunion` = `reunion`, `cœur` = `coeur`), with filters and Gmail-style operators: `from:`, `to:`, `subject:`, `in:`, `is:unread`, `is:flagged`, `has:attachment`, `after:`, `before:`, `"exact phrase"`, `prefix*` (3 letters or more), `-exclude`, `OR`.
-- **Read safely.** The text a person sees in Mail, with hidden HTML content removed, sender-authenticity warnings and attachment risks.
+- **Search everything.** Full-text over subjects, people, message bodies and attachment names, ranked by relevance, recency and whether you correspond with the sender, one result per message even when Gmail files it under several labels, accent- and ligature-insensitive (`réunion` = `reunion`, `cœur` = `coeur`), with filters and Gmail-style operators: `from:`, `to:`, `cc:`, `subject:`, `in:`, `label:`, `is:unread`, `is:flagged`, `has:attachment`, `filename:`, `after:`, `before:`, `newer_than:7d`, `older_than:1y`, `"exact phrase"` (also after an operator: `from:"Jean Dupont"`), `prefix*` (3 letters or more), `-exclude` (also `-from:`, `-"a phrase"`), `OR`. Junk and trash are left out, and their words can still be searched when asked for.
+- **Read safely.** The text a person sees in Mail: hidden HTML content removed, and nothing that is shown lost (shops' MJML layouts, text after an attachment placed inside the message, the text version of mail made of pictures), with warnings about sender authenticity, deceptive links and risky attachments (programs, macros, web pages).
 - **Follow conversations.** A whole thread, each message reduced to its new text.
 - **Read attachments.** PDF, Word, RTF and ODT (converted by macOS in a separate process), text, HTML, CSV, calendars, contact cards and attached emails.
 - **Act, reversibly.** Drafts (new, reply, reply all, forward) open in Mail for you to review; mark read/unread, flag; move to archive, trash or any mailbox — with **undo**.
@@ -67,7 +69,7 @@ Timbre takes the best ideas of the existing open-source Apple Mail connectors an
 - **Every account, labels included.** Gmail keeps each message once, in All Mail: Timbre reads its labels, so Gmail's Inbox, Sent and your labels work like any mailbox. The sent mail of Orange, Wanadoo and La Poste (OUTBOX) and their spam (QUARANTAINE) are recognised too.
 - **Sensible ranking.** A vague search (*invoice*) puts recent mail first; mail from people you write to ranks higher; mail you send yourself does not.
 - **Nothing to restart.** Once you allow Full Disk Access, Timbre notices within seconds and starts working, in the same conversation. It also tells you when a new version is out.
-- **Hidden-text removal.** `display:none`, zero-size fonts, white-on-white, off-screen and transparent text, zero-width and bidi characters are removed from what Claude reads — and counted, and scanned for instructions aimed at an AI.
+- **Hidden-text removal.** `display:none`, zero-size fonts, white-on-white, off-screen, clipped, shrunk, blurred and transparent text, text that filters or blending make vanish, zero-width and bidi characters are removed from what Claude reads — and counted, and scanned for instructions aimed at an AI. Style sheets are read with the CSS parser and selector engine Firefox uses, and judged as Mail draws them on a Mac: cascade layers, nested rules, `@container`, `@scope`, `::first-line`, animations and shadow trees included. When what a message shows depends on the width of Mail's window, only what can be seen at any width is kept.
 - **What you see is what Claude reads.** Timbre reads the HTML part Mail displays, not the text/plain alternative an attacker can fill with different content (and warns when they differ).
 - **Sender checks.** SPF/DKIM/DMARC results, display names showing another address, reply-to on another domain, punycode domains, links whose text shows one domain but lead to another, and *first contact* (a sender you have never exchanged with).
 - **Spotlighting.** Every untrusted body is fenced with a random marker the sender cannot predict.
@@ -96,16 +98,18 @@ spctl --assess -vv "$APP"                                # accepted, source=Nota
 
 A synthetic mailbox of 20,000 messages (788 MB: HTML newsletters, replies with quoted history, attachments, French, English and Spanish text with a realistic vocabulary), indexed on a small 2-core virtual machine:
 
-| | v0.1.0 | v0.4.0 |
-|---|---|---|
-| Full index build | 28.6 s | 13.0 s |
-| Index size on disk | 298 MB | 124 MB |
-| Search, median | 42 ms | 18 ms |
-| Search, 95th percentile | 62 ms | 30 ms |
+| | v0.1.0 | v0.4.0 | v0.5.2 |
+|---|---|---|---|
+| Full index build | 28.6 s | 13.0 s | 16.0 s |
+| Index size on disk | 298 MB | 124 MB | 126 MB |
+| Search, median | 42 ms | 18 ms | 25 ms |
+| Search, 95th percentile | 62 ms | 30 ms | 46 ms |
+
+0.5.2 is a little slower for being more exact: it reads every part of each message and works out which text can be seen the way Mail's WebKit does, indexes junk and trash too (search still leaves them out), and ranks a broad query over its most recent matches by date rather than by the order Mail stored them in, so the mail of an account added later cannot push this month's out.
 
 What made the difference: messages are parsed on every core while a single writer commits large transactions, with FTS5's merging deferred and a 64 MiB pending-terms table; the text kept for snippets is stored once, compressed with zstd; there is no prefix index; snippets and details are computed for the returned page only, and very broad queries are ranked over their 10,000 most recent matches. Index-time work that only matters when reading a message is skipped. To reproduce: `timbre dev-corpus /tmp/corpus 20000` (debug build), then `timbre index --rebuild` and `timbre bench` from a release build with `TIMBRE_MAIL_ROOT`, `TIMBRE_ACCOUNTS_DB` and `TIMBRE_DATA_DIR` pointing at it.
 
-On a real Mac (Apple silicon, 132,000 messages across six accounts, Gmail included), the index takes 387 MB and searches answer in 15 to 30 ms.
+On a real Mac (Apple silicon, 132,000 messages across six accounts, Gmail included), the index takes about 500 MB and searches answer in 15 to 30 ms.
 
 ## Install
 
@@ -113,7 +117,7 @@ On a real Mac (Apple silicon, 132,000 messages across six accounts, Gmail includ
 2. Give Timbre **Full Disk Access**. Ask Claude to *open Timbre's permission settings*: System Settings opens at Privacy & Security › Full Disk Access and Finder selects Timbre (the stamp icon). Drag it into the list and switch it on. Timbre starts working by itself a few seconds later: nothing to restart.
 3. The first time you ask for a draft or a move, macOS asks whether Timbre may control Mail: click OK.
 
-The full-text index builds in the background on first launch (about a minute per 100,000 messages on a recent Mac); searches work meanwhile on subjects and senders. Afterwards, new mail is searchable within seconds.
+The full-text index builds in the background on first launch (about a minute per 100,000 messages on a recent Mac); searches work meanwhile on subjects and senders. Afterwards, new mail is searchable within seconds. After an update that reads messages better, Timbre reads them again in the background, newest first, while search keeps working.
 
 ## Tools
 
@@ -125,7 +129,7 @@ The full-text index builds in the background on first launch (about a minute per
 | `list_mailboxes` | Accounts and mailboxes with counts | no |
 | `read_attachment` | Text of an attachment: PDF, Word, RTF, ODT, text, HTML, CSV, calendar, attached mail | no |
 | `mail_status` | Permissions, index progress, settings, newer version | no |
-| `open_permission_settings` | Open Full Disk Access settings and show Timbre | opens System Settings |
+| `open_permission_settings` | Open Full Disk Access (or Automation) settings and show Timbre | opens System Settings |
 | `selected_mail` | Messages selected in Mail | no |
 | `open_in_mail` | Open a message in Mail | no |
 | `save_attachment` | Save to your attachments folder | adds a file |
@@ -136,7 +140,7 @@ The full-text index builds in the background on first launch (about a minute per
 
 ## Settings
 
-In Claude › Settings › Extensions › Timbre: read-only mode, allow sending, allowed recipients (`alice@example.com, @mycompany.com`), maximum messages per hour, mailboxes left out of search (default: junk, trash), the attachments folder and the daily check for updates.
+In Claude › Settings › Extensions › Timbre: read-only mode, allow sending, allowed recipients (`alice@example.com, @mycompany.com`), maximum messages per hour, mailboxes left out of search (default: junk and trash; leave the field empty to search everything, and write roles as you like: `spam`, `corbeille`, `archive`…), the attachments folder and the daily check for updates.
 
 ## Privacy
 

@@ -23,15 +23,24 @@ pub fn parse_when(s: &str) -> Option<i64> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Some(dt.timestamp());
     }
-    if let Ok(nd) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M") {
-        return Local.from_local_datetime(&nd).earliest().map(|d| d.timestamp());
+    // A local time that does not exist (the hour skipped when clocks go
+    // forward, at midnight in some countries) means the first one after.
+    let local = |nd: chrono::NaiveDateTime| {
+        Local
+            .from_local_datetime(&nd)
+            .earliest()
+            .or_else(|| Local.from_local_datetime(&(nd + chrono::Duration::hours(1))).earliest())
+            .map(|d| d.timestamp())
+    };
+    for f in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
+        if let Ok(nd) = chrono::NaiveDateTime::parse_from_str(s, f) {
+            return local(nd);
+        }
     }
-    if let Ok(nd) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M") {
-        return Local.from_local_datetime(&nd).earliest().map(|d| d.timestamp());
-    }
-    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        let nd = d.and_hms_opt(0, 0, 0)?;
-        return Local.from_local_datetime(&nd).earliest().map(|d| d.timestamp());
+    for f in ["%Y-%m-%d", "%Y/%m/%d"] {
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(s, f) {
+            return local(d.and_hms_opt(0, 0, 0)?);
+        }
     }
     None
 }
@@ -56,6 +65,51 @@ pub fn sqlite_uri(path: &std::path::Path, query: &str) -> String {
         out.push_str(query);
     }
     out
+}
+
+/// The text of a `data:` URL holding a style sheet (`data:text/css,…`,
+/// percent-encoded or base64); `None` for any other address.
+pub fn data_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = url.get(..5).filter(|p| p.eq_ignore_ascii_case("data:")).map(|_| &url[5..])?;
+    let (meta, data) = rest.split_once(',')?;
+    let meta = meta.to_ascii_lowercase();
+    let kind = meta.split(';').next().unwrap_or("").trim();
+    if !(kind.is_empty() || kind == "text/css") {
+        return None;
+    }
+    let bytes = if meta.split(';').any(|p| p.trim() == "base64") {
+        base64(&percent_decode(data))?
+    } else {
+        percent_decode(data).into_bytes()
+    };
+    (bytes.len() <= 1 << 20).then(|| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Base64, spaces ignored.
+fn base64(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => break,
+            c if c.is_ascii_whitespace() => continue,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
 }
 
 /// Percent-decode a URL path component (mailbox URLs in the Envelope Index).
@@ -92,8 +146,11 @@ pub fn clip(s: &str, max: usize) -> (String, bool) {
 /// zero-width spaces and joiners, bidirectional controls, the BOM and the
 /// soft hyphen. They are a common way to smuggle instructions or to
 /// obfuscate phishing text, so we drop them and report how many we saw.
+#[inline]
 pub fn is_invisible(c: char) -> bool {
-    matches!(c,
+    // Most text is below the first of them: answered at once.
+    c >= '\u{00AD}'
+        && matches!(c,
         '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}'
         | '\u{180B}'..='\u{180F}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
         | '\u{2065}'..='\u{2069}' | '\u{3164}' | '\u{FE00}'..='\u{FE0E}' | '\u{FEFF}' | '\u{FFA0}'
@@ -189,6 +246,22 @@ pub fn app_path() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dates_in_the_forms_people_and_models_write() {
+        for ok in [
+            "2024-03-01",
+            "2024/03/01",
+            "2024-03-01T10:00",
+            "2024-03-01T10:00:00",
+            "2024-03-01 10:00:00",
+            "2024-03-01T10:00:00+01:00",
+        ] {
+            assert!(parse_when(ok).is_some(), "{ok}");
+        }
+        assert_eq!(parse_when("2024/03/01"), parse_when("2024-03-01"));
+        assert!(parse_when("01/03/2024").is_none(), "ambiguous: day or month first");
+    }
 
     #[test]
     fn percent_decode_never_slices_inside_a_character() {

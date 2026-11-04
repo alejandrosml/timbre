@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,12 @@ use crate::store::{self, Store};
 use crate::util::{clip, now_unix};
 
 pub const SCHEMA_VERSION: &str = "3";
+/// Version of what is read from each message (indexed text, attachment
+/// count). Rows read by an older Timbre are read again in the background,
+/// newest first, while searches keep using the index.
+pub const PARSER_VERSION: i64 = 2;
+/// Messages read again per transaction when the parser changed.
+const REFRESH_BATCH: usize = 1000;
 /// Longest body text indexed per message (characters).
 const MAX_INDEXED_BODY: usize = 32_000;
 const CHUNK: usize = 256;
@@ -55,6 +61,12 @@ pub struct Progress {
     pub last_sync: AtomicI64,
     pub build_secs: AtomicU64,
     pub error: Mutex<Option<String>>,
+    /// The index was complete once: searches use it while new or changed
+    /// messages are being added.
+    pub built: AtomicBool,
+    /// Messages still to read again after an update, out of `refresh_total`.
+    pub refresh_left: AtomicU64,
+    pub refresh_total: AtomicU64,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -67,11 +79,23 @@ pub struct ProgressView {
     pub last_build_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Messages being read again after an update of Timbre, in percent
+    /// (searches work meanwhile).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rereading_percent: Option<u64>,
+    /// When new mail was last added to the index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_update: Option<String>,
 }
 
 impl Progress {
+    /// Can searches use the full-text index?
     pub fn ready(&self) -> bool {
-        self.phase.load(Ordering::Relaxed) == PHASE_READY
+        match self.phase.load(Ordering::Relaxed) {
+            PHASE_READY => true,
+            PHASE_SCANNING | PHASE_INDEXING => self.built.load(Ordering::Relaxed),
+            _ => false,
+        }
     }
 
     pub fn view(&self) -> ProgressView {
@@ -88,19 +112,29 @@ impl Progress {
         let total = self.total.load(Ordering::Relaxed);
         let done = self.done.load(Ordering::Relaxed);
         let secs = self.build_secs.load(Ordering::Relaxed);
+        let (left, all) = (self.refresh_left.load(Ordering::Relaxed), self.refresh_total.load(Ordering::Relaxed));
         ProgressView {
             state: state.to_string(),
             indexed_messages: self.docs.load(Ordering::Relaxed),
             percent: (phase == PHASE_INDEXING && total > 0).then(|| done * 100 / total),
             last_build_seconds: (secs > 0).then_some(secs),
             error: self.error.lock().ok().and_then(|e| e.clone()),
+            rereading_percent: (left > 0 && all > 0).then(|| all.saturating_sub(left) * 100 / all),
+            last_update: match self.last_sync.load(Ordering::Relaxed) {
+                0 => None,
+                t => crate::util::iso_local(t),
+            },
         }
     }
 
     fn fail(&self, e: &anyhow::Error) {
         self.phase.store(PHASE_FAILED, Ordering::Relaxed);
+        self.set_error(Some(format!("{e:#}")));
+    }
+
+    fn set_error(&self, error: Option<String>) {
         if let Ok(mut slot) = self.error.lock() {
-            *slot = Some(format!("{e:#}"));
+            *slot = error;
         }
     }
 }
@@ -122,6 +156,8 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
         | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let path = cfg.index_path();
     let conn = Connection::open_with_flags(&path, flags).with_context(|| format!("opening {}", path.display()))?;
+    // Another Timbre (a second Claude window) may be writing: wait for it.
+    conn.busy_timeout(Duration::from_secs(5))?;
     register_functions(&conn)?;
     if writable {
         match classify(&conn, store)? {
@@ -146,7 +182,6 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
             }
         }
     }
-    conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch(
         "PRAGMA temp_store = MEMORY;
          PRAGMA cache_size = -65536;
@@ -156,6 +191,7 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
+             PRAGMA journal_size_limit = 67108864;
              CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )?;
         let current_dir = store.version_dir.to_string_lossy().to_string();
@@ -168,7 +204,11 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
                  msgid TEXT,
                  auth TEXT,
                  hidden INTEGER NOT NULL DEFAULT 0,
-                 status INTEGER NOT NULL DEFAULT 0
+                 status INTEGER NOT NULL DEFAULT 0,
+                 -- Attachments a reader sees (not inline images); NULL: unknown.
+                 attachments INTEGER,
+                 -- PARSER_VERSION that read this message.
+                 parser INTEGER NOT NULL DEFAULT 0
              );
              CREATE INDEX IF NOT EXISTS docs_msgid ON docs(msgid);
              -- Messages without a file at the last walk of Mail's store.
@@ -190,6 +230,7 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
                  tokenize = 'unicode61 remove_diacritics 2'
              );",
         )?;
+        add_missing_columns(&conn)?;
         set_meta(&conn, "schema", SCHEMA_VERSION)?;
         set_meta(&conn, "mail_dir", &current_dir)?;
         // A build that was killed may have left its bulk-load settings.
@@ -203,6 +244,58 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
         conn.execute_batch("PRAGMA query_only = ON;")?;
     }
     Ok((conn, mode))
+}
+
+/// Columns added since schema 3 was first released: added in place, so an
+/// update does not throw the index away.
+fn add_missing_columns(conn: &Connection) -> Result<()> {
+    let columns = |conn: &Connection| -> Result<Vec<String>> {
+        let mut stmt = conn.prepare("PRAGMA main.table_info(docs)")?;
+        let cols = stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(cols)
+    };
+    let wanted = [("attachments", "INTEGER"), ("parser", "INTEGER NOT NULL DEFAULT 0")];
+    if wanted.iter().all(|(c, _)| columns(conn).is_ok_and(|have| have.iter().any(|h| h == c))) {
+        return Ok(());
+    }
+    // Another Timbre may be doing the same: one transaction, checked inside.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<()> {
+        let have = columns(conn)?;
+        for (col, decl) in wanted {
+            if !have.iter().any(|h| h == col) {
+                conn.execute_batch(&format!("ALTER TABLE docs ADD COLUMN {col} {decl}"))?;
+            }
+        }
+        Ok(())
+    })();
+    conn.execute_batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
+    result
+}
+
+/// Is this error a damaged index file (not a database, malformed)?
+pub fn damaged(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(f, _))
+                if matches!(f.code, rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt)
+        )
+    })
+}
+
+/// Move a damaged index aside (never deleted: it is only Timbre's, but
+/// someone may want to look at it); the next open starts a new one.
+pub fn set_aside(cfg: &Config) {
+    let main = cfg.index_path();
+    for suffix in ["", "-wal", "-shm"] {
+        let from = PathBuf::from(format!("{}{suffix}", main.display()));
+        let to = PathBuf::from(format!("{}.damaged{suffix}", main.display()));
+        if from.exists() {
+            let _ = std::fs::rename(&from, &to);
+        }
+    }
+    tracing::warn!("index: damaged file set aside as {}.damaged", main.display());
 }
 
 enum IndexFile {
@@ -316,7 +409,10 @@ pub struct DocRow {
     pub body: String,
     /// `body`, zstd-compressed for the `texts` table.
     pub body_z: Vec<u8>,
+    /// Attachment names, for the full-text index.
     pub attachments: String,
+    /// How many attachments a reader sees (inline images aside).
+    pub attachment_count: Option<i64>,
 }
 
 fn people_of(p: &mime::Parsed) -> String {
@@ -343,10 +439,11 @@ pub fn build_doc(version_dir: &Path, id: i64, mailbox: i64, loc: &Located) -> Do
         body: String::new(),
         body_z: vec![],
         attachments: String::new(),
+        attachment_count: None,
     };
     let parsed = emlx::read_message(&loc.path).ok().and_then(|raw| mime::parse_for_index(&raw));
     if let Some(p) = parsed {
-        let (body, _) = clip(&quote::strip_quotes(&p.body), MAX_INDEXED_BODY);
+        let (body, _) = clip(&quote::strip_quotes_of(&p.body, &p.subject), MAX_INDEXED_BODY);
         let names: Vec<&str> = p.attachments.iter().filter(|a| !a.inline).map(|a| a.name.as_str()).collect();
         row.status = 0;
         row.subject = norm::fold(&p.subject).into_owned();
@@ -354,6 +451,7 @@ pub fn build_doc(version_dir: &Path, id: i64, mailbox: i64, loc: &Located) -> Do
         row.body = norm::for_index(&body);
         row.body_z = pack(&row.body);
         row.attachments = norm::fold(&names.join(" ")).into_owned();
+        row.attachment_count = Some(names.len() as i64);
         row.msgid = p.message_id.clone();
         row.auth = (!p.auth.is_empty()).then(|| p.auth.compact());
         row.hidden = (p.hidden_chars + p.invisible_chars) as i64;
@@ -383,6 +481,7 @@ pub fn build_doc_guarded(version_dir: &Path, id: i64, mailbox: i64, loc: &Locate
                 body: String::new(),
                 body_z: vec![],
                 attachments: String::new(),
+                attachment_count: None,
             }
         }
     }
@@ -401,10 +500,50 @@ pub fn background_priority() {
 
 /// Empty the index in one transaction: docs, stored text and FTS entries
 /// always agree, even if the process stops halfway.
+/// How often, in a sample, the subject Timbre read in a message's file
+/// differs from the one Mail gives its id: `None` with too few to compare.
+fn subject_mismatch(conn: &Connection, store: &Store) -> Result<Option<f64>> {
+    let sql = format!(
+        "SELECT t.subject, {prefix} || COALESCE(s.subject, '') \
+         FROM (SELECT id FROM docs WHERE status = 0 ORDER BY random() LIMIT 200) x \
+         JOIN texts t ON t.id = x.id JOIN mail.messages m ON m.ROWID = x.id \
+         LEFT JOIN mail.subjects s ON s.ROWID = m.subject",
+        prefix = store.schema.subject_prefix
+    );
+    let key = |s: &str| norm::fold(s).chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+    let (mut compared, mut differ) = (0usize, 0usize);
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let (ours, mail) = (key(&row.get::<_, String>(0)?), key(&row.get::<_, String>(1)?));
+        if ours.is_empty() || mail.is_empty() {
+            continue;
+        }
+        compared += 1;
+        differ += usize::from(!ours.contains(&mail) && !mail.contains(&ours));
+        if compared == 40 {
+            break;
+        }
+    }
+    Ok((compared >= 10).then(|| differ as f64 / compared as f64))
+}
+
+/// Did Mail number its messages anew (rebuilding its Envelope Index, the
+/// usual fix for a broken Mail search)? The ids Timbre keeps would then name
+/// other messages: nearly every subject Timbre read differs from the one
+/// Mail now gives the id. How many differed right after the last build is
+/// the baseline, so subjects Mail stores its own way never set off rebuild
+/// after rebuild.
+pub(crate) fn renumbered(conn: &Connection, store: &Store) -> Result<bool> {
+    let Some(now) = subject_mismatch(conn, store)? else { return Ok(false) };
+    let baseline: f64 = get_meta(conn, "subject_baseline").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    Ok(now > 0.6 && baseline < 0.3)
+}
+
 fn clear(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
     tx.execute_batch(
-        "DELETE FROM docs; DELETE FROM texts; DELETE FROM unlocated; DELETE FROM meta WHERE key = 'last_walk';
+        "DELETE FROM docs; DELETE FROM texts; DELETE FROM unlocated; DELETE FROM meta WHERE key IN ('last_walk', 'built');
          INSERT INTO fts(fts) VALUES('delete-all');",
     )?;
     tx.commit()?;
@@ -436,7 +575,8 @@ fn write_docs(conn: &mut Connection, rows: &[DocRow], replace: bool) -> Result<(
     let tx = conn.transaction()?;
     {
         let mut ins_doc = tx.prepare_cached(
-            "INSERT OR REPLACE INTO docs(id, mailbox, path, partial, msgid, auth, hidden, status) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT OR REPLACE INTO docs(id, mailbox, path, partial, msgid, auth, hidden, status, attachments, parser) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )?;
         let mut unindex = tx.prepare_cached(UNINDEX)?;
         let mut del_text = tx.prepare_cached("DELETE FROM texts WHERE id = ?1")?;
@@ -445,7 +585,18 @@ fn write_docs(conn: &mut Connection, rows: &[DocRow], replace: bool) -> Result<(
         let mut ins_fts =
             tx.prepare_cached("INSERT INTO fts(rowid, subject, people, body, attachments) VALUES(?1, ?2, ?3, ?4, ?5)")?;
         for r in rows {
-            ins_doc.execute(params![r.id, r.mailbox, r.path, r.partial as i64, r.msgid, r.auth, r.hidden, r.status])?;
+            ins_doc.execute(params![
+                r.id,
+                r.mailbox,
+                r.path,
+                r.partial as i64,
+                r.msgid,
+                r.auth,
+                r.hidden,
+                r.status,
+                r.attachment_count,
+                PARSER_VERSION
+            ])?;
             if replace {
                 unindex.execute([r.id])?;
                 del_text.execute([r.id])?;
@@ -489,10 +640,6 @@ impl Indexer {
         Indexer { cfg, store, progress, pending: vec![], last_reconcile: Instant::now() }
     }
 
-    fn excluded_mailboxes(&self) -> HashSet<i64> {
-        self.store.mailboxes_with_roles(&self.cfg.excluded_roles).into_iter().collect()
-    }
-
     /// Full pass: index every message not yet indexed, drop deleted ones.
     pub fn full_build(&mut self, conn: &mut Connection, force: bool) -> Result<()> {
         let started = Instant::now();
@@ -500,17 +647,27 @@ impl Indexer {
         self.store.reload_mailboxes(conn)?;
         if force {
             clear(conn)?;
+            self.progress.built.store(false, Ordering::Relaxed);
         }
         if !force && !consistent(conn)? {
             // Left by an interrupted older version: start over rather than
             // build on an index whose FTS entries and stored text disagree.
             tracing::warn!("index: inconsistent tables, rebuilding from scratch");
             clear(conn)?;
+            self.progress.built.store(false, Ordering::Relaxed);
         }
-        let excluded = self.excluded_mailboxes();
+        // Every mailbox is indexed, junk and trash too: search leaves them
+        // out unless asked, and can find their words when asked.
+        if !force && renumbered(conn, &self.store)? {
+            // Mail rebuilt its Envelope Index (the usual fix for a broken
+            // Mail search): its ids now name other messages.
+            tracing::warn!("index: Mail numbered its messages anew, rebuilding");
+            clear(conn)?;
+            self.progress.built.store(false, Ordering::Relaxed);
+        }
         let live = self.store.live_messages(conn)?;
         let max_live = live.iter().map(|(id, _)| *id).max().unwrap_or(0);
-        let wanted: HashMap<i64, i64> = live.into_iter().filter(|(_, mb)| !excluded.contains(mb)).collect();
+        let wanted: HashMap<i64, i64> = live.into_iter().collect();
         let existing: HashMap<i64, i64> = {
             let mut stmt = conn.prepare("SELECT id, status FROM docs")?;
             stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
@@ -594,20 +751,108 @@ impl Indexer {
         written?;
         tracing::info!("index: parsed and written in {:.1}s", phase.elapsed().as_secs_f64());
         delete_docs(conn, &stale)?;
-        if !todo.is_empty() {
+        if todo.len() > 5000 {
+            // After a large build only: merging a big index costs time and
+            // log space, and automerge keeps small additions in order.
             let phase = Instant::now();
             conn.execute_batch("INSERT INTO fts(fts) VALUES('optimize');")?;
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
             tracing::info!("index: optimized in {:.1}s", phase.elapsed().as_secs_f64());
         }
         set_meta(conn, "max_id", &max_live.to_string())?;
+        if let Some(rate) = subject_mismatch(conn, &self.store)? {
+            set_meta(conn, "subject_baseline", &format!("{rate:.2}"))?;
+        }
         set_meta(conn, "built", "1")?;
         set_meta(conn, "last_full", &now_unix().to_string())?;
+        self.progress.built.store(true, Ordering::Relaxed);
         self.refresh_count(conn)?;
         self.progress.build_secs.store(started.elapsed().as_secs().max(1), Ordering::Relaxed);
         self.progress.last_sync.store(now_unix(), Ordering::Relaxed);
         self.progress.phase.store(PHASE_READY, Ordering::Relaxed);
         self.last_reconcile = Instant::now();
         Ok(())
+    }
+
+    /// The right to keep the index, held as long as the file stays open.
+    fn take_lock(&self) -> Option<std::fs::File> {
+        std::fs::create_dir_all(&self.cfg.data_dir).ok()?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.cfg.data_dir.join("index.lock"))
+            .ok()?;
+        file.try_lock().ok()?;
+        Some(file)
+    }
+
+    /// While another Timbre keeps the index: report its state from the file.
+    fn follow(&self) {
+        if let Ok(conn) = open(&self.cfg, &self.store, false) {
+            let built = get_meta(&conn, "built").is_some();
+            self.progress.built.store(built, Ordering::Relaxed);
+            self.progress.phase.store(if built { PHASE_READY } else { PHASE_INDEXING }, Ordering::Relaxed);
+            let _ = self.refresh_count(&conn);
+        }
+    }
+
+    /// How many messages an older Timbre read (see [`PARSER_VERSION`]).
+    fn outdated(&self, conn: &Connection) -> Result<u64> {
+        let n: i64 = conn.query_row("SELECT count(*) FROM docs WHERE parser < ?1", [PARSER_VERSION], |r| r.get(0))?;
+        Ok(n as u64)
+    }
+
+    /// Read again up to `limit` messages that an older Timbre read, newest
+    /// first, replacing their index entries in one transaction. Returns how
+    /// many were handled; 0 when none is left.
+    pub fn reread_batch(&mut self, conn: &mut Connection, limit: usize) -> Result<usize> {
+        let rows: Vec<(i64, i64, String, bool)> = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT id, mailbox, path, partial FROM docs WHERE parser < ?1 ORDER BY id DESC LIMIT ?2",
+            )?;
+            stmt.query_map(params![PARSER_VERSION, limit as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let version_dir = self.store.version_dir.clone();
+        let roots = self.data_roots(conn)?;
+        let mut found: Vec<(i64, i64, Located)> = vec![];
+        let mut lost: Vec<i64> = vec![];
+        for (id, mb, rel, partial) in &rows {
+            let known = (!rel.is_empty())
+                .then(|| version_dir.join(rel))
+                .filter(|p| p.is_file())
+                .map(|path| Located { path, partial: *partial });
+            match known.or_else(|| roots.get(mb).and_then(|root| emlx::predict(root, *id))) {
+                Some(loc) => found.push((*id, *mb, loc)),
+                None => lost.push(*id),
+            }
+        }
+        let parsed: Vec<DocRow> =
+            found.par_iter().map(|(id, mb, loc)| build_doc_guarded(&version_dir, *id, *mb, loc)).collect();
+        // Rows that read worse than before keep what they had.
+        let (better, worse): (Vec<DocRow>, Vec<DocRow>) = parsed.into_iter().partition(|r| r.status == 0);
+        lost.extend(worse.iter().map(|r| r.id));
+        write_docs(conn, &better, true)?;
+        // Messages whose file is gone for now keep their entry; the next
+        // reconcile or build deals with them.
+        let tx = conn.transaction()?;
+        {
+            let mut keep = tx.prepare_cached("UPDATE docs SET parser = ?1 WHERE id = ?2")?;
+            for id in &lost {
+                keep.execute(params![PARSER_VERSION, id])?;
+            }
+        }
+        tx.commit()?;
+        let n = rows.len();
+        let left = self.progress.refresh_left.load(Ordering::Relaxed).saturating_sub(n as u64);
+        self.progress.refresh_left.store(left, Ordering::Relaxed);
+        Ok(n)
     }
 
     fn refresh_count(&self, conn: &Connection) -> Result<()> {
@@ -699,7 +944,6 @@ impl Indexer {
     /// few minutes reconcile deletions and moves.
     pub fn sync(&mut self, conn: &mut Connection) -> Result<usize> {
         self.store.reload_mailboxes(conn)?;
-        let excluded = self.excluded_mailboxes();
         let max_id: i64 = get_meta(conn, "max_id").and_then(|s| s.parse().ok()).unwrap_or(0);
         let sql = format!(
             "SELECT m.ROWID, m.mailbox FROM mail.messages m WHERE m.ROWID > ?1 AND {} ORDER BY m.ROWID",
@@ -713,9 +957,7 @@ impl Indexer {
         let mut new_max = max_id;
         for (id, mb) in new {
             new_max = new_max.max(id);
-            if !excluded.contains(&mb) {
-                candidates.push((id, mb, 0));
-            }
+            candidates.push((id, mb, 0));
         }
         let mut indexed = 0;
         if !candidates.is_empty() {
@@ -756,21 +998,26 @@ impl Indexer {
         self.reconcile(conn)
     }
 
-    /// Drop index rows for deleted messages and follow moves.
+    /// Drop index rows for deleted messages, follow moves, and pick up
+    /// messages the incremental path missed (a file that came late, a
+    /// message restored from the trash under its old id).
     fn reconcile(&mut self, conn: &mut Connection) -> Result<()> {
-        let excluded = self.excluded_mailboxes();
+        if renumbered(conn, &self.store)? {
+            tracing::warn!("index: Mail numbered its messages anew, rebuilding");
+            self.pending.clear();
+            return self.full_build(conn, true);
+        }
         let live: HashMap<i64, i64> = self.store.live_messages(conn)?.into_iter().collect();
-        let docs: Vec<(i64, i64)> = {
+        let docs: HashMap<i64, i64> = {
             let mut stmt = conn.prepare("SELECT id, mailbox FROM docs")?;
             stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
         };
         let mut gone = vec![];
         let mut moved = vec![];
-        for (id, mb) in docs {
-            match live.get(&id) {
-                None => gone.push(id),
-                Some(m) if excluded.contains(m) => gone.push(id),
-                Some(m) if *m != mb => moved.push((id, *m)),
+        for (id, mb) in &docs {
+            match live.get(id) {
+                None => gone.push(*id),
+                Some(m) if m != mb => moved.push((*id, *m)),
                 _ => {}
             }
         }
@@ -786,6 +1033,15 @@ impl Indexer {
             tx.commit()?;
         }
         self.last_reconcile = Instant::now();
+        let unlocated: HashSet<i64> = {
+            let mut stmt = conn.prepare("SELECT id FROM unlocated")?;
+            stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        let pending: HashSet<i64> = self.pending.iter().map(|(id, _, _)| *id).collect();
+        let missed = live.keys().any(|id| !docs.contains_key(id) && !unlocated.contains(id) && !pending.contains(id));
+        if missed {
+            self.full_build(conn, false)?;
+        }
         Ok(())
     }
 
@@ -796,30 +1052,68 @@ impl Indexer {
             self.progress.phase.store(PHASE_DISABLED, Ordering::Relaxed);
             return;
         }
-        let (mut conn, mut mode) = match open_with_mode(&self.cfg, &self.store, true) {
-            Ok(c) => c,
-            Err(e) => {
-                self.progress.fail(&e);
-                return;
+        // One Timbre keeps the index; another (a second Claude window, an
+        // update starting before the old one stopped) reads it meanwhile.
+        let _lock = loop {
+            match self.take_lock() {
+                Some(lock) => break lock,
+                None => {
+                    self.follow();
+                    std::thread::sleep(Duration::from_secs(15));
+                }
+            }
+        };
+        // A busy or locked file now is not a reason to give up for the session.
+        let (mut conn, mut mode) = loop {
+            match open_with_mode(&self.cfg, &self.store, true) {
+                Ok(c) => break c,
+                Err(e) => {
+                    self.progress.fail(&e);
+                    std::thread::sleep(Duration::from_secs(30));
+                }
             }
         };
         let built = get_meta(&conn, "built").is_some();
         let _ = self.refresh_count(&conn);
         if built {
+            self.progress.built.store(true, Ordering::Relaxed);
             self.progress.phase.store(PHASE_READY, Ordering::Relaxed);
         }
         if let Err(e) = guarded("index build", || self.full_build(&mut conn, false)) {
             tracing::warn!("index build failed: {e:#}");
             self.progress.fail(&e);
         }
+        // Messages read by an older Timbre are read again, newest first.
+        let outdated = self.outdated(&conn).unwrap_or(0);
+        self.progress.refresh_total.store(outdated, Ordering::Relaxed);
+        self.progress.refresh_left.store(outdated, Ordering::Relaxed);
+        let mut rereading = outdated > 0;
         // Mail's commits change the attached database's data_version: polling
         // it costs a page read, so new mail is indexed within seconds instead
         // of at the next 15 s tick. Pending files are retried every 15 s, and
         // a sync still runs every minute in any case.
         let mut last_version: Option<i64> = None;
         let mut last_sync = Instant::now();
+        let mut failures = 0;
         loop {
-            std::thread::sleep(POLL);
+            std::thread::sleep(if rereading { Duration::from_millis(100) } else { POLL });
+            if rereading {
+                match guarded("index re-read", || self.reread_batch(&mut conn, REFRESH_BATCH)) {
+                    Ok(0) => {
+                        rereading = false;
+                        self.progress.refresh_left.store(0, Ordering::Relaxed);
+                        let _ = conn
+                            .execute_batch("INSERT INTO fts(fts) VALUES('optimize'); PRAGMA wal_checkpoint(TRUNCATE);");
+                        tracing::info!("index: messages read again");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("index re-read failed: {e:#}");
+                        rereading = false;
+                        self.progress.refresh_left.store(0, Ordering::Relaxed);
+                    }
+                }
+            }
             let version = conn.query_row("PRAGMA mail.data_version", [], |r| r.get::<_, i64>(0)).ok();
             let due = version.is_none()
                 || version != last_version
@@ -841,6 +1135,11 @@ impl Indexer {
             }
             if let Err(e) = guarded("index sync", || self.sync(&mut conn)) {
                 tracing::warn!("index sync failed: {e:#}");
+                failures += 1;
+                if failures >= 3 {
+                    // Searches still use what is indexed; say that new mail is not.
+                    self.progress.set_error(Some(format!("new mail is not being indexed: {e:#}")));
+                }
                 // Mail may have been upgraded or the connection broken: reopen.
                 match open_with_mode(&self.cfg, &self.store, true) {
                     Ok((c, m)) => {
@@ -849,8 +1148,14 @@ impl Indexer {
                     }
                     Err(e) => self.progress.fail(&e),
                 }
-            } else if self.progress.phase.load(Ordering::Relaxed) == PHASE_FAILED {
-                self.progress.phase.store(PHASE_READY, Ordering::Relaxed);
+            } else {
+                if failures > 0 {
+                    self.progress.set_error(None);
+                }
+                failures = 0;
+                if self.progress.phase.load(Ordering::Relaxed) == PHASE_FAILED {
+                    self.progress.phase.store(PHASE_READY, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -869,7 +1174,9 @@ impl Locator {
         Locator { scan: Mutex::new(None) }
     }
 
-    pub fn locate(&self, conn: &Connection, store: &Store, id: i64) -> Option<Located> {
+    /// Where the message's file is, from the index or from its mailbox's
+    /// folder: no walk of Mail's store, so it is quick.
+    pub fn locate_fast(&self, conn: &Connection, store: &Store, id: i64) -> Option<Located> {
         let row: Option<(String, i64, i64)> = conn
             .query_row("SELECT path, partial, mailbox FROM docs WHERE id = ?1", [id], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -885,6 +1192,25 @@ impl Locator {
                 return Some(Located { path, partial: *partial != 0 });
             }
         }
+        // Moved, or not indexed yet: predict from a message of the same mailbox.
+        let mailbox: i64 = conn
+            .query_row("SELECT mailbox FROM mail.messages WHERE ROWID = ?1", [id], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten()
+            .or(row.map(|(_, _, mb)| mb))?;
+        let sample: String = conn
+            .query_row("SELECT path FROM docs WHERE mailbox = ?1 AND path != '' LIMIT 1", [mailbox], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten()?;
+        let root = emlx::data_root(&store.version_dir.join(sample))?;
+        emlx::predict(&root, id)
+    }
+
+    /// The slow way: a walk of Mail's whole store, at most once a minute.
+    /// Call it without holding the reader, so other tools are not kept waiting.
+    pub fn locate_by_scan(&self, store: &Store, id: i64) -> Option<Located> {
         self.lookup_scan(store, id, false).or_else(|| self.lookup_scan(store, id, true))
     }
 

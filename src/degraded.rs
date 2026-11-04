@@ -14,42 +14,102 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 
+use std::sync::{Arc, Mutex};
+
 use crate::config::Config;
 
 pub struct Degraded {
-    error: String,
+    /// Why Mail's data cannot be read, kept current while Timbre waits.
+    why: Arc<Mutex<String>>,
+    info: ServerConfig,
     tools: Vec<Tool>,
     /// Running under the launcher: access is picked up without a restart.
     restarts_by_itself: bool,
 }
 
+/// What keeps Timbre from working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Problem {
+    /// macOS does not let Timbre read Mail's data (Full Disk Access).
+    Access,
+    /// Apple Mail has no data on this Mac yet.
+    NoMail,
+    /// Timbre's own index could not be opened.
+    Index,
+    Other,
+}
+
+/// Sort an error message into a [`Problem`].
+pub fn problem_of(error: &str) -> Problem {
+    let e = error.to_lowercase();
+    if e.contains("full disk access") || e.contains("operation not permitted") || e.contains("authorization denied") {
+        Problem::Access
+    } else if e.contains("no v*/maildata") || (e.contains("cannot read") && e.contains("no such file")) {
+        Problem::NoMail
+    } else if e.starts_with("timbre's own index") {
+        Problem::Index
+    } else {
+        Problem::Other
+    }
+}
+
 impl Degraded {
-    pub fn new(error: String, cfg: &Config) -> Self {
-        Degraded { error, tools: crate::server::tool_list(cfg), restarts_by_itself: crate::launcher::launched() }
+    pub fn new(why: Arc<Mutex<String>>, cfg: &Config) -> Self {
+        Degraded {
+            why,
+            info: crate::server::server_info(cfg),
+            tools: crate::server::tool_list(cfg),
+            restarts_by_itself: crate::launcher::launched(),
+        }
     }
 
     fn problem(&self) -> String {
-        let app = crate::util::app_path();
-        let mut text = format!(
-            "Timbre cannot read Mail's data yet: {}\n\n\
-             How to fix it: call open_permission_settings. System Settings opens at Privacy & Security › \
-             Full Disk Access and Finder selects Timbre; the user drags Timbre into the list and switches it on \
-             (or clicks +, presses ⌘⇧G and pastes {}).",
-            self.error,
-            app.display()
-        );
-        text.push_str(if self.restarts_by_itself {
-            " Timbre notices within seconds and starts working by itself: nothing to restart."
-        } else {
-            " Then the user turns the Timbre extension off and on in Claude's settings."
-        });
-        if let Some(other) = crate::responsibility::checked_for().filter(|w| !w.starts_with("timbre ")) {
-            text.push_str(&format!(
-                "\n\nmacOS checks the access of {other}, which started Timbre, instead of Timbre's own: \
-                 give Full Disk Access to that program, or update Timbre."
-            ));
+        let error = self.why.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let by_itself = self.restarts_by_itself;
+        match problem_of(&error) {
+            Problem::Access => {
+                let app = crate::util::app_path();
+                let mut text = format!(
+                    "Timbre cannot read Mail's data yet: {error}\n\n\
+                     How to fix it: call open_permission_settings. System Settings opens at Privacy & Security › \
+                     Full Disk Access and Finder selects Timbre; the user drags Timbre into the list and switches it on \
+                     (or clicks +, presses ⌘⇧G and pastes {}).",
+                    app.display()
+                );
+                text.push_str(if by_itself {
+                    " Timbre notices within seconds and starts working by itself: nothing to restart."
+                } else {
+                    " Then the user turns the Timbre extension off and on in Claude's settings."
+                });
+                if let Some(other) = crate::responsibility::checked_for().filter(|w| !w.starts_with("timbre ")) {
+                    text.push_str(&format!(
+                        "\n\nmacOS checks the access of {other}, which started Timbre, instead of Timbre's own: \
+                         give Full Disk Access to that program, or update Timbre."
+                    ));
+                }
+                text
+            }
+            Problem::NoMail => format!(
+                "Apple Mail has no data on this Mac yet ({error}). Ask the user to open Mail, add their email \
+                 accounts and let Mail download the messages. {}",
+                if by_itself {
+                    "Timbre starts working by itself once Mail's data is there."
+                } else {
+                    "Then turn the Timbre extension off and on in Claude's settings."
+                }
+            ),
+            Problem::Index => format!(
+                "{error}\n\nAsk the user to turn the Timbre extension off and on in Claude's settings. A damaged \
+                 index file has been set aside: Timbre then builds a new one, and searches meanwhile use subjects \
+                 and senders."
+            ),
+            Problem::Other => format!(
+                "Timbre cannot open Mail's data: {error}\n\nAsk the user to check that Mail opens and shows their \
+                 messages, and to update Timbre ({}). {}",
+                env!("CARGO_PKG_REPOSITORY"),
+                if by_itself { "Timbre retries by itself every few seconds." } else { "" }
+            ),
         }
-        text
     }
 }
 
@@ -78,9 +138,25 @@ pub fn open_permission_settings() -> String {
     )
 }
 
+/// Open System Settings where the user lets Timbre act in Mail.
+pub fn open_automation_settings() -> String {
+    if !cfg!(target_os = "macos") {
+        return "Only available on macOS.".into();
+    }
+    let opened = std::process::Command::new("/usr/bin/open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+        .status()
+        .is_ok_and(|s| s.success());
+    format!(
+        "{} Ask the user to find Timbre in the list, switch on Mail under it, then try again. If Timbre is not \
+         listed, macOS asks the next time Timbre acts in Mail: the user answers OK.",
+        if opened { "System Settings is open at Automation." } else { "Could not open System Settings." }
+    )
+}
+
 impl ServerHandler for Degraded {
     fn get_info(&self) -> ServerConfig {
-        crate::server::server_info()
+        self.info.clone()
     }
 
     async fn list_tools(
@@ -96,8 +172,21 @@ impl ServerHandler for Degraded {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if !self.tools.iter().any(|t| t.name == request.name) {
+            return Err(ErrorData::invalid_params("tool not found", None));
+        }
         if request.name == "open_permission_settings" {
-            let text = tokio::task::spawn_blocking(open_permission_settings).await.unwrap_or_default();
+            let automation = request
+                .arguments
+                .as_ref()
+                .and_then(|a| a.get("pane"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|p| p.trim().eq_ignore_ascii_case("automation"));
+            let text = tokio::task::spawn_blocking(move || {
+                if automation { open_automation_settings() } else { open_permission_settings() }
+            })
+            .await
+            .unwrap_or_default();
             return Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into());
         }
         Ok(CallToolResult::error(vec![ContentBlock::text(self.problem())]).into())

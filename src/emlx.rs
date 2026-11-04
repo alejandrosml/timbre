@@ -142,21 +142,55 @@ pub fn attachments_dir(emlx: &Path, id: i64) -> Option<PathBuf> {
     d.is_dir().then_some(d)
 }
 
-/// Find a stripped attachment body for a partial message by file name.
-pub fn find_external_attachment(emlx: &Path, id: i64, name: &str) -> Option<PathBuf> {
+/// Find the stripped body of an attachment of a partial message: in the
+/// folder of its MIME section, else by its name. A lone file is taken only
+/// when the message has a single attachment: never another one's bytes
+/// under this one's name.
+pub fn find_external_attachment(emlx: &Path, id: i64, a: &crate::mime::AttachmentData) -> Option<External> {
+    // Next to the message: `<id>.<section>.emlxpart`, the body still encoded.
+    if let (Some(section), Some(messages)) = (&a.section, emlx.parent()) {
+        let part = messages.join(format!("{id}.{section}.emlxpart"));
+        if part.is_file() {
+            return Some(External { path: part, encoded: true });
+        }
+    }
+    let found = |path: PathBuf| Some(External { path, encoded: false });
     let dir = attachments_dir(emlx, id)?;
-    let files: Vec<PathBuf> = WalkDir::new(&dir)
-        .max_depth(3)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.into_path())
-        .collect();
-    files
-        .iter()
-        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy() == name))
-        .cloned()
-        .or_else(|| (files.len() == 1).then(|| files[0].clone()))
+    let files_in = |d: &Path, depth: usize| -> Vec<PathBuf> {
+        WalkDir::new(d)
+            .max_depth(depth)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.into_path())
+            .collect()
+    };
+    if let Some(section) = &a.section {
+        let in_section = files_in(&dir.join(section), 1);
+        if in_section.len() == 1 {
+            return found(in_section[0].clone());
+        }
+    }
+    let files = files_in(&dir, 3);
+    let named = |p: &PathBuf| {
+        p.file_name().is_some_and(|n| {
+            let n = n.to_string_lossy();
+            n == a.name || crate::mime::safe_filename(Some(&n), "") == a.name
+        })
+    };
+    let mut matching = files.iter().filter(|p| named(p));
+    match (matching.next(), matching.next()) {
+        (Some(p), None) => found(p.clone()),
+        _ if a.of == 1 && files.len() == 1 => found(files[0].clone()),
+        _ => None,
+    }
+}
+
+/// Where the body of a partially downloaded message's attachment is.
+pub struct External {
+    pub path: PathBuf,
+    /// Still in its transfer encoding (an `.emlxpart`).
+    pub encoded: bool,
 }
 
 #[cfg(test)]

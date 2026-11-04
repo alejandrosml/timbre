@@ -32,6 +32,14 @@ struct Reader {
 /// A locked reader connection (Mail's database attached as `mail`).
 pub struct Db<'a>(MutexGuard<'a, Reader>);
 
+impl Db<'_> {
+    /// How Mail's database is open right now (it moves to a live view once
+    /// Mail runs).
+    pub fn mode(&self) -> OpenMode {
+        self.0.mode
+    }
+}
+
 impl Deref for Db<'_> {
     type Target = Connection;
     fn deref(&self) -> &Connection {
@@ -52,6 +60,23 @@ pub struct Ctx {
 impl Ctx {
     pub fn new(cfg: Config, store: Arc<Store>, progress: Arc<Progress>) -> Result<Ctx> {
         let (conn, mode) = index::open_with_mode(&cfg, &store, false)?;
+        // Every read joins Timbre's own table, with the columns this version
+        // added: make sure they are there (another Timbre, older, may have
+        // kept the file busy when they were to be added), and fail now, with
+        // the reason, rather than on each tool.
+        let ready = |c: &rusqlite::Connection| c.prepare("SELECT attachments, parser FROM main.docs LIMIT 0").is_ok();
+        for _ in 0..3 {
+            if ready(&conn) {
+                break;
+            }
+            if let Err(e) = index::open(&cfg, &store, true) {
+                tracing::warn!("index: could not update its tables yet: {e:#}");
+            }
+        }
+        conn.query_row("SELECT count(*) FROM main.docs WHERE id = 0", [], |r| r.get::<_, i64>(0))?;
+        if !ready(&conn) {
+            anyhow::bail!("Timbre's index is held by another Timbre and could not be updated");
+        }
         let undo = crate::actions::load_undo(&cfg);
         Ok(Ctx {
             cfg,
@@ -77,6 +102,23 @@ impl Ctx {
         Db(g)
     }
 
+    /// Keep the work behind relevance ranking (who the user writes to) done
+    /// in the background, every ten minutes, rather than on a search.
+    pub fn keep_warm(self: &Arc<Self>) {
+        let ctx = Arc::clone(self);
+        let _ = std::thread::Builder::new().name("timbre-warm".into()).spawn(move || {
+            loop {
+                {
+                    let db = ctx.db();
+                    if let Err(e) = crate::search::refresh_correspondents_older_than(&db, &ctx.store, 60) {
+                        tracing::info!("correspondents: {e}");
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(600));
+            }
+        });
+    }
+
     pub fn meta(&self, id: i64) -> Result<Meta, String> {
         self.store
             .get_meta(&self.db(), id)
@@ -88,8 +130,9 @@ impl Ctx {
     pub fn raw(&self, id: i64) -> Result<(Vec<u8>, emlx::Located), String> {
         let loc = {
             let conn = self.db();
-            self.locator.locate(&conn, &self.store, id)
+            self.locator.locate_fast(&conn, &self.store, id)
         }
+        .or_else(|| self.locator.locate_by_scan(&self.store, id))
         .ok_or_else(|| format!("The content of message {id} is not on this Mac (not downloaded by Mail yet?)."))?;
         let raw = emlx::read_message(&loc.path).map_err(|e| format!("could not read message {id}: {e}"))?;
         Ok((raw, loc))
@@ -204,7 +247,11 @@ pub fn read_mail(ctx: &Ctx, p: &ReadParams) -> Result<MailView, String> {
             view.attachments = parsed.attachments.iter().filter(|a| !a.inline).cloned().collect();
             view.message_id = parsed.message_id.clone();
             view.unsubscribe = parsed.list_unsubscribe.clone();
-            let body = if p.strip_quotes.unwrap_or(false) { quote::strip_quotes(&parsed.body) } else { parsed.body };
+            let body = if p.strip_quotes.unwrap_or(false) {
+                quote::strip_quotes_of(&parsed.body, &parsed.subject)
+            } else {
+                parsed.body
+            };
             let (b, cut) = clip(&body, max);
             view.body = security::fence(&b);
             view.truncated = cut;
@@ -270,14 +317,18 @@ pub fn get_thread(ctx: &Ctx, p: &ThreadParams) -> Result<ThreadView, String> {
     let mut messages = vec![];
     for m in metas {
         let (mailbox, _) = ctx.mailbox_names(m.id, m.mailbox);
-        let text = ctx
-            .raw(m.id)
-            .ok()
-            .and_then(|(raw, _)| mime::parse(&raw))
-            .map(|p| quote::strip_quotes(&p.body))
-            .unwrap_or_default();
-        let (text, truncated) = clip(&text, per);
-        let text = security::fence(&text);
+        let parsed = ctx.raw(m.id).ok().and_then(|(raw, _)| mime::parse(&raw));
+        let attachments =
+            parsed.as_ref().map_or(m.attachments, |p| p.attachments.iter().filter(|a| !a.inline).count() as i64);
+        let (text, truncated) = match parsed {
+            Some(p) => {
+                let (t, cut) = clip(&quote::strip_quotes_of(&p.body, &p.subject), per);
+                (security::fence(&t), cut)
+            }
+            None => {
+                ("(The content of this message is not on this Mac: Mail has not downloaded it.)".to_string(), false)
+            }
+        };
         messages.push(ThreadMessage {
             id: m.id,
             date: iso_local(m.date).unwrap_or_default(),
@@ -285,7 +336,7 @@ pub fn get_thread(ctx: &Ctx, p: &ThreadParams) -> Result<ThreadView, String> {
             subject: m.subject,
             mailbox,
             unread: m.unread,
-            attachments: m.attachments,
+            attachments,
             text,
             truncated,
         });
@@ -324,9 +375,16 @@ pub fn list_mailboxes(ctx: &Ctx) -> Result<MailboxesView, String> {
     let mailboxes = ctx.store.mailboxes();
     let mut list: Vec<_> = mailboxes.values().collect();
     list.sort_by_key(|m| (m.account.to_lowercase(), m.role != Role::Inbox, m.display_path().to_lowercase()));
+    // Empty folders that only hold others ("[Gmail]") are left out; an empty
+    // folder of the user's is listed, so it can be found and filed into.
+    let parents: std::collections::HashSet<(String, String)> = mailboxes
+        .values()
+        .filter(|m| m.path.len() > 1)
+        .map(|m| (m.account_id.clone() + &m.account, m.path[..m.path.len() - 1].join("/")))
+        .collect();
     for m in list {
         let (total, unread) = counts.get(&m.id).copied().unwrap_or((0, 0));
-        if total == 0 && m.role == Role::Other {
+        if total == 0 && parents.contains(&(m.account_id.clone() + &m.account, m.display_path())) {
             continue;
         }
         by_account.entry(m.account.clone()).or_default().push(MailboxView {
@@ -365,23 +423,24 @@ pub struct AttachmentText {
     pub notice: String,
 }
 
-fn attachment(ctx: &Ctx, id: i64, index: usize) -> Result<(String, String, Vec<u8>), String> {
+fn attachment(ctx: &Ctx, id: i64, index: usize) -> Result<mime::AttachmentData, String> {
     let (raw, loc) = ctx.raw(id)?;
-    let (name, mime, mut bytes) = mime::attachment_bytes(&raw, index)
+    let mut a = mime::attachment_bytes(&raw, index)
         .ok_or_else(|| format!("Message {id} has no attachment {index}. See read_mail."))?;
-    if bytes.is_empty() && loc.partial {
-        let ext = emlx::find_external_attachment(&loc.path, id, &name).ok_or_else(|| {
+    if a.bytes.is_empty() && loc.partial {
+        let ext = emlx::find_external_attachment(&loc.path, id, &a).ok_or_else(|| {
             "This attachment has not been downloaded by Mail yet: open the message in Mail first.".to_string()
         })?;
-        bytes = std::fs::read(ext).map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(&ext.path).map_err(|e| e.to_string())?;
+        a.bytes = if ext.encoded { mime::decode_part_body(&bytes, a.transfer_encoding.as_deref()) } else { bytes };
     }
-    Ok((name, mime, bytes))
+    Ok(a)
 }
 
 pub fn read_attachment(ctx: &Ctx, p: &AttachmentParams) -> Result<AttachmentText, String> {
-    let (name, mime, bytes) = attachment(ctx, p.id, p.index)?;
+    let mime::AttachmentData { name, mime, bytes, charset, .. } = attachment(ctx, p.id, p.index)?;
     let max = p.max_chars.unwrap_or(20_000).clamp(200, 200_000) as usize;
-    let text = crate::extract::to_text(&name, &mime, &bytes)?;
+    let text = crate::extract::to_text(&name, &mime, &bytes, charset.as_deref())?;
     let (text, truncated) = clip(&text, max);
     let text = security::fence(&text);
     Ok(AttachmentText { name, mime, size: bytes.len(), text, truncated, notice: UNTRUSTED.to_string() })
@@ -394,7 +453,7 @@ pub struct SavedAttachment {
 }
 
 pub fn save_attachment(ctx: &Ctx, p: &AttachmentParams) -> Result<SavedAttachment, String> {
-    let (name, _mime, bytes) = attachment(ctx, p.id, p.index)?;
+    let mime::AttachmentData { name, bytes, .. } = attachment(ctx, p.id, p.index)?;
     let dir = &ctx.cfg.attachments_dir;
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let path = unique_path(dir, &name);
@@ -454,7 +513,9 @@ pub struct StatusView {
     pub permissions_checked_for: Option<String>,
     pub mail_store: String,
     pub open_mode: String,
+    /// Messages in Mail, all mailboxes.
     pub messages: i64,
+    /// Unread messages, junk and trash (the mailboxes search skips) aside.
     pub unread: i64,
     pub accounts: Vec<String>,
     pub index: ProgressView,
@@ -481,21 +542,31 @@ fn index_bytes(cfg: &crate::config::Config) -> Option<u64> {
 }
 
 pub fn status(ctx: &Ctx) -> Result<StatusView, String> {
-    let (messages, unread) = ctx.store.stats(&ctx.db()).map_err(|e| e.to_string())?;
+    let skip = ctx.store.skipped_mailboxes(&ctx.cfg.excluded_roles);
+    let (messages, unread, mode) = {
+        let db = ctx.db();
+        let (m, u) = ctx.store.stats(&db, &skip).map_err(|e| e.to_string())?;
+        (m, u, db.mode())
+    };
     let mut hints = vec![];
-    if ctx.store.open_mode == crate::store::OpenMode::Immutable {
+    if mode == OpenMode::Immutable {
         hints.push("Mail seems closed: the newest messages may be missing until Mail is opened.".to_string());
     }
     let index = ctx.progress.view();
     if index.state == "failed" {
         hints.push("The full-text index failed; searches use subjects and senders only. See index.error.".to_string());
+    } else if index.error.is_some() {
+        hints.push(
+            "New mail is not being added to the full-text index; older mail is still found. See index.error."
+                .to_string(),
+        );
     }
     Ok(StatusView {
         version: env!("CARGO_PKG_VERSION").to_string(),
         binary: std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
         permissions_checked_for: crate::responsibility::checked_for(),
         mail_store: ctx.store.version_dir.display().to_string(),
-        open_mode: format!("{:?}", ctx.store.open_mode).to_lowercase(),
+        open_mode: format!("{mode:?}").to_lowercase(),
         messages,
         unread,
         accounts: ctx.store.account_names(),

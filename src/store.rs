@@ -78,45 +78,225 @@ impl Role {
     }
 
     /// Guess a mailbox's role from its (possibly localized) name.
+    #[cfg(test)]
     pub fn detect(path: &[String]) -> Role {
-        let Some(last) = path.last() else { return Role::Other };
-        let n = last.to_lowercase();
-        let words: Vec<&str> = n.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
-        let has = |p: &str| n.contains(p);
-        let word = |w: &str| words.contains(&w);
-        if path.len() == 1 && n == "inbox" || n == "boîte de réception" || n == "bandeja de entrada" {
-            Role::Inbox
-        } else if has("draft") || has("brouillon") || has("borrador") {
-            Role::Drafts
-        } else if has("junk")
-            || has("spam")
-            || has("indésirable")
-            || has("indesirable")
-            || has("no deseado")
-            || has("quarantaine")
-            || has("quarantine")
-            || word("bulk")
-        {
-            Role::Junk
-        } else if has("trash")
-            || has("deleted")
-            || has("corbeille")
-            || has("papelera")
-            || has("supprimé")
-            || has("eliminad")
-            || word("bin")
-        {
-            Role::Trash
-        } else if has("sent") || has("envoy") || has("enviad") || word("outbox") {
-            // Orange and La Poste name the sent mailbox OUTBOX.
-            Role::Sent
-        } else if has("archiv") || n == "all mail" || n == "tous les messages" || n == "todos" {
-            Role::Archive
-        } else {
-            Role::Other
+        Role::detect_scored(path).0
+    }
+
+    /// The role and how sure the guess is: 2 for a name Mail or a provider
+    /// gives that mailbox ("Sent Messages", "[Gmail]/Corbeille"), 1 for a
+    /// name holding such a word ("Old Spam"), 0 for none. Whole words only:
+    /// "Présentations" is not a sent mailbox, nor "Essentiel".
+    pub fn detect_scored(path: &[String]) -> (Role, u8) {
+        let Some(last) = path.last() else { return (Role::Other, 0) };
+        let n = last.trim().to_lowercase();
+        if (path.len() == 1 && n == "inbox") || INBOX_NAMES.contains(&n.as_str()) {
+            return (Role::Inbox, 2);
         }
+        // Gmail's All Mail, in its languages: only under "[Gmail]". A label of
+        // the user's named "Todos" is no archive.
+        if GMAIL_ALL_MAIL.contains(&n.as_str()) {
+            let under_gmail = path.len() >= 2 && path[path.len() - 2].trim_start().starts_with('[');
+            return if under_gmail { (Role::Archive, 2) } else { (Role::Other, 0) };
+        }
+        for (role, names, _) in ROLE_NAMES {
+            if names.contains(&n.as_str()) {
+                return (*role, 2);
+            }
+        }
+        let words: Vec<&str> = n.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        for (role, _, keywords) in ROLE_NAMES {
+            if words.iter().any(|w| keywords.contains(w)) {
+                return (*role, 1);
+            }
+        }
+        (Role::Other, 0)
     }
 }
+
+const GMAIL_ALL_MAIL: &[&str] = &[
+    "all mail",
+    "tous les messages",
+    "todos",
+    "todos los mensajes",
+    "alle nachrichten",
+    "tutti i messaggi",
+    "todos os e-mails",
+    "alle e-mail",
+];
+
+const INBOX_NAMES: &[&str] = &[
+    "boîte de réception",
+    "bandeja de entrada",
+    "posteingang",
+    "posta in arrivo",
+    "postvak in",
+    "caixa de entrada",
+    "inkorg",
+    "innboks",
+    "indbakke",
+    "saapuneet",
+    "odebrane",
+    "doručená pošta",
+];
+
+/// For each role (in the order they are tried): names that mailbox is given
+/// by Mail or a provider, and words that point to it inside other names.
+const ROLE_NAMES: &[(Role, &[&str], &[&str])] = &[
+    (
+        Role::Drafts,
+        &[
+            "drafts",
+            "draft",
+            "brouillons",
+            "brouillon",
+            "borradores",
+            "borrador",
+            "entwürfe",
+            "bozze",
+            "concepten",
+            "rascunhos",
+            "kladder",
+            "utkast",
+            "luonnokset",
+            "szkice",
+        ],
+        &["drafts", "draft", "brouillons", "brouillon", "borradores", "borrador", "entwürfe", "concepten", "rascunhos"],
+    ),
+    (
+        Role::Junk,
+        &[
+            "junk",
+            "junk e-mail",
+            "junk email",
+            "junk mail",
+            "spam",
+            "bulk mail",
+            "courrier indésirable",
+            "indésirables",
+            "indésirable",
+            "pourriel",
+            "pourriels",
+            "quarantaine",
+            "quarantine",
+            "correo no deseado",
+            "no deseado",
+            "spam-verdacht",
+            "spamverdacht",
+            "junk-e-mail",
+            "werbung",
+            "posta indesiderata",
+            "ongewenste e-mail",
+            "ongewenste mail",
+            "lixo eletrônico",
+            "lixo eletrónico",
+            "lixo electrónico",
+            "skräppost",
+            "uønsket e-post",
+            "uønsket post",
+            "roskaposti",
+            "wiadomości-śmieci",
+            "nevyžádaná pošta",
+        ],
+        &[
+            "junk",
+            "spam",
+            "indésirable",
+            "indésirables",
+            "indesirable",
+            "indesirables",
+            "pourriel",
+            "pourriels",
+            "quarantaine",
+            "quarantine",
+            "bulk",
+            "spamverdacht",
+            "ongewenste",
+        ],
+    ),
+    (
+        Role::Trash,
+        &[
+            "trash",
+            "deleted messages",
+            "deleted items",
+            "deleted",
+            "bin",
+            "corbeille",
+            "éléments supprimés",
+            "messages supprimés",
+            "papelera",
+            "elementos eliminados",
+            "papierkorb",
+            "gelöschte objekte",
+            "gelöschte elemente",
+            "cestino",
+            "eliminati",
+            "elementi eliminati",
+            "prullenbak",
+            "verwijderde items",
+            "lixo",
+            "lixeira",
+            "itens excluídos",
+            "itens eliminados",
+            "papperskorgen",
+            "borttagna objekt",
+            "slettet post",
+            "slettede elementer",
+            "roskakori",
+            "poistetut",
+            "kosz",
+            "elementy usunięte",
+            "koš",
+        ],
+        &["trash", "deleted", "corbeille", "papelera", "supprimés", "supprimes", "eliminados", "prullenbak", "lixeira"],
+    ),
+    (
+        Role::Sent,
+        &[
+            "sent",
+            "sent messages",
+            "sent items",
+            "sent mail",
+            "sent-mail",
+            "envoyés",
+            "envoyes",
+            "messages envoyés",
+            "éléments envoyés",
+            "enviados",
+            "elementos enviados",
+            "correo enviado",
+            "mensajes enviados",
+            "gesendet",
+            "gesendete objekte",
+            "gesendete elemente",
+            "posta inviata",
+            "inviati",
+            "elementi inviati",
+            "verzonden",
+            "verzonden items",
+            "itens enviados",
+            "e-mails enviados",
+            "skickat",
+            "skickade objekt",
+            "sendt",
+            "sendte elementer",
+            "sendt post",
+            "lähetetyt",
+            "wysłane",
+            "elementy wysłane",
+            "odeslaná pošta",
+            // Orange and La Poste name their sent mailbox OUTBOX.
+            "outbox",
+        ],
+        &["sent", "envoyés", "envoyes", "enviados", "gesendet", "outbox", "verzonden", "inviati"],
+    ),
+    (
+        Role::Archive,
+        &["archive", "archives", "archivo", "archiv", "archivio", "arquivo", "archief", "arkiv", "arkisto", "archiwum"],
+        &["archive", "archives", "archivo", "archiv", "archivio", "arquivo", "archief"],
+    ),
+];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Mailbox {
@@ -130,6 +310,9 @@ pub struct Mailbox {
     pub path: Vec<String>,
     pub name: String,
     pub role: Role,
+    /// How sure the role is (see [`Role::detect_scored`]).
+    #[serde(skip)]
+    pub role_strength: u8,
     /// "On My Mac" mailbox (not under an account).
     pub local: bool,
 }
@@ -147,6 +330,7 @@ pub struct Schema {
     pub unread: String,
     pub flagged: String,
     pub not_deleted: String,
+    /// Attachments a reader sees; NULL when unknown. Needs [`Store::DOCS_JOIN`].
     pub attach_count: String,
     pub flag_color: String,
     pub date_sent: String,
@@ -167,7 +351,7 @@ pub struct Store {
     pub schema: Schema,
     pub epoch_offset: i64,
     pub open_mode: OpenMode,
-    accounts: HashMap<String, String>,
+    accounts: HashMap<String, (String, Option<String>)>,
     /// The user's addresses known from the account settings (lower case).
     pub account_addresses: Vec<String>,
     mailboxes: RwLock<Arc<HashMap<i64, Mailbox>>>,
@@ -190,6 +374,8 @@ pub struct Meta {
     pub mailbox: i64,
     pub size: i64,
     pub conversation: i64,
+    /// Marked deleted in Mail, not removed yet.
+    pub deleted: bool,
 }
 
 /// Locate `~/Library/Mail/V<n>` holding `MailData/Envelope Index`.
@@ -277,10 +463,14 @@ fn detect_schema(conn: &Connection) -> Result<Schema> {
         } else {
             "1".into()
         },
+        // Mail counts inline images too, and writes 63 when it does not
+        // know: Timbre's own count (docs.attachments) comes first.
         attach_count: if flags {
-            format!("((m.flags >> {FLAG_ATTACH_SHIFT}) & {FLAG_ATTACH_MASK})")
+            format!(
+                "COALESCE(d.attachments, NULLIF(((m.flags >> {FLAG_ATTACH_SHIFT}) & {FLAG_ATTACH_MASK}), {FLAG_ATTACH_MASK}))"
+            )
         } else {
-            "0".into()
+            "d.attachments".into()
         },
         flag_color: if flags { format!("((m.flags & {FLAG_COLOR_MASK}) >> {FLAG_COLOR_SHIFT})") } else { "-1".into() },
         date_sent: if has("date_sent") { "m.date_sent".into() } else { "m.date_received".into() },
@@ -343,7 +533,8 @@ fn load_account_addresses(path: &Path) -> Vec<String> {
     stmt.query_map([], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
 }
 
-fn load_accounts(path: &Path) -> HashMap<String, String> {
+/// Account id → (name, user name), from the account settings.
+fn load_accounts(path: &Path) -> HashMap<String, (String, Option<String>)> {
     let Ok(conn) =
         Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
     else {
@@ -351,20 +542,60 @@ fn load_accounts(path: &Path) -> HashMap<String, String> {
     };
     let sql = "SELECT a.ZIDENTIFIER,
                       COALESCE(NULLIF(p.ZACCOUNTDESCRIPTION, ''), NULLIF(a.ZACCOUNTDESCRIPTION, ''),
-                               NULLIF(p.ZUSERNAME, ''), NULLIF(a.ZUSERNAME, ''))
+                               NULLIF(p.ZUSERNAME, ''), NULLIF(a.ZUSERNAME, '')),
+                      COALESCE(NULLIF(a.ZUSERNAME, ''), NULLIF(p.ZUSERNAME, ''))
                FROM ZACCOUNT a LEFT JOIN ZACCOUNT p ON a.ZPARENTACCOUNT = p.Z_PK
                WHERE a.ZIDENTIFIER IS NOT NULL";
     let mut out = HashMap::new();
     if let Ok(mut stmt) = conn.prepare(sql)
-        && let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)))
+        && let Ok(rows) = stmt.query_map([], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+        })
     {
-        for (id, name) in rows.flatten() {
+        for (id, name, user) in rows.flatten() {
             if let (Some(id), Some(name)) = (id, name) {
-                out.insert(id.to_uppercase(), name);
+                out.insert(id.to_uppercase(), (name, user.filter(|u| !u.trim().is_empty())));
             }
         }
     }
     out
+}
+
+/// Is mailbox `m` in this account? By id when there is one ("On My Mac"
+/// has none), never by a name two accounts may share.
+pub fn same_account(m: &Mailbox, account_id: &str, account: &str) -> bool {
+    if account_id.is_empty() { m.account_id.is_empty() && m.account == account } else { m.account_id == account_id }
+}
+
+/// Accounts are told apart by name: when two accounts with mail share one
+/// ("Google", "Exchange"), each gets its user name, or a number, added.
+fn tell_accounts_apart(map: &mut HashMap<i64, Mailbox>, accounts: &HashMap<String, (String, Option<String>)>) {
+    let mut ids_by_name: HashMap<String, Vec<String>> = HashMap::new();
+    for m in map.values().filter(|m| !m.account_id.is_empty()) {
+        let ids = ids_by_name.entry(m.account.clone()).or_default();
+        if !ids.contains(&m.account_id) {
+            ids.push(m.account_id.clone());
+        }
+    }
+    let mut renamed: HashMap<String, String> = HashMap::new();
+    for (name, mut ids) in ids_by_name.into_iter().filter(|(_, ids)| ids.len() > 1) {
+        ids.sort();
+        for (k, id) in ids.iter().enumerate() {
+            let user = accounts.get(id).and_then(|(_, u)| u.clone()).filter(|u| *u != name);
+            renamed.insert(
+                id.clone(),
+                match user {
+                    Some(u) => format!("{name} ({u})"),
+                    None => format!("{name} ({})", k + 1),
+                },
+            );
+        }
+    }
+    for m in map.values_mut() {
+        if let Some(n) = renamed.get(&m.account_id) {
+            m.account = n.clone();
+        }
+    }
 }
 
 fn looks_like_uuid(s: &str) -> bool {
@@ -373,7 +604,7 @@ fn looks_like_uuid(s: &str) -> bool {
 
 /// Parse a mailbox URL such as `imap://<UUID>/INBOX`, `ews://<UUID>/Inbox`
 /// or `local:///Drafts`.
-pub fn parse_mailbox_url(id: i64, url: &str, accounts: &HashMap<String, String>) -> Mailbox {
+pub fn parse_mailbox_url(id: i64, url: &str, accounts: &HashMap<String, (String, Option<String>)>) -> Mailbox {
     let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
     let (netloc, path) = rest.split_once('/').unwrap_or((rest, ""));
     let segments: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(percent_decode).collect();
@@ -382,15 +613,15 @@ pub fn parse_mailbox_url(id: i64, url: &str, accounts: &HashMap<String, String>)
     let account = if local {
         "On My Mac".to_string()
     } else if !account_id.is_empty() {
-        accounts.get(&account_id).cloned().unwrap_or_else(|| account_id.clone())
+        accounts.get(&account_id).map(|(name, _)| name.clone()).unwrap_or_else(|| account_id.clone())
     } else {
         // Older form: user%40host@server
         let user = netloc.rsplit_once('@').map(|(u, _)| u).unwrap_or(netloc);
         percent_decode(user)
     };
     let name = segments.last().cloned().unwrap_or_else(|| url.to_string());
-    let role = Role::detect(&segments);
-    Mailbox { id, url: url.to_string(), account_id, account, path: segments, name, role, local }
+    let (role, role_strength) = Role::detect_scored(&segments);
+    Mailbox { id, url: url.to_string(), account_id, account, path: segments, name, role, role_strength, local }
 }
 
 impl Store {
@@ -427,6 +658,7 @@ impl Store {
         for (id, url) in rows.flatten() {
             map.insert(id, parse_mailbox_url(id, url.as_deref().unwrap_or(""), &self.accounts));
         }
+        tell_accounts_apart(&mut map, &self.accounts);
         *self.mailboxes.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(map);
         Ok(())
     }
@@ -462,8 +694,8 @@ impl Store {
         let s = &self.schema;
         format!(
             "m.ROWID, {prefix} || COALESCE(s.subject, ''), COALESCE(a.comment, ''), COALESCE(a.address, ''), \
-             COALESCE(m.date_received, 0), COALESCE({sent}, 0), {unread}, {flagged}, {color}, {attach}, \
-             m.mailbox, {size}, {conv}",
+             COALESCE(m.date_received, 0), COALESCE({sent}, 0), {unread}, {flagged}, {color}, COALESCE({attach}, 0), \
+             m.mailbox, {size}, {conv}, NOT {live}",
             prefix = s.subject_prefix,
             sent = s.date_sent,
             unread = s.unread,
@@ -472,11 +704,14 @@ impl Store {
             attach = s.attach_count,
             size = s.size,
             conv = s.conversation,
+            live = s.not_deleted,
         )
     }
 
     pub const META_JOINS: &'static str =
         "LEFT JOIN mail.subjects s ON s.ROWID = m.subject LEFT JOIN mail.addresses a ON a.ROWID = m.sender";
+    /// Timbre's own row for a message (alias `d`): what it read in the file.
+    pub const DOCS_JOIN: &'static str = "LEFT JOIN main.docs d ON d.id = m.ROWID";
 
     /// Read a [`Meta`] from the columns produced by [`Store::meta_columns`],
     /// starting at `at`.
@@ -487,7 +722,7 @@ impl Store {
         let sent: f64 = row.get::<_, Option<f64>>(at + 5)?.unwrap_or(0.0);
         Ok(Meta {
             id: row.get(at)?,
-            subject: row.get(at + 1)?,
+            subject: crate::mime::one_line(&row.get::<_, String>(at + 1)?),
             from: fmt_addr(Some(&name), Some(&addr)),
             from_addr: addr,
             date: self.to_unix(date as i64),
@@ -499,12 +734,17 @@ impl Store {
             mailbox: row.get(at + 10)?,
             size: row.get(at + 11)?,
             conversation: row.get(at + 12)?,
+            deleted: row.get::<_, Option<i64>>(at + 13)?.unwrap_or(0) != 0,
         })
     }
 
     pub fn get_meta(&self, conn: &Connection, id: i64) -> Result<Option<Meta>> {
-        let sql =
-            format!("SELECT {} FROM mail.messages m {} WHERE m.ROWID = ?1", self.meta_columns(), Self::META_JOINS);
+        let sql = format!(
+            "SELECT {} FROM mail.messages m {} {} WHERE m.ROWID = ?1",
+            self.meta_columns(),
+            Self::META_JOINS,
+            Self::DOCS_JOIN
+        );
         Ok(conn.query_row(&sql, [id], |r| self.row_meta(r, 0)).optional()?)
     }
 
@@ -514,9 +754,10 @@ impl Store {
         }
         let list = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT {} FROM mail.messages m {} WHERE m.ROWID IN ({list})",
+            "SELECT {} FROM mail.messages m {} {} WHERE m.ROWID IN ({list})",
             self.meta_columns(),
-            Self::META_JOINS
+            Self::META_JOINS,
+            Self::DOCS_JOIN
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |r| self.row_meta(r, 0))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -553,7 +794,21 @@ impl Store {
         Ok((to, cc))
     }
 
-    /// Messages of the same Mail conversation, oldest first.
+    /// The conversation of each of `ids` (0: none).
+    pub fn conversations_of(&self, conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, i64>> {
+        if ids.is_empty() || self.schema.conversation == "0" {
+            return Ok(HashMap::new());
+        }
+        let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        let sql =
+            format!("SELECT m.ROWID, {} FROM mail.messages m WHERE m.ROWID IN ({list})", self.schema.conversation);
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
+    /// Messages of the same Mail conversation, oldest first: the latest
+    /// `limit` of them.
     pub fn conversation_ids(&self, conn: &Connection, id: i64, limit: usize) -> Result<Vec<i64>> {
         if self.schema.conversation == "0" {
             return Ok(vec![id]);
@@ -566,14 +821,21 @@ impl Store {
             )
             .optional()?;
         let Some(conv) = conv.filter(|c| *c != 0) else { return Ok(vec![id]) };
+        // The bare column, so SQLite can use Mail's index on it.
+        let col = if self.schema.conversation.contains("conversation_id") {
+            "m.conversation_id"
+        } else {
+            self.schema.conversation.as_str()
+        };
         let sql = format!(
-            "SELECT m.ROWID FROM mail.messages m WHERE {} = ?1 AND {} ORDER BY m.date_received ASC LIMIT ?2",
-            self.schema.conversation, self.schema.not_deleted
+            "SELECT m.ROWID FROM mail.messages m WHERE {col} = ?1 AND {} ORDER BY m.date_received DESC, m.ROWID DESC LIMIT ?2",
+            self.schema.not_deleted
         );
         let mut stmt = conn.prepare(&sql)?;
-        let ids = stmt
+        let mut ids = stmt
             .query_map(rusqlite::params![conv, limit as i64], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
+        ids.reverse();
         Ok(if ids.is_empty() { vec![id] } else { ids })
     }
 
@@ -590,6 +852,45 @@ impl Store {
         }
     }
 
+    /// SQL condition on a message (alias `m`): search does not skip it.
+    /// Junk and trash always win, by mailbox or Gmail label. Other skipped
+    /// mailboxes (archive, sent…) skip a message only when it is not also
+    /// labelled somewhere else: a Gmail message stored in All Mail but
+    /// labelled Inbox is kept when archives are skipped.
+    pub fn outside_mailboxes(&self, skip: &[i64]) -> String {
+        let mailboxes = self.mailboxes();
+        let is_hard = |id: &i64| mailboxes.get(id).is_some_and(|m| matches!(m.role, Role::Junk | Role::Trash));
+        let list = |ids: &mut dyn Iterator<Item = &i64>| ids.map(i64::to_string).collect::<Vec<_>>().join(",");
+        let hard = list(&mut skip.iter().filter(|id| is_hard(id)));
+        let soft = list(&mut skip.iter().filter(|id| !is_hard(id)));
+        let all = list(&mut skip.iter());
+        let mut parts = vec![];
+        match &self.schema.labels {
+            Some(col) => {
+                if !hard.is_empty() {
+                    parts.push(format!(
+                        "m.mailbox NOT IN ({hard}) AND NOT EXISTS (SELECT 1 FROM mail.labels l \
+                         WHERE l.message_id = {col} AND l.mailbox_id IN ({hard}))"
+                    ));
+                }
+                if !soft.is_empty() {
+                    // In a skipped mailbox by storage or label (Gmail keeps
+                    // sent mail in All Mail, labelled Sent), and not
+                    // labelled anywhere searched: skipped.
+                    parts.push(format!(
+                        "NOT ((m.mailbox IN ({soft}) OR EXISTS (SELECT 1 FROM mail.labels l \
+                         WHERE l.message_id = {col} AND l.mailbox_id IN ({soft}))) \
+                         AND NOT EXISTS (SELECT 1 FROM mail.labels l WHERE l.message_id = {col} \
+                         AND l.mailbox_id NOT IN ({all}) AND l.mailbox_id != m.mailbox))"
+                    ));
+                }
+            }
+            None if !all.is_empty() => parts.push(format!("m.mailbox NOT IN ({all})")),
+            None => {}
+        }
+        if parts.is_empty() { "1".to_string() } else { format!("({})", parts.join(" AND ")) }
+    }
+
     /// The mailbox to show for a message: for Gmail, its inbox or most
     /// telling label rather than All Mail.
     pub fn display_mailbox(&self, conn: &Connection, id: i64, stored: i64) -> i64 {
@@ -603,6 +904,15 @@ impl Store {
             return stored;
         };
         let mailboxes = self.mailboxes();
+        // In the trash or junk, a message is there whatever labels it keeps
+        // (Gmail leaves the user's labels on what is thrown away).
+        let thrown = |mb: &i64| mailboxes.get(mb).is_some_and(|m| matches!(m.role, Role::Junk | Role::Trash));
+        if thrown(&stored) {
+            return stored;
+        }
+        if let Some(&mb) = labels.iter().filter(|mb| thrown(mb)).min() {
+            return mb;
+        }
         let rank = |mb: i64| match mailboxes.get(&mb) {
             Some(m) => match m.role {
                 Role::Inbox => 0,
@@ -667,22 +977,35 @@ impl Store {
         out
     }
 
+    /// The mailboxes search skips for `roles`: those named as Mail or the
+    /// provider names them ("Junk", "[Gmail]/Corbeille", "QUARANTAINE"),
+    /// never a folder of the user's that merely holds the word ("Old Spam").
+    pub fn skipped_mailboxes(&self, roles: &[String]) -> Vec<i64> {
+        self.mailboxes()
+            .values()
+            .filter(|m| m.role_strength == 2 && roles.iter().any(|r| r == m.role.as_str()))
+            .map(|m| m.id)
+            .collect()
+    }
+
     /// Mailbox ids whose role is in `roles` (e.g. junk, trash).
     pub fn mailboxes_with_roles(&self, roles: &[String]) -> Vec<i64> {
         self.mailboxes().values().filter(|m| roles.iter().any(|r| r == m.role.as_str())).map(|m| m.id).collect()
     }
 
     /// Accounts' mailbox with a given role (first match), e.g. Trash of an account.
+    /// The account's mailbox for a role: its usual name first, then the
+    /// shallowest, then the oldest — the same answer every time.
     pub fn role_mailbox_for_account(&self, account_id: &str, account: &str, role: Role) -> Option<Mailbox> {
         let mut candidates: Vec<Mailbox> = self
             .mailboxes()
             .values()
-            .filter(|m| {
-                m.role == role && ((!account_id.is_empty() && m.account_id == account_id) || m.account == account)
-            })
+            .filter(|m| m.role == role && same_account(m, account_id, account))
             .cloned()
             .collect();
-        candidates.sort_by_key(|m| m.path.len());
+        // Gmail's own mailboxes ("[Gmail]/…") before labels of the same name.
+        let system = |m: &Mailbox| m.path.first().is_some_and(|p| p.starts_with('['));
+        candidates.sort_by_key(|m| (std::cmp::Reverse(m.role_strength), !system(m), m.path.len(), m.id));
         candidates.into_iter().next()
     }
 
@@ -721,9 +1044,11 @@ impl Store {
         Ok((from, to))
     }
 
-    pub fn stats(&self, conn: &Connection) -> Result<(i64, i64)> {
+    /// (messages, unread messages outside the mailboxes `skip`).
+    pub fn stats(&self, conn: &Connection, skip: &[i64]) -> Result<(i64, i64)> {
+        let outside = if skip.is_empty() { "1".to_string() } else { self.outside_mailboxes(skip) };
         let sql = format!(
-            "SELECT COUNT(*), SUM(CASE WHEN {} THEN 1 ELSE 0 END) FROM mail.messages m WHERE {}",
+            "SELECT COUNT(*), SUM(CASE WHEN {} AND {outside} THEN 1 ELSE 0 END) FROM mail.messages m WHERE {}",
             self.schema.unread, self.schema.not_deleted
         );
         Ok(conn.query_row(&sql, [], |r| Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0))))?)
@@ -737,7 +1062,7 @@ mod tests {
     #[test]
     fn parses_mailbox_urls() {
         let mut acc = HashMap::new();
-        acc.insert("62653857-BF50-4534-AB81-8F72E0FCEDF5".to_string(), "iCloud".to_string());
+        acc.insert("62653857-BF50-4534-AB81-8F72E0FCEDF5".to_string(), ("iCloud".to_string(), None));
         let m = parse_mailbox_url(1, "imap://62653857-bf50-4534-ab81-8f72e0fcedf5/Archive/2024", &acc);
         assert_eq!(m.account, "iCloud");
         assert_eq!(m.path, vec!["Archive", "2024"]);
@@ -766,7 +1091,70 @@ mod tests {
         assert_eq!(r("Combined"), Role::Other);
         // Orange, Wanadoo and La Poste.
         assert_eq!(Role::detect(&["INBOX".into(), "OUTBOX".into()]), Role::Sent);
+        for (name, role) in [
+            ("Spamverdacht", Role::Junk),
+            ("Junk-E-Mail", Role::Junk),
+            ("Ongewenste e-mail", Role::Junk),
+            ("Lixo Eletrônico", Role::Junk),
+            ("Lixo", Role::Trash),
+            ("Prullenbak", Role::Trash),
+            ("Verwijderde items", Role::Trash),
+            ("Itens Excluídos", Role::Trash),
+            ("Verzonden items", Role::Sent),
+            ("Itens Enviados", Role::Sent),
+            ("Concepten", Role::Drafts),
+            ("Rascunhos", Role::Drafts),
+            ("Postvak IN", Role::Inbox),
+            ("Caixa de entrada", Role::Inbox),
+        ] {
+            assert_eq!(Role::detect(&["Compte".into(), name.into()]), role, "{name}");
+        }
+        assert_eq!(Role::detect(&["[Gmail]".into(), "Alle Nachrichten".into()]), Role::Archive);
+        assert_eq!(Role::detect(&["[Gmail]".into(), "Todos".into()]), Role::Archive);
+        assert_eq!(Role::detect(&["Todos".into()]), Role::Other, "a label of the user's");
         assert_eq!(Role::detect(&["INBOX".into(), "QUARANTAINE".into()]), Role::Junk);
         assert_eq!(Role::detect(&["INBOX".into(), "DRAFT".into()]), Role::Drafts);
+        // Gmail's mailboxes, in French.
+        assert_eq!(Role::detect(&["[Gmail]".into(), "Tous les messages".into()]), Role::Archive);
+        assert_eq!(Role::detect(&["[Gmail]".into(), "Messages envoyés".into()]), Role::Sent);
+        // Whole words only: these are the user's own folders.
+        for own in ["Présentations", "Représentants", "Consentements RGPD", "Essentiel", "Bingo", "Spammers?"] {
+            assert_eq!(r(own), Role::Other, "{own}");
+        }
+        assert_eq!(Role::detect_scored(&["Old Spam".into()]), (Role::Junk, 1));
+        assert_eq!(Role::detect_scored(&["Archives clients".into()]), (Role::Archive, 1));
+        assert_eq!(Role::detect_scored(&["Sent Messages".into()]), (Role::Sent, 2));
+    }
+
+    #[test]
+    fn accounts_are_told_apart_and_roles_chosen_the_same_way_every_time() {
+        let mut acc = HashMap::new();
+        let (a, b) = ("11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222");
+        acc.insert(a.to_string(), ("Google".to_string(), Some("ann@gmail.com".to_string())));
+        acc.insert(b.to_string(), ("Google".to_string(), Some("bob@gmail.com".to_string())));
+        let mut map = HashMap::new();
+        for (id, url) in [
+            (1, format!("imap://{a}/INBOX")),
+            (2, format!("imap://{b}/INBOX")),
+            (3, format!("imap://{a}/Archives%20clients")),
+            (4, format!("imap://{a}/Archive")),
+            (5, format!("imap://{b}/Archive")),
+        ] {
+            map.insert(id, parse_mailbox_url(id, &url, &acc));
+        }
+        tell_accounts_apart(&mut map, &acc);
+        assert_eq!(map[&1].account, "Google (ann@gmail.com)");
+        assert_eq!(map[&2].account, "Google (bob@gmail.com)");
+        let store_like = |role: Role| {
+            let mut c: Vec<&Mailbox> =
+                map.values().filter(|m| m.role == role && same_account(m, &map[&1].account_id, "")).collect();
+            c.sort_by_key(|m| (std::cmp::Reverse(m.role_strength), m.path.len(), m.id));
+            c.first().map(|m| m.id)
+        };
+        assert_eq!(
+            store_like(Role::Archive),
+            Some(4),
+            "the account's own Archive, not a folder or the other account's"
+        );
     }
 }

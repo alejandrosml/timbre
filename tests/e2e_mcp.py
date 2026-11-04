@@ -227,14 +227,36 @@ class Client:
                 return m["result"]
 
 late = tempfile.mkdtemp(prefix="timbre-e2e-late-")
+# Without access: a Mail folder this user cannot read (root reads anything,
+# so there the folder is missing instead, as when Mail was never set up).
+locked = os.geteuid() != 0
+if locked:
+    os.makedirs(f"{late}/Library/Mail")
+    os.chmod(f"{late}/Library/Mail", 0)
 c = Client(store_env(late, TIMBRE_LAUNCHER="1"))
 c.rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}})
 c.rpc("notifications/initialized", notify=True)
 waiting_tools = [t["name"] for t in c.rpc("tools/list")["tools"]]
 assert waiting_tools == names, (waiting_tools, names)
 r = c.rpc("tools/call", {"name": "search_mail", "arguments": {"query": "facture"}})
-assert r.get("isError") and "open_permission_settings" in r["content"][0]["text"], r
+text = r["content"][0]["text"]
+assert r.get("isError"), r
+if locked:
+    assert "open_permission_settings" in text and "Full Disk Access" in text, text
+else:
+    assert "Apple Mail has no data on this Mac yet" in text, text
+# A tool that is not in the list is refused, as by the full server.
+m = {"jsonrpc": "2.0", "id": 99999, "method": "tools/call", "params": {"name": "no_such_tool", "arguments": {}}}
+c.p.stdin.write(json.dumps(m) + "\n"); c.p.stdin.flush()
+while True:
+    reply = json.loads(c.p.stdout.readline())
+    if reply.get("id") == 99999:
+        break
+assert "error" in reply, reply
 print("before access: same tools, each says what to do")
+if locked:
+    os.chmod(f"{late}/Library/Mail", 0o755)
+    os.rmdir(f"{late}/Library/Mail")
 subprocess.run([binary, "dev-fixture", late], check=True)
 start = time.time()
 while True:

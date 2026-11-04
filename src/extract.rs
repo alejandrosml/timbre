@@ -13,16 +13,25 @@ fn ext(name: &str) -> String {
     name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default()
 }
 
-fn decode_text(bytes: &[u8]) -> String {
+/// Text of a text attachment: in its declared charset when it has one that
+/// is not UTF-8 (ISO-8859-15's €, Shift_JIS…), else UTF-8, else
+/// Windows-1252, the usual suspect for European mail.
+fn decode_text(bytes: &[u8], charset: Option<&str>) -> String {
+    let declared = charset
+        .and_then(|c| encoding_rs::Encoding::for_label(c.trim().as_bytes()))
+        .filter(|e| *e != encoding_rs::UTF_8 && *e != encoding_rs::WINDOWS_1252);
+    if let Some(enc) = declared {
+        let (cow, _, _) = enc.decode(bytes); // also honours a byte-order mark
+        return cow.into_owned();
+    }
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.trim_start_matches('\u{FEFF}').to_string();
     }
-    // Not UTF-8: Windows-1252 is the usual suspect for European mail.
     let (cow, _, _) = encoding_rs::WINDOWS_1252.decode(bytes);
     cow.into_owned()
 }
 
-pub fn to_text(name: &str, mime_type: &str, bytes: &[u8]) -> Result<String, String> {
+pub fn to_text(name: &str, mime_type: &str, bytes: &[u8], charset: Option<&str>) -> Result<String, String> {
     if bytes.len() > MAX_INPUT {
         return Err(format!(
             "This attachment is too large to read as text ({} MB). Use save_attachment.",
@@ -41,7 +50,7 @@ pub fn to_text(name: &str, mime_type: &str, bytes: &[u8]) -> Result<String, Stri
             "txt" | "md" | "csv" | "tsv" | "json" | "xml" | "yaml" | "yml" | "ics" | "vcf" | "log" | "ini" | "toml"
         );
     if m == "text/html" || matches!(e.as_str(), "html" | "htm") {
-        return Ok(html::to_text(&decode_text(bytes)).text);
+        return Ok(html::to_text(&decode_text(bytes, charset)).text);
     }
     if m == "message/rfc822" || e == "eml" {
         let p = mime::parse(bytes).ok_or("could not parse the attached message")?;
@@ -57,7 +66,7 @@ pub fn to_text(name: &str, mime_type: &str, bytes: &[u8]) -> Result<String, Stri
         return native::convert(kind, bytes).map(|t| crate::util::strip_invisible(&t).0);
     }
     if texty {
-        let (clean, _) = crate::util::strip_invisible(&decode_text(bytes));
+        let (clean, _) = crate::util::strip_invisible(&decode_text(bytes, charset));
         return Ok(clean);
     }
     Err(format!(
@@ -229,7 +238,7 @@ mod tests {
 
     #[test]
     fn rtf_typed_as_text_goes_to_the_converter() {
-        let r = to_text("note.rtf", "text/rtf", br"{\rtf1\ansi Bonjour}");
+        let r = to_text("note.rtf", "text/rtf", br"{\rtf1\ansi Bonjour}", None);
         if cfg!(target_os = "macos") {
             assert_eq!(r.unwrap().trim(), "Bonjour");
         } else {
@@ -239,8 +248,11 @@ mod tests {
 
     #[test]
     fn plain_formats_are_read_here() {
-        assert_eq!(to_text("a.csv", "text/csv", b"x;y\n1;2").unwrap(), "x;y\n1;2");
-        assert!(to_text("a.bin", "application/octet-stream", b"\0\0").unwrap_err().contains("not supported"));
+        assert_eq!(to_text("a.csv", "text/csv", b"x;y\n1;2", None).unwrap(), "x;y\n1;2");
+        // The declared charset wins: ISO-8859-15 has the euro at 0xA4.
+        assert_eq!(to_text("p.txt", "text/plain", b"42 \xa4", Some("iso-8859-15")).unwrap(), "42 €");
+        assert_eq!(to_text("p.txt", "text/plain", b"caf\xe9", None).unwrap(), "café");
+        assert!(to_text("a.bin", "application/octet-stream", b"\0\0", None).unwrap_err().contains("not supported"));
     }
 
     /// A one-page PDF showing `text` in Helvetica, with a correct xref.
@@ -273,18 +285,18 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_converts_rtf_and_pdf() {
-        let rtf = to_text("note.rtf", "application/rtf", br"{\rtf1\ansi Bonjour Timbre \'e9t\'e9}").unwrap();
+        let rtf = to_text("note.rtf", "application/rtf", br"{\rtf1\ansi Bonjour Timbre \'e9t\'e9}", None).unwrap();
         assert!(rtf.contains("Bonjour Timbre été"), "{rtf}");
-        let pdf = to_text("facture.pdf", "application/pdf", &tiny_pdf("Hello Timbre")).unwrap();
+        let pdf = to_text("facture.pdf", "application/pdf", &tiny_pdf("Hello Timbre"), None).unwrap();
         assert!(pdf.contains("Hello Timbre"), "{pdf}");
-        let err = to_text("scan.pdf", "application/pdf", b"not a pdf").unwrap_err();
+        let err = to_text("scan.pdf", "application/pdf", b"not a pdf", None).unwrap_err();
         assert!(err.contains("could not open"), "{err}");
     }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn other_platforms_explain_pdf() {
-        let err = to_text("facture.pdf", "application/pdf", b"%PDF-1.4").unwrap_err();
+        let err = to_text("facture.pdf", "application/pdf", b"%PDF-1.4", None).unwrap_err();
         assert!(err.contains("only be read on macOS"), "{err}");
     }
 }

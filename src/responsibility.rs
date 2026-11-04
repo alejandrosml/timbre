@@ -76,6 +76,18 @@ pub struct Disclaimed {
     pub stdout: Option<std::fs::File>,
 }
 
+/// Close descriptors this module opened (negative ones are not open).
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn close_all(fds: &[libc::c_int]) {
+    for &fd in fds.iter().filter(|fd| **fd >= 0) {
+        // SAFETY: closes a descriptor this module created and still owns.
+        unsafe {
+            libc::close(fd);
+        }
+    }
+}
+
 /// A pipe whose two ends close on exec: a child keeps only what its file
 /// actions give it.
 #[cfg(target_os = "macos")]
@@ -132,11 +144,12 @@ pub fn spawn_disclaimed(
         env.iter().map(|e| e.as_ptr().cast_mut()).chain(std::iter::once(std::ptr::null_mut())).collect();
     let (child_in, parent_in, parent_out, child_out) = if pipes {
         let (r_in, w_in) = pipe()?;
-        let (r_out, w_out) = pipe()?;
+        let (r_out, w_out) = pipe().inspect_err(|_| close_all(&[r_in, w_in]))?;
         (r_in, w_in, r_out, w_out)
     } else {
         (-1, -1, -1, -1)
     };
+    let fds = [child_in, parent_in, parent_out, child_out];
 
     // SAFETY: every pointer refers to a NUL-terminated string or array that
     // outlives the call; attributes and file actions are initialised before
@@ -147,7 +160,13 @@ pub fn spawn_disclaimed(
         let set: SetDisclaim = std::mem::transmute::<*mut libc::c_void, SetDisclaim>(set);
         let mut attr: libc::posix_spawnattr_t = std::ptr::null_mut();
         let mut actions: libc::posix_spawn_file_actions_t = std::ptr::null_mut();
-        if libc::posix_spawnattr_init(&mut attr) != 0 || libc::posix_spawn_file_actions_init(&mut actions) != 0 {
+        if libc::posix_spawnattr_init(&mut attr) != 0 {
+            close_all(&fds);
+            return Err("posix_spawn setup failed".into());
+        }
+        if libc::posix_spawn_file_actions_init(&mut actions) != 0 {
+            libc::posix_spawnattr_destroy(&mut attr);
+            close_all(&fds);
             return Err("posix_spawn setup failed".into());
         }
         if pipes {

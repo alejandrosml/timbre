@@ -5,6 +5,156 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-04
+
+A review of every part of Timbre, by four independent reviewers and on a
+real mailbox of 132,000 messages. After this update Timbre reads the
+messages again in the background, newest first; search works meanwhile.
+
+### Fixed
+- **Emails that showed no text.** Shops and newsletters built with MJML
+  (Mailjet, PrestaShop and many more) put `font-size:0` on every column and
+  give the text inside its own size; Timbre hid all of it. Visibility now
+  follows CSS inheritance, as WebKit draws it: styles for phones, dark mode
+  or other mail clients (`[data-ogsc]`, `.ExternalClass`…) no longer hide
+  what Mail shows on a Mac, `mso-hide:all` (Outlook only) no longer hides
+  anything, and a link keeps its own colour on a white-on-white parent.
+  Style sheets are read with the CSS parser and selector engine Firefox
+  uses: rules apply exactly where their selectors hold (what is above or
+  beside an element, attributes, `:not()`, `:nth-child()`, `:has()`), in
+  CSS's order (specificity, `!important`, cascade layers, layers inside
+  layers included); an invalid value leaves the one before it in place, and
+  comments, escapes and broken strings are read as a browser reads them.
+  Nested rules (CSS nesting), `@container`, `@scope`, `@namespace`,
+  `var()`, `calc()` and the other math functions, every colour notation
+  (`oklch()`, `color-mix()`, relative colours, system colours…), animations
+  that end hidden, `::first-line` and `::first-letter` (on the first line
+  only, handed down as WebKit hands them; where that line ends is taken on
+  the side of hiding), style sheets written into
+  the message as `data:` addresses, popovers and closed dialogs, and the
+  style sheets of shadow trees (`<template shadowrootmode>`, with `:host`,
+  `::slotted()` and `::part()`) are applied as WebKit applies them; names
+  of animations, layers, containers and custom properties keep their case,
+  and a value WebKit would reject is dropped as it drops it. `@supports`, `<style media>`
+  and media queries are judged as on a Mac, so rules for phones, dark mode,
+  Yahoo or Outlook are left out. `<noscript>` content, which Mail shows, is
+  read; a closed `<details>` shows its summary only.
+- **Attachment counts.** Mail writes 63 when it does not know, and counts
+  inline images: Timbre now counts the attachments it reads in each message,
+  for the results and for `has:attachment`.
+- **Text after an attachment.** Apple Mail places an attachment where the
+  cursor is; the text after it was missing from reading, threads and search.
+  Every part of the body is now read, each by its type (HTML could
+  previously pass as plain text and keep its hidden text), and photos placed
+  in the text are listed as attachments.
+- **Search.** `from:"Jean Dupont"`, `subject:"…"`, `in:"Sent Messages"`
+  and `-"a phrase"` work; `from:a OR from:b` finds both; a query of words to
+  leave out (`is:unread -newsletter`) no longer returns those words only;
+  words in junk and trash are found when asked for; unknown operators are
+  reported, and `label:`, `cc:`, `newer_than:`, `older_than:`, `filename:`
+  and `-from:` are understood. Pages no longer repeat a conversation, a page
+  is never empty while results remain, an offset past the end gives an empty
+  page instead of an error, paging stops at the 50,000th result instead of
+  repeating a page, and dates such as `2024/03/01` or
+  `2024-03-01T10:00:00` are read.
+- **Gmail.** Moving and undoing act on the mailbox the message is shown in
+  (its inbox), not on All Mail: "archive" archives, and undo puts the
+  message back in the inbox. Trashed mail stays out of searches even when
+  Gmail keeps its labels. Two accounts with the same name ("Google") are
+  told apart. A trashed message that keeps its labels is shown, and acted
+  on, in the trash.
+- **Mailbox roles.** Whole words only: "Présentations" or "Essentiel" are
+  no longer taken for the sent mailbox; each account's usual mailbox is
+  chosen, the same every time (Gmail's own before a label of the same
+  name, and a label called "Todos" is not taken for All Mail). Mailbox
+  names in Dutch, Portuguese, the Nordic languages, Polish and Czech are
+  recognised.
+- **Undo.** An undo that partly fails can be retried; without a token, only
+  the latest move is undone; moves are sent to Mail in small batches, so a
+  slow Mail never leaves moves without an undo: each batch is recorded
+  before Mail is asked, so moves Mail made before it stopped answering can
+  be undone too.
+- **Permissions in Mail.** A refused Automation permission is reported
+  instead of looking like "nothing selected", and `open_permission_settings`
+  opens the Automation settings when asked.
+- **Waiting for access.** The message follows the actual cause (no access,
+  Mail never set up, another problem) and changes when it does. A damaged
+  index is set aside and rebuilt instead of stopping Timbre.
+- **Reading.** Outlook forwards keep what they forward; a booking's own
+  "From:/To:/Date:" lines, or "Le client nous a écrit :", no longer cut the
+  message; answers written between quoted lines are kept; quoted history in
+  HTML is marked `> ` (lists, rules and links in it too), but only history
+  as mail programs mark it: a newsletter's quotation stays part of the
+  message. Forwards written in German, Italian, Portuguese or Dutch are
+  recognised. Mail without a charset reads as Windows-1252 rather than with
+  replacement marks; text attachments use their declared charset.
+- **Warnings.** All of iCloud's authentication results are read (it adds
+  one header per check), and only those of the receiving server: one forged
+  below them, or below Gmail's single header, is ignored. Links wrapped by Safe Links, Proofpoint or Google
+  are compared with their real destination (only the services' own domains
+  are unwrapped: `evil-cudasvc.com` is not Barracuda), and links written
+  `HTTPS:…`, with backslashes or with a name before the host
+  (`paypal.com@evil.example`) are read as a browser follows them; an image
+  link in a zero-size cell keeps its address. White text on the page's
+  white is hidden text, and so is text hidden with
+  `-webkit-text-fill-color`, `-webkit-text-security`, `zoom`, transforms,
+  filters (`invert()`, `brightness()`, blur, SVG filters), blending
+  (`mix-blend-mode`, `backdrop-filter`), transparency adding up, clip
+  paths, masks (mask pictures included), placement off the page on any
+  side, an element drawn under its parent's background, or black text left
+  on a dark background (white, on a page made for a dark colour scheme
+  alone); transparent text that a sharp `text-shadow` or `drop-shadow()`,
+  or a thin outline (`-webkit-text-stroke`), draws close by is seen. A
+  container query whose answer depends on a width the page leaves open is
+  read at each width its rules compare with, and what any of them hides is
+  hidden. The width of Mail's window
+  is not known: when a message's styles depend on it, the message is read
+  at a narrower and a wider width, and what either hides is left out. A
+  message that loads a style
+  sheet from the web says so: what it hides could not be checked. A sender
+  who proved its domain
+  may count clicks on its own links; "Sarah @ Notion" is a name, not an
+  address; links keep their full address (meeting passwords included).
+  HTML, SVG and configuration-profile attachments are flagged.
+- **Chinese, Japanese and Korean.** Words written without spaces (会議 in
+  会議の議事録) are found.
+- **Attachments of partly downloaded messages** kept by Mail as
+  `.emlxpart` files are read; a partly downloaded message never returns
+  another attachment's bytes.
+- **Forwards with attachments.** Mail drops a forward's attachments when a
+  script replaces its text: Timbre then leaves the text for the user to
+  type and says so. Undo moves back the copy that was moved, when a mailbox
+  holds two with the same Message-ID. Messages deleted in Mail are not
+  acted on.
+- **Faster sender, recipient and subject filters**: matched in Mail's
+  tables of addresses and subjects first, instead of message by message.
+- **Robustness.** One Timbre keeps the index when two run; a stalled index
+  says so in `mail_status`; messages missed while Mail was busy are picked
+  up; Mail rebuilding its own database (renumbering every message) is
+  noticed by comparing subjects, and deleting many recent messages is no
+  longer taken for it; a hostile style sheet cannot make reading a message
+  take minutes, and one built to wear the checks out (rules nested too
+  deep, a parent selector repeated at every level, thousands of classes on
+  one element) has its text withheld;
+  subjects are shown on one
+  line; long file names fit macOS's limit; the update check retries after a
+  failure and counts sleep; and searches no longer fall back to subjects
+  and senders for a few seconds after each start.
+
+### Changed
+- Claude is told to use Timbre first for anything in the user's mail, before
+  another mail connector such as Gmail's. There is no need to remove the
+  Gmail connector.
+- Junk and trash are now indexed too (and still left out of searches unless
+  asked for). Clearing "Mailboxes skipped by search" searches everything.
+  Only the mailboxes Mail or the provider names so are skipped ("Junk",
+  "[Gmail]/Corbeille", "QUARANTAINE"), never a folder of the user's that
+  merely holds the word ("Old Spam"); with "sent" skipped, Gmail's sent
+  mail is skipped too.
+- `mail_status` counts unread mail outside junk and trash, reports the live
+  open mode, and when new mail was last indexed; `list_mailboxes` lists empty
+  folders of the user's.
+
 ## [0.5.1] - 2026-11-04
 
 ### Fixed

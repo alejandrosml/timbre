@@ -66,23 +66,36 @@ pub fn start(cfg: &Config) {
     let _ = std::thread::Builder::new().name("timbre-updates".into()).spawn(move || {
         // Let Claude's own start-up go first.
         std::thread::sleep(Duration::from_secs(20));
+        // Short naps against the wall clock: a Mac asleep overnight does not
+        // count as time for a long sleep.
+        let mut retry_at = 0;
         loop {
-            check(&path);
-            std::thread::sleep(Duration::from_secs(DAY as u64));
+            if crate::util::now_unix() >= retry_at {
+                retry_at = match check(&path) {
+                    true => 0,
+                    false => crate::util::now_unix() + 3600, // offline: try again in an hour
+                };
+            }
+            std::thread::sleep(Duration::from_secs(600));
         }
     });
 }
 
-fn check(path: &Path) {
+/// Check unless the cache is fresh; false when GitHub could not be asked.
+fn check(path: &Path) -> bool {
     let now = crate::util::now_unix();
     let mut cache: Cache = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut ok = true;
     if now - cache.checked >= DAY || cache.checked > now {
-        if let Some((tag, url)) = fetch() {
-            cache.latest = Some(tag);
-            cache.url = Some(url);
+        match fetch() {
+            Some((tag, url)) => {
+                cache.latest = Some(tag);
+                cache.url = Some(url);
+                cache.checked = now;
+                let _ = write_atomically(path, &serde_json::to_vec(&cache).unwrap_or_default());
+            }
+            None => ok = false,
         }
-        cache.checked = now;
-        let _ = write_atomically(path, &serde_json::to_vec(&cache).unwrap_or_default());
     }
     if let (Some(latest), Some(url)) = (&cache.latest, &cache.url)
         && newer(latest, env!("CARGO_PKG_VERSION"))
@@ -90,6 +103,7 @@ fn check(path: &Path) {
         let version = latest.trim_start_matches('v').to_string();
         *FOUND.lock().unwrap_or_else(|e| e.into_inner()) = Some(UpdateView { version, url: url.clone() });
     }
+    ok
 }
 
 fn fetch() -> Option<(String, String)> {
@@ -114,7 +128,8 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp: PathBuf = path.with_extension("tmp");
+    // Each process its own temporary file: two Claude windows may check at once.
+    let tmp: PathBuf = path.with_extension(format!("{}.tmp", std::process::id()));
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
 }

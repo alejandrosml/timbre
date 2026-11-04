@@ -128,6 +128,9 @@ const EXECUTABLE: &[&str] = &[
 const DOCUMENT: &[&str] =
     &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "jpg", "jpeg", "png", "txt", "rtf", "csv", "zip"];
 const MACROS: &[&str] = &["docm", "xlsm", "pptm", "dotm", "xltm", "xlam"];
+/// Opened in a browser, they can imitate a login page or run scripts:
+/// the usual carrier of phishing that arrives as an attachment.
+const WEB: &[&str] = &["html", "htm", "xhtml", "shtml", "svg", "mht", "mhtml"];
 
 /// Label attachments that can run code or disguise their type.
 pub fn attachment_risk(name: &str) -> Option<String> {
@@ -142,6 +145,12 @@ pub fn attachment_risk(name: &str) -> Option<String> {
     }
     if MACROS.contains(&ext) {
         return Some("Office file with macros".to_string());
+    }
+    if WEB.contains(&ext) {
+        return Some(format!("web page (.{ext}): opened, it can imitate a sign-in page"));
+    }
+    if ext == "mobileconfig" {
+        return Some("configuration profile: installing it can change the Mac's settings".to_string());
     }
     None
 }
@@ -172,5 +181,8 @@ mod tests {
         assert!(attachment_risk("setup.pkg").unwrap().contains("installer"));
         assert!(attachment_risk("budget.xlsm").unwrap().contains("macros"));
         assert_eq!(attachment_risk("facture.pdf"), None);
+        assert!(attachment_risk("Facture_2026.html").unwrap().contains("sign-in"));
+        assert!(attachment_risk("voicemail.svg").is_some());
+        assert!(attachment_risk("wifi.mobileconfig").is_some());
     }
 }

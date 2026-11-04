@@ -4,11 +4,16 @@
 //! Licensed under the MIT License.
 
 mod actions;
+mod animation;
 mod app;
+mod calc;
 mod config;
 #[cfg(debug_assertions)]
 mod corpus;
+mod css;
+mod css_properties;
 mod degraded;
+mod effects;
 mod emlx;
 mod extract;
 #[cfg(any(test, debug_assertions))]
@@ -24,6 +29,7 @@ mod responsibility;
 mod search;
 mod security;
 mod server;
+mod sheet;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -132,7 +138,7 @@ fn main() -> Result<()> {
         Command::DevFixture { dir } => fixture::build(&dir).map(|_| ()),
         #[cfg(debug_assertions)]
         Command::DevCorpus { dir, count } => corpus::build(&dir, count).map(|_| ()),
-        Command::Probe => std::process::exit(if store::Store::open(&cfg).is_ok() { 0 } else { 1 }),
+        Command::Probe => probe(&cfg),
         Command::Bench { runs } => bench(cfg, runs),
     }
 }
@@ -150,18 +156,18 @@ fn serve(cfg: Config) -> Result<()> {
             // Still start, so Claude can explain what is missing; under the
             // launcher, restart by itself once Mail's data is readable.
             tracing::warn!("mail store unavailable: {e:#}");
-            launcher::restart_when_readable();
-            let service = degraded::Degraded::new(format!("{e:#}"), &cfg);
-            return rt.block_on(async move {
-                let service = service.serve(rmcp::transport::stdio()).await?;
-                service.waiting().await?;
-                Ok(())
-            });
+            return serve_waiting(&rt, &cfg, format!("{e:#}"), true);
         }
     };
     if let Err(e) = index::open(&cfg, &store, true) {
         // Search still works without the index (subjects and senders).
         tracing::warn!("index unavailable: {e:#}");
+        if index::damaged(&e) {
+            index::set_aside(&cfg);
+            if let Err(e) = index::open(&cfg, &store, true) {
+                tracing::warn!("new index unavailable too: {e:#}");
+            }
+        }
     }
     // Parsing threads for the index: utility priority, and roomy stacks for
     // hostile, deeply nested messages.
@@ -173,7 +179,20 @@ fn serve(cfg: Config) -> Result<()> {
     let indexer = index::Indexer::new(cfg.clone(), store.clone(), progress.clone());
     std::thread::Builder::new().name("timbre-index".into()).spawn(move || indexer.run_forever())?;
     updates::start(&cfg);
-    let ctx = Arc::new(app::Ctx::new(cfg, store, progress)?);
+    let ctx = match app::Ctx::new(cfg.clone(), store, progress) {
+        Ok(c) => {
+            let ctx = Arc::new(c);
+            ctx.keep_warm();
+            ctx
+        }
+        Err(e) => {
+            tracing::warn!("index unusable: {e:#}");
+            if index::damaged(&e) {
+                index::set_aside(&cfg);
+            }
+            return serve_waiting(&rt, &cfg, format!("Timbre's own index could not be opened: {e:#}"), false);
+        }
+    };
     let result = rt.block_on(async move {
         let service = server::Timbre::new(ctx).serve(rmcp::transport::stdio()).await?;
         service.waiting().await?;
@@ -182,6 +201,35 @@ fn serve(cfg: Config) -> Result<()> {
     // Claude closed stdin: exit now rather than wait for a running query.
     rt.shutdown_timeout(Duration::from_secs(2));
     result
+}
+
+/// `timbre probe`: can Mail's data be opened? The exit code says, and the
+/// reason is printed for the waiting server, which shows it to Claude.
+#[allow(clippy::print_stdout)]
+fn probe(cfg: &Config) -> ! {
+    match store::Store::open(cfg) {
+        Ok(_) => std::process::exit(launcher::PROBE_OK),
+        Err(e) => {
+            println!("{e:#}");
+            let access = degraded::problem_of(&format!("{e:#}")) == degraded::Problem::Access;
+            std::process::exit(if access { launcher::PROBE_NO_ACCESS } else { launcher::PROBE_OTHER })
+        }
+    }
+}
+
+/// Serve the tools that explain what is missing (see degraded.rs); `poll`:
+/// watch for Mail's data to become readable and restart then.
+fn serve_waiting(rt: &tokio::runtime::Runtime, cfg: &Config, why: String, poll: bool) -> Result<()> {
+    let why = Arc::new(std::sync::Mutex::new(why));
+    if poll {
+        launcher::restart_when_readable(why.clone());
+    }
+    let service = degraded::Degraded::new(why, cfg);
+    rt.block_on(async move {
+        let service = service.serve(rmcp::transport::stdio()).await?;
+        service.waiting().await?;
+        Ok(())
+    })
 }
 
 fn open_ctx(cfg: Config) -> Result<Arc<app::Ctx>> {
@@ -276,7 +324,7 @@ fn doctor(cfg: Config, automation: bool) -> Result<()> {
                 store.schema.unread, store.schema.flagged, store.schema.conversation
             );
             let conn = index::open(&cfg, &store, true)?;
-            let (total, unread) = store.stats(&conn)?;
+            let (total, unread) = store.stats(&conn, &[])?;
             println!(
                 "messages: {total} ({unread} unread), mailboxes: {}, accounts: {}",
                 store.mailboxes().len(),

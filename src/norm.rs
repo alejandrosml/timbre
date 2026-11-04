@@ -40,9 +40,61 @@ fn ligature(c: char) -> Option<&'static str> {
     })
 }
 
-/// NFKC plus ligature folding. Borrows when nothing changes (ASCII text,
-/// the common case, costs one scan).
+/// Chinese, Japanese and Korean characters, written without spaces
+/// between words.
+pub fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x11FF       // Hangul Jamo
+        | 0x3040..=0x30FF     // Hiragana, Katakana
+        | 0x31F0..=0x31FF     // Katakana extensions
+        | 0x3400..=0x4DBF     // CJK extension A
+        | 0x4E00..=0x9FFF     // CJK unified ideographs
+        | 0xAC00..=0xD7AF     // Hangul syllables
+        | 0xF900..=0xFAFF     // CJK compatibility ideographs
+        | 0x20000..=0x3134F) // CJK extensions B to G
+}
+
+/// One space around each Chinese, Japanese or Korean character, so the
+/// tokenizer, which only splits on spaces and punctuation, makes each a
+/// word: "会議" is then found inside "会議の議事録" as the phrase "会 議".
+fn space_cjk(s: Cow<'_, str>) -> Cow<'_, str> {
+    if !s.chars().any(is_cjk) {
+        return s;
+    }
+    let mut out = String::with_capacity(s.len() * 2);
+    let mut prev_cjk = false;
+    for c in s.chars() {
+        let cjk = is_cjk(c);
+        if (cjk || prev_cjk) && !c.is_whitespace() && !out.is_empty() && !out.ends_with(char::is_whitespace) {
+            out.push(' ');
+        }
+        out.push(c);
+        prev_cjk = cjk;
+    }
+    Cow::Owned(out)
+}
+
+/// Text as shown: the spaces [`fold`] put between those characters removed.
+pub fn unspace_cjk(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let between = c == ' ' && i > 0 && is_cjk(chars[i - 1]) && chars.get(i + 1).is_some_and(|n| is_cjk(*n));
+        if !between {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// NFKC plus ligature folding, and Chinese, Japanese and Korean characters
+/// spaced apart. Borrows when nothing changes (ASCII text, the common case,
+/// costs one scan).
 pub fn fold(s: &str) -> Cow<'_, str> {
+    space_cjk(fold_letters(s))
+}
+
+fn fold_letters(s: &str) -> Cow<'_, str> {
     let changes = |c: char| !c.is_ascii() && (ligature(c).is_some() || !nfkc_stable(c));
     let Some(first) = s.char_indices().find(|&(_, c)| changes(c)).map(|(i, _)| i) else {
         return Cow::Borrowed(s);
@@ -157,6 +209,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn chinese_japanese_and_korean_become_words() {
+        assert_eq!(fold("会議の議事録を添付します"), "会 議 の 議 事 録 を 添 付 し ま す");
+        assert_eq!(fold("Réunion 会議 ok"), "Réunion 会 議 ok");
+        assert_eq!(unspace_cjk("…«会 議» の 議 事 録 ok"), "…«会議» の議事録 ok");
+        assert_eq!(fold("plain ascii"), "plain ascii");
+    }
+
+    #[test]
     fn folds_ligatures_and_compat_forms() {
         assert_eq!(fold("Cœur d\u{2019}œuvre ﬁnal Straße"), "Coeur d\u{2019}oeuvre final Strasse");
         assert_eq!(fold("ＡＢＣ"), "ABC");
@@ -199,9 +259,9 @@ mod tests {
 
     #[test]
     fn index_text_keeps_long_words_that_are_not_codes() {
-        // CJK runs have no spaces; addresses contain '@'.
+        // CJK runs have no spaces (kept, one word per character); addresses contain '@'.
         let cjk = "会議の議事録を添付しますのでご確認くださいよろしくお願いいたします会議の議事録を添付します";
-        assert_eq!(for_index(cjk), format!("{cjk}\n"));
+        assert_eq!(for_index(cjk), format!("{}\n", fold(cjk)));
         let addr = "firstname.lastname.department@company-name.example.com";
         assert_eq!(for_index(addr), format!("{addr}\n"));
     }

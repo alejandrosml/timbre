@@ -69,15 +69,17 @@ fn store_reads_schema_accounts_and_roles() {
     for r in [Role::Inbox, Role::Archive, Role::Junk, Role::Trash, Role::Sent] {
         assert!(roles.contains(&r), "missing {r:?}");
     }
-    let (total, unread) = s.stats(&env.ctx.db()).unwrap();
+    let (total, unread) = s.stats(&env.ctx.db(), &[]).unwrap();
     assert_eq!((total, unread), (6, 2));
+    let skip = s.mailboxes_with_roles(&env.ctx.cfg.excluded_roles);
+    assert_eq!(s.stats(&env.ctx.db(), &skip).unwrap(), (6, 1), "unread junk is not counted");
 }
 
 #[test]
 fn full_text_search_ranks_filters_and_skips_junk() {
     let env = setup("fts", true);
     assert!(env.ctx.progress.ready());
-    assert_eq!(env.ctx.progress.docs.load(Ordering::Relaxed), 5, "junk is not indexed");
+    assert_eq!(env.ctx.progress.docs.load(Ordering::Relaxed), 6, "every mailbox is indexed, junk too");
 
     let r = search(&env, q("facture"));
     assert_eq!(r.engine, "fulltext");
@@ -156,8 +158,11 @@ fn read_mail_hides_injection_and_flags_spoofing() {
     assert!(v.warnings.iter().any(|w| w.contains("display name")), "{:?}", v.warnings);
     assert!(v.warnings.iter().any(|w| w.contains("other.ru")), "{:?}", v.warnings);
 
+    // Junk is indexed but left out of searches unless asked for.
+    assert_eq!(ids(&search(&env, q("impayee"))), Vec::<i64>::new());
     let r = search(&env, SearchParams { include_junk_and_trash: Some(true), ..q("impayee") });
-    assert_eq!(ids(&r), Vec::<i64>::new(), "junk is not full-text indexed");
+    assert_eq!(ids(&r), vec![105], "words in junk are found when asked");
+    assert_eq!(ids(&search(&env, q("in:junk impayee"))), vec![105]);
 
     assert!(app::read_mail(&env.ctx, &ReadParams { id: 999_999, max_chars: None, strip_quotes: None }).is_err());
 }
@@ -187,6 +192,177 @@ fn thread_attachments_and_mailboxes() {
     assert_eq!(m.accounts[0].account, "iCloud");
     assert_eq!(m.accounts[0].mailboxes[0].name, "INBOX");
     assert_eq!(m.accounts[0].mailboxes[0].unread, 1);
+}
+
+#[test]
+fn attachment_counts_come_from_the_messages() {
+    let env = setup("attachments", true);
+    let with = |h: bool| {
+        let p = SearchParams { has_attachments: Some(h), group_threads: Some(false), ..Default::default() };
+        let mut r = ids(&search(&env, p));
+        r.sort();
+        r
+    };
+    // Mail says 63 (unknown) or counts inline images: Timbre counts what it read.
+    assert_eq!(with(true), vec![101, 1234]);
+    assert_eq!(with(false), vec![102, 103, 104]);
+    let r = search(&env, SearchParams { group_threads: Some(false), ..Default::default() });
+    let count = |id: i64| r.results.iter().find(|h| h.id == id).map(|h| h.attachments);
+    assert_eq!((count(101), count(102), count(1234)), (Some(1), Some(0), Some(1)));
+    let t =
+        app::get_thread(&env.ctx, &ThreadParams { id: 103, max_messages: None, max_chars_per_message: None }).unwrap();
+    assert!(t.messages.iter().all(|m| m.attachments == 0), "{:?}", t.messages);
+}
+
+#[test]
+fn an_older_index_is_read_again_without_losing_search() {
+    let env = setup("reread", true);
+    let cfg = env.ctx.cfg.clone();
+    let store = env.ctx.store.clone();
+    // As left by Timbre 0.5.1: no attachment count, no parser version.
+    {
+        let conn = index::open(&cfg, &store, true).unwrap();
+        conn.execute_batch("ALTER TABLE docs DROP COLUMN attachments; ALTER TABLE docs DROP COLUMN parser;").unwrap();
+    }
+    let mut conn = index::open(&cfg, &store, true).unwrap();
+    let outdated: i64 = conn.query_row("SELECT count(*) FROM docs WHERE parser < 2", [], |r| r.get(0)).unwrap();
+    assert_eq!(outdated, 6, "the columns are added in place, rows marked as outdated");
+    assert_eq!(ids(&search(&env, q("facture"))), vec![101], "searches work before the re-read");
+    let mut indexer = Indexer::new(cfg.clone(), store.clone(), env.ctx.progress.clone());
+    let mut rounds = 0;
+    while indexer.reread_batch(&mut conn, 2).unwrap() > 0 {
+        rounds += 1;
+        assert_eq!(ids(&search(&env, q("facture"))), vec![101], "and during it");
+    }
+    assert_eq!(rounds, 3, "6 messages, 2 at a time");
+    let (left, counted): (i64, i64) = conn
+        .query_row("SELECT sum(parser < 2), sum(attachments IS NOT NULL) FROM docs", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
+    assert_eq!((left, counted), (0, 6));
+    let fts: i64 = conn.query_row("SELECT count(*) FROM fts_docsize", [], |r| r.get(0)).unwrap();
+    assert_eq!(fts, 6, "each message is in the full-text index once");
+    assert_eq!(ids(&search(&env, q("reunion"))), vec![104]);
+}
+
+#[test]
+fn words_left_out_are_left_out() {
+    let env = setup("negation", true);
+    let all = |query: &str| {
+        let mut r = ids(&search(&env, SearchParams { group_threads: Some(false), ..q(query) }));
+        r.sort();
+        r
+    };
+    // Only words to leave out, with the index ready.
+    assert_eq!(all("is:unread -facture"), Vec::<i64>::new(), "101 is the unread one, and it is an invoice");
+    assert_eq!(all("-budget"), vec![101, 103, 104, 1234]);
+    assert_eq!(all("from:ann OR from:orange"), vec![101, 102]);
+    assert_eq!(all("-from:ann has:attachment"), vec![101, 1234]);
+    // Before the index exists: the same logic on subjects and senders.
+    let env = setup("negation-noindex", false);
+    let r = search(&env, SearchParams { group_threads: Some(false), ..q("facture -orange") });
+    assert_eq!(r.engine, "metadata");
+    assert_eq!(ids(&r), Vec::<i64>::new(), "Orange's invoice is left out");
+    let mut r = ids(&search(&env, SearchParams { group_threads: Some(false), ..q("contrat OR reunion") }));
+    r.sort();
+    assert_eq!(r, vec![104, 1234]);
+}
+
+#[test]
+fn chinese_and_japanese_words_are_found() {
+    let env = setup_with("cjk", false, |cfg| {
+        let mail = envelope_index(cfg);
+        let msg = fixture::Msg {
+            id: 7001,
+            mailbox: "INBOX",
+            from: ("田中", "tanaka@example.jp"),
+            to: "moi@icloud.com",
+            subject: "議事録",
+            date: fixture::T0 - 100,
+            read: true,
+            conversation: 0,
+            partial: false,
+            raw: "From: tanaka@example.jp\r\nTo: moi@icloud.com\r\nSubject: =?utf-8?b?6K2w5LqL6Yyy?=\r\n\
+                  Content-Type: text/plain; charset=utf-8\r\n\r\n会議の議事録を添付します。よろしくお願いします。\r\n"
+                .to_string(),
+        };
+        fixture::write_message(&cfg.mail_root.join("V10"), &mail, &msg).unwrap();
+    });
+    let cfg = env.ctx.cfg.clone();
+    let store = env.ctx.store.clone();
+    let mut conn = index::open(&cfg, &store, true).unwrap();
+    Indexer::new(cfg, store, env.ctx.progress.clone()).full_build(&mut conn, false).unwrap();
+    for word in ["会議", "議事録", "添付"] {
+        let r = search(&env, q(word));
+        assert_eq!(ids(&r), vec![7001], "{word}");
+    }
+    let r = search(&env, q("会議"));
+    assert!(r.results[0].snippet.as_deref().is_some_and(|s| s.contains("«会議»")), "{:?}", r.results[0].snippet);
+    assert_eq!(ids(&search(&env, q("会社"))), Vec::<i64>::new());
+}
+
+#[test]
+fn emlxpart_bodies_are_decoded() {
+    use crate::mime::decode_part_body;
+    assert_eq!(decode_part_body(b"SGVsbG8gVGltYnJl\r\n", Some("base64")), b"Hello Timbre");
+    assert_eq!(decode_part_body(b"caf=C3=A9", Some("quoted-printable")), "café".as_bytes());
+    // Already binary: kept as is.
+    assert_eq!(decode_part_body(&[0x25, 0x50, 0xff, 0x00], Some("base64")), vec![0x25, 0x50, 0xff, 0x00]);
+}
+
+#[test]
+fn deleted_messages_are_not_acted_on() {
+    let env = setup_with("deleted", true, |cfg| {
+        envelope_index(cfg).execute("UPDATE messages SET deleted = 1 WHERE ROWID = 102", []).unwrap();
+    });
+    let m = env.ctx.meta(102).unwrap();
+    assert!(m.deleted);
+    let err = crate::runtime().unwrap().block_on(crate::actions::mark(
+        &env.ctx,
+        &crate::actions::MarkParams { ids: vec![102], action: "read".into(), color: None },
+    ));
+    let r = err.unwrap();
+    assert_eq!(r.done, 0);
+    assert!(r.failed[0].error.contains("deleted"), "{:?}", r.failed[0].error);
+}
+
+/// Skipping: a folder of the user's named with a junk word is searched;
+/// Gmail's sent mail (stored in All Mail, labelled Sent) is skipped with "sent".
+#[test]
+fn what_search_skips() {
+    let env = setup_with("skips", true, |cfg| {
+        let mail = envelope_index(cfg);
+        mail.execute_batch(
+            "INSERT INTO mailboxes(url) VALUES('imap://62653857-BF50-4534-AB81-8F72E0FCEDF5/Old%20Spam');
+             CREATE TABLE labels (message_id INTEGER NOT NULL, mailbox_id INTEGER NOT NULL,
+                 PRIMARY KEY (message_id, mailbox_id)) WITHOUT ROWID;
+             -- 102 stored in Archive (as in All Mail), labelled Sent only; 1234 labelled Sent and INBOX.
+             UPDATE messages SET mailbox = (SELECT ROWID FROM mailboxes WHERE url LIKE '%/Archive') WHERE ROWID IN (102, 1234);
+             INSERT INTO labels SELECT 102, ROWID FROM mailboxes WHERE url LIKE '%/Sent%20Messages';
+             INSERT INTO labels SELECT 1234, ROWID FROM mailboxes WHERE url LIKE '%/Sent%20Messages' OR url LIKE '%/INBOX';
+             UPDATE messages SET mailbox = (SELECT ROWID FROM mailboxes WHERE url LIKE '%/Old%20Spam') WHERE ROWID = 104;",
+        )
+        .unwrap();
+    });
+    let store = &env.ctx.store;
+    let count = |skip_roles: &[&str], id: i64| -> i64 {
+        let roles: Vec<String> = skip_roles.iter().map(|r| r.to_string()).collect();
+        let skip = store.skipped_mailboxes(&roles);
+        env.ctx
+            .db()
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM mail.messages m WHERE m.ROWID = ?1 AND {}",
+                    store.outside_mailboxes(&skip)
+                ),
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(count(&["junk", "trash"], 104), 1, "\"Old Spam\" is the user's folder: searched");
+    assert_eq!(count(&["junk", "trash", "sent"], 102), 0, "Gmail sent mail, labelled Sent only: skipped");
+    assert_eq!(count(&["junk", "trash", "sent"], 1234), 1, "also labelled Inbox: kept");
+    assert_eq!(count(&["junk", "trash"], 102), 1);
 }
 
 #[test]
@@ -419,6 +595,64 @@ fn paging_is_stable_when_filters_thin_a_broad_query() {
     assert_eq!(distinct.len(), 350, "results were skipped");
 }
 
+/// Paging by conversation: what one page showed, the next does not show again.
+#[test]
+fn pages_do_not_repeat_conversations() {
+    let env = setup_with("pages", true, |cfg| {
+        let mail = envelope_index(cfg);
+        // 30 messages in 6 conversations, interleaved in time.
+        let inbox: i64 =
+            mail.query_row("SELECT ROWID FROM mailboxes WHERE url LIKE '%/INBOX'", [], |r| r.get(0)).unwrap();
+        mail.execute("INSERT INTO subjects(subject) VALUES('rapport')", []).unwrap();
+        let subj = mail.last_insert_rowid();
+        for i in 0..30 {
+            mail.execute(
+                "INSERT INTO messages(ROWID, sender, subject_prefix, subject, date_sent, date_received, mailbox, flags, read, flagged, deleted, size, conversation_id)
+                 VALUES(?1, 1, '', ?2, ?3, ?3, ?4, 1, 1, 0, 0, 100, ?5)",
+                rusqlite::params![5000 + i, subj, crate::util::now_unix() - i * 3600, inbox, 900 + i % 6],
+            )
+            .unwrap();
+        }
+    });
+    let mut seen = vec![];
+    let mut offset = 0;
+    loop {
+        let r = search(
+            &env,
+            SearchParams {
+                limit: Some(2),
+                offset: Some(offset),
+                subject: Some("rapport".into()),
+                ..Default::default()
+            },
+        );
+        seen.extend(ids(&r));
+        match r.next_offset {
+            Some(o) => offset = o,
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 6, "one result per conversation, over all pages: {seen:?}");
+    // An offset past the end (a stale next_offset, a guess) is an empty page.
+    for offset in [6, 29, 30, 500, 100_000] {
+        let r = search(
+            &env,
+            SearchParams {
+                limit: Some(5),
+                offset: Some(offset),
+                subject: Some("rapport".into()),
+                ..Default::default()
+            },
+        );
+        assert!(r.results.is_empty() && r.next_offset.is_none(), "offset {offset}: {:?} {:?}", ids(&r), r.next_offset);
+        let r = search(
+            &env,
+            SearchParams { limit: Some(5), offset: Some(offset), query: Some("rapport".into()), ..Default::default() },
+        );
+        assert!(r.next_offset.is_none_or(|o| o > offset), "offset {offset}");
+    }
+}
+
 #[test]
 fn restarts_do_not_walk_the_whole_store() {
     let env = setup("restart", true);
@@ -513,6 +747,62 @@ fn envelope_index(cfg: &crate::config::Config) -> rusqlite::Connection {
     rusqlite::Connection::open(cfg.mail_root.join("V10/MailData/Envelope Index")).expect("envelope index")
 }
 
+/// When Mail rebuilds its Envelope Index, its ids name other messages: the
+/// index is rebuilt, once.
+#[test]
+fn mail_renumbering_its_messages_rebuilds_the_index() {
+    let env = setup_with("renumber", false, |cfg| {
+        let conn = envelope_index(cfg);
+        for k in 0..12 {
+            let m = fixture::Msg {
+                id: 300 + k,
+                mailbox: "INBOX",
+                from: ("Shop", "news@shop.example"),
+                to: "me@example.com",
+                subject: [
+                    "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliett",
+                    "Kilo", "Lima",
+                ][k as usize],
+                date: fixture::T0 + k,
+                read: true,
+                conversation: 300 + k,
+                partial: false,
+                raw: format!("From: news@shop.example\r\nSubject: Letter {k}\r\n\r\nBody {k}\r\n"),
+            };
+            fixture::write_message(&cfg.mail_root.join("V10"), &conn, &m).unwrap();
+        }
+    });
+    let ctx = &env.ctx;
+    let store = &ctx.store;
+    let mut conn = index::open(&ctx.cfg, store, true).unwrap();
+    let mut indexer = Indexer::new(ctx.cfg.clone(), store.clone(), ctx.progress.clone());
+    // The subjects in the files ("Letter 3") and in Mail ("Delta") differ
+    // from the start: that is how this Mail stores them, not a renumbering.
+    indexer.full_build(&mut conn, false).unwrap();
+    assert!(!index::renumbered(&conn, store).unwrap());
+    // Same subjects in files and in Mail, then Mail numbers anew.
+    let ev = envelope_index(&ctx.cfg);
+    ev.execute_batch(
+        "UPDATE subjects SET subject = 'Letter ' || (SELECT m.ROWID - 300 FROM messages m WHERE m.subject = subjects.ROWID)
+         WHERE ROWID IN (SELECT subject FROM messages WHERE ROWID >= 300);",
+    )
+    .unwrap();
+    conn.execute("DELETE FROM meta WHERE key = 'subject_baseline'", []).unwrap();
+    indexer.full_build(&mut conn, false).unwrap();
+    assert!(!index::renumbered(&conn, store).unwrap());
+    ev.execute_batch("UPDATE messages SET subject = (SELECT subject FROM messages n WHERE n.ROWID = 300 + (messages.ROWID - 299) % 12) WHERE ROWID >= 300;")
+        .unwrap();
+    assert!(index::renumbered(&conn, store).unwrap());
+    // A row the rebuild must replace: proof the index was cleared.
+    conn.execute("UPDATE texts SET subject = 'stale' WHERE id = 305", []).unwrap();
+    indexer.full_build(&mut conn, false).unwrap();
+    let subject: String = conn.query_row("SELECT subject FROM texts WHERE id = 305", [], |r| r.get(0)).unwrap();
+    assert_eq!(subject, "Letter 5");
+    // The files still disagree with Mail's new numbering here: the baseline
+    // keeps that from rebuilding again and again.
+    assert!(!index::renumbered(&conn, store).unwrap());
+}
+
 /// Gmail keeps each message once, in All Mail; its Inbox, Sent and labels
 /// are rows of the `labels` table.
 #[test]
@@ -547,6 +837,47 @@ fn gmail_labels_count_as_mailboxes() {
     assert_eq!(counts[&only("sent")].0, 2, "103 stored + 104 labelled");
     // Labelled Sent: its recipients count as people the user wrote to.
     assert_eq!(store.sender_history(&env.ctx.db(), "zoe@example.com", 0).unwrap(), (0, 1));
+}
+
+/// Gmail keeps labels on trashed mail: the trash still wins.
+#[test]
+fn trash_wins_over_gmail_labels() {
+    let env = setup_with("trashlabels", true, |cfg| {
+        envelope_index(cfg)
+            .execute_batch(
+                "CREATE TABLE labels (message_id INTEGER NOT NULL REFERENCES messages(ROWID) ON DELETE CASCADE,
+                     mailbox_id INTEGER NOT NULL REFERENCES mailboxes(ROWID) ON DELETE CASCADE,
+                     PRIMARY KEY (message_id, mailbox_id)) WITHOUT ROWID;
+                 -- 102 is stored in the inbox but labelled Trash; 104 in Archive, labelled Inbox.
+                 INSERT INTO labels SELECT 102, ROWID FROM mailboxes WHERE url LIKE '%/Deleted%20Messages' OR url LIKE '%/Trash';
+                 INSERT INTO labels SELECT 104, ROWID FROM mailboxes WHERE url LIKE '%/INBOX';",
+            )
+            .unwrap();
+    });
+    let all = |p: SearchParams| ids(&search(&env, SearchParams { group_threads: Some(false), ..p }));
+    assert!(!all(SearchParams::default()).contains(&102), "labelled Trash: skipped");
+    assert!(all(SearchParams { include_junk_and_trash: Some(true), ..Default::default() }).contains(&102));
+    // It is shown, and acted on, where it really is: in the trash.
+    let stored = env.ctx.meta(102).unwrap().mailbox;
+    let shown = env.ctx.store.display_mailbox(&env.ctx.db(), 102, stored);
+    assert_eq!(env.ctx.store.mailbox(shown).map(|m| m.role), Some(Role::Trash));
+    // With archives skipped too, an archived message labelled Inbox stays.
+    let mut cfg = env.ctx.cfg.clone();
+    cfg.excluded_roles.push("archive".into());
+    let skip = env.ctx.store.mailboxes_with_roles(&cfg.excluded_roles);
+    let n: i64 = env
+        .ctx
+        .db()
+        .query_row(
+            &format!(
+                "SELECT count(*) FROM mail.messages m WHERE m.ROWID = 104 AND {}",
+                env.ctx.store.outside_mailboxes(&skip)
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
 }
 
 /// Mail people send themselves must not rank as mail from a correspondent.
@@ -652,4 +983,50 @@ fn recent_mail_outranks_old_repetitions() {
     top.sort_unstable();
     assert_eq!(top, vec![101, 901], "{found:?}");
     assert!(pos(900) > 1);
+}
+
+/// Parse every file under TIMBRE_FUZZ_DIR (real mail, e.g. a maildir) and
+/// report panics and slow messages: `TIMBRE_FUZZ_DIR=… cargo test parse_real_mail -- --ignored`.
+#[test]
+#[ignore]
+fn parse_real_mail() {
+    let Ok(dir) = std::env::var("TIMBRE_FUZZ_DIR") else { return };
+    let limit: usize = std::env::var("TIMBRE_FUZZ_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+    let (mut n, mut panics, mut slow) = (0, vec![], vec![]);
+    let started = std::time::Instant::now();
+    for entry in walkdir::WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()) {
+        if n >= limit {
+            break;
+        }
+        let Ok(mut raw) = std::fs::read(entry.path()) else { continue };
+        if entry.path().extension().is_some_and(|e| e == "emlx") {
+            let Ok(m) = crate::emlx::read_message(entry.path()) else { continue };
+            raw = m;
+        }
+        n += 1;
+        let t = std::time::Instant::now();
+        let r = std::panic::catch_unwind(|| {
+            if let Some(p) = crate::mime::parse(&raw) {
+                let _ = crate::quote::strip_quotes_of(&p.body, &p.subject);
+                let _ = crate::mime::warnings(&p);
+                for i in 0..p.attachments.len() {
+                    let _ = crate::mime::attachment_bytes(&raw, i);
+                }
+            }
+        });
+        if r.is_err() {
+            panics.push(entry.path().display().to_string());
+        }
+        if t.elapsed() > std::time::Duration::from_secs(1) {
+            slow.push(format!("{} {:?}", entry.path().display(), t.elapsed()));
+        }
+    }
+    eprintln!("parsed {n} messages in {:?}; {} panics; {} slow", started.elapsed(), panics.len(), slow.len());
+    for p in panics.iter().take(20) {
+        eprintln!("panic: {p}");
+    }
+    for s in slow.iter().take(20) {
+        eprintln!("slow: {s}");
+    }
+    assert!(panics.is_empty());
 }

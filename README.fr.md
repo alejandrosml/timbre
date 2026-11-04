@@ -38,10 +38,12 @@ Le connecteur Gmail de Claude envoie chaque recherche aux serveurs de Google par
 
 Dans les deux cas, ce que Claude lit part chez Claude pour vous répondre.
 
+**Vous avez aussi le connecteur Gmail ?** Inutile de l'enlever : Timbre demande à Claude de passer par lui en premier pour tout ce qui touche à votre courrier, Gmail compris. Gardez le connecteur Gmail pour ce que Timbre ne fait pas, comme envoyer depuis Gmail quand l'envoi est désactivé dans Timbre. Si Claude part quand même vers Gmail, dites-lui simplement « cherche avec Timbre ».
+
 ## Ce qu'il fait
 
-- **Tout retrouver.** Recherche plein texte dans les sujets, les personnes, le corps des messages et le nom des pièces jointes, classée par pertinence, par date et selon que vous échangez avec l'expéditeur, un seul résultat par message même quand Gmail le range sous plusieurs libellés, insensible aux accents et aux ligatures (`réunion` = `reunion`, `cœur` = `coeur`), avec des filtres et les opérateurs à la Gmail : `from:`, `to:`, `subject:`, `in:`, `is:unread`, `is:flagged`, `has:attachment`, `after:`, `before:`, `"expression exacte"`, `préfixe*` (3 lettres minimum), `-exclure`, `OR`.
-- **Lire sans risque.** Le texte que vous voyez dans Mail, sans le contenu HTML caché, avec des alertes sur l'authenticité de l'expéditeur et sur les pièces jointes dangereuses.
+- **Tout retrouver.** Recherche plein texte dans les sujets, les personnes, le corps des messages et le nom des pièces jointes, classée par pertinence, par date et selon que vous échangez avec l'expéditeur, un seul résultat par message même quand Gmail le range sous plusieurs libellés, insensible aux accents et aux ligatures (`réunion` = `reunion`, `cœur` = `coeur`), avec des filtres et les opérateurs à la Gmail : `from:`, `to:`, `cc:`, `subject:`, `in:`, `label:`, `is:unread`, `is:flagged`, `has:attachment`, `filename:`, `after:`, `before:`, `newer_than:7d`, `older_than:1y`, `"expression exacte"` (aussi après un opérateur : `from:"Jean Dupont"`), `préfixe*` (3 lettres minimum), `-exclure` (aussi `-from:`, `-"une expression"`), `OR`. Les indésirables et la corbeille sont laissés de côté, mais on peut y chercher des mots quand on le demande.
+- **Lire sans risque.** Le texte que vous voyez dans Mail, sans le contenu HTML caché mais sans rien perdre de ce qui s'affiche (mises en page MJML des boutiques en ligne, texte après une pièce jointe insérée dans le message, version texte des mails faits d'images), avec des alertes sur l'authenticité de l'expéditeur, sur les liens trompeurs et sur les pièces jointes dangereuses (programmes, macros, pages web).
 - **Suivre une conversation.** Le fil entier, chaque message réduit à ce qu'il apporte de nouveau.
 - **Lire les pièces jointes.** PDF, Word, RTF et ODT (convertis par macOS dans un processus séparé), texte, HTML, CSV, invitations de calendrier, fiches contact et mails joints.
 - **Agir, de façon réversible.** Les brouillons (nouveau, réponse, réponse à tous, transfert) s'ouvrent dans Mail pour que vous les relisiez ; marquer lu ou non lu, poser un drapeau ; déplacer vers les archives, la corbeille ou n'importe quelle boîte — avec **annulation**.
@@ -67,7 +69,7 @@ Timbre reprend les meilleures idées des connecteurs Apple Mail open source exis
 - **Tous les comptes, libellés compris.** Gmail ne garde chaque message qu'une fois, dans « Tous les messages » : Timbre lit ses libellés, si bien que la boîte de réception, les envoyés et vos libellés Gmail fonctionnent comme n'importe quelle boîte. Les envoyés d'Orange, Wanadoo et La Poste (OUTBOX) et leurs indésirables (QUARANTAINE) sont reconnus aussi.
 - **Un classement sensé.** Une recherche vague (*facture*) met le courrier récent en tête ; les messages des personnes à qui vous écrivez remontent ; ceux que vous vous envoyez à vous-même, non.
 - **Rien à redémarrer.** Dès que vous accordez l'accès complet au disque, Timbre s'en aperçoit en quelques secondes et se met au travail, dans la même conversation. Il vous prévient aussi quand une nouvelle version sort.
-- **Texte caché retiré.** `display:none`, polices de taille nulle, blanc sur blanc, texte hors écran ou transparent, caractères invisibles et de contrôle bidirectionnel : tout cela est retiré de ce que lit Claude, compté, et analysé pour y repérer des instructions destinées à une IA.
+- **Texte caché retiré.** `display:none`, polices de taille nulle, blanc sur blanc, texte hors écran, rogné, rétréci, flouté ou transparent, texte qu'un filtre ou un mode de fusion fait disparaître, caractères invisibles et de contrôle bidirectionnel : tout cela est retiré de ce que lit Claude, compté, et analysé pour y repérer des instructions destinées à une IA. Les feuilles de style sont lues avec l'analyseur CSS et le moteur de sélecteurs de Firefox, et jugées comme Mail les affiche sur un Mac : couches (`@layer`), règles imbriquées, `@container`, `@scope`, `::first-line`, animations et arbres fantômes (shadow DOM) compris. Quand ce qu'un message montre dépend de la largeur de la fenêtre de Mail, seul ce qui se voit quelle que soit la largeur est gardé.
 - **Claude lit ce que vous voyez.** Timbre lit la partie HTML que Mail affiche, et non la version texte brut qu'un attaquant peut remplir d'un autre contenu (et il prévient quand les deux diffèrent).
 - **Contrôle de l'expéditeur.** Résultats SPF, DKIM et DMARC, nom affiché contenant une autre adresse, réponse redirigée vers un autre domaine, domaines en punycode, liens dont le texte affiche un domaine mais qui mènent ailleurs, et *premier contact* (un expéditeur avec qui vous n'avez jamais échangé).
 - **Contenu balisé.** Chaque texte de mail est encadré par un marqueur aléatoire que l'expéditeur ne peut pas deviner.
@@ -96,16 +98,18 @@ spctl --assess -vv "$APP"                                # accepted, source=Nota
 
 Une boîte synthétique de 20 000 messages (788 Mo : lettres d'information en HTML, réponses avec historique cité, pièces jointes, textes en français, anglais et espagnol au vocabulaire réaliste), indexée sur une petite machine virtuelle à 2 cœurs :
 
-| | v0.1.0 | v0.4.0 |
-|---|---|---|
-| Construction complète de l'index | 28,6 s | 13,0 s |
-| Taille de l'index | 298 Mo | 124 Mo |
-| Recherche, médiane | 42 ms | 18 ms |
-| Recherche, 95ᵉ centile | 62 ms | 30 ms |
+| | v0.1.0 | v0.4.0 | v0.5.2 |
+|---|---|---|---|
+| Construction complète de l'index | 28,6 s | 13,0 s | 16,0 s |
+| Taille de l'index | 298 Mo | 124 Mo | 126 Mo |
+| Recherche, médiane | 42 ms | 18 ms | 25 ms |
+| Recherche, 95ᵉ centile | 62 ms | 30 ms | 46 ms |
+
+La 0.5.2 est un peu plus lente parce qu'elle est plus exacte : elle lit chaque partie de chaque message et détermine le texte visible comme le fait le moteur WebKit de Mail, elle indexe aussi les indésirables et la corbeille (que la recherche laisse toujours de côté), et elle classe une recherche large parmi ses résultats les plus récents selon leur date plutôt que selon l'ordre où Mail les a enregistrés : le courrier d'un compte ajouté après coup ne peut plus évincer celui du mois.
 
 Ce qui a fait la différence : les messages sont analysés sur tous les cœurs pendant qu'un seul fil d'écriture enregistre de grosses transactions, avec les fusions de FTS5 repoussées à la fin et une table de termes en attente de 64 Mio ; le texte gardé pour les extraits n'est stocké qu'une fois, compressé en zstd ; il n'y a plus d'index de préfixes ; extraits et détails ne sont calculés que pour la page renvoyée, et les requêtes très larges sont classées parmi leurs 10 000 résultats les plus récents. Les vérifications utiles seulement à la lecture d'un message ne sont plus faites à l'indexation. Pour reproduire : `timbre dev-corpus /tmp/corpus 20000` (compilation de débogage), puis `timbre index --rebuild` et `timbre bench` en compilation optimisée, avec `TIMBRE_MAIL_ROOT`, `TIMBRE_ACCOUNTS_DB` et `TIMBRE_DATA_DIR` pointant dessus.
 
-Sur un vrai Mac (Apple silicon, 132 000 messages répartis sur six comptes, dont Gmail), l'index occupe 387 Mo et les recherches répondent en 15 à 30 ms.
+Sur un vrai Mac (Apple silicon, 132 000 messages répartis sur six comptes, dont Gmail), l'index occupe environ 500 Mo et les recherches répondent en 15 à 30 ms.
 
 ## Installation
 
@@ -113,7 +117,7 @@ Sur un vrai Mac (Apple silicon, 132 000 messages répartis sur six comptes, dont
 2. Donnez à Timbre l'**accès complet au disque**. Demandez à Claude d'*ouvrir les réglages d'autorisation de Timbre* : Réglages Système s'ouvre sur Confidentialité et sécurité › Accès complet au disque et le Finder sélectionne Timbre (l'icône du timbre-poste). Glissez-le dans la liste et activez-le. Timbre se met au travail tout seul quelques secondes plus tard : rien à redémarrer.
 3. La première fois que vous demandez un brouillon ou un déplacement, macOS demande si Timbre peut contrôler Mail : cliquez sur OK.
 
-L'index plein texte se construit en arrière-plan au premier lancement (environ une minute pour 100 000 messages sur un Mac récent) ; en attendant, la recherche porte sur les sujets et les expéditeurs. Ensuite, un nouveau mail est cherchable en quelques secondes.
+L'index plein texte se construit en arrière-plan au premier lancement (environ une minute pour 100 000 messages sur un Mac récent) ; en attendant, la recherche porte sur les sujets et les expéditeurs. Ensuite, un nouveau mail est cherchable en quelques secondes. Après une mise à jour qui lit mieux les messages, Timbre les relit en arrière-plan, les plus récents d'abord, sans interrompre la recherche.
 
 ## Outils
 
@@ -125,7 +129,7 @@ L'index plein texte se construit en arrière-plan au premier lancement (environ 
 | `list_mailboxes` | Comptes et boîtes, avec leurs compteurs | non |
 | `read_attachment` | Texte d'une pièce jointe : PDF, Word, RTF, ODT, texte, HTML, CSV, agenda, mail joint | non |
 | `mail_status` | Permissions, avancement de l'index, réglages, nouvelle version | non |
-| `open_permission_settings` | Ouvrir les réglages d'accès complet au disque et montrer Timbre | ouvre Réglages Système |
+| `open_permission_settings` | Ouvrir les réglages d'accès complet au disque (ou d'automatisation) et montrer Timbre | ouvre Réglages Système |
 | `selected_mail` | Messages sélectionnés dans Mail | non |
 | `open_in_mail` | Ouvrir un message dans Mail | non |
 | `save_attachment` | Enregistrer dans votre dossier de pièces jointes | ajoute un fichier |
@@ -136,7 +140,7 @@ L'index plein texte se construit en arrière-plan au premier lancement (environ 
 
 ## Réglages
 
-Dans Claude › Réglages › Extensions › Timbre : mode lecture seule, autorisation d'envoi, destinataires autorisés (`alice@example.com, @monentreprise.fr`), nombre maximal de messages par heure, boîtes exclues de la recherche (par défaut : indésirables et corbeille), dossier des pièces jointes et vérification quotidienne des mises à jour.
+Dans Claude › Réglages › Extensions › Timbre : mode lecture seule, autorisation d'envoi, destinataires autorisés (`alice@example.com, @monentreprise.fr`), nombre maximal de messages par heure, boîtes exclues de la recherche (par défaut : indésirables et corbeille ; laissez le champ vide pour tout chercher, et écrivez les rôles comme vous voulez : `spam`, `corbeille`, `archive`…), dossier des pièces jointes et vérification quotidienne des mises à jour.
 
 ## Confidentialité
 

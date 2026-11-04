@@ -1,0 +1,432 @@
+# HTML read by `html::to_text`, each with what WebKit (Apple Mail) does.
+# "hide": SECRET is not shown, and the text is not withheld.
+# "show": VISIBLE is shown.
+# "withhold": SECRET is not shown; withholding the text is fine (hostile input).
+# "split": VISIBLE is shown and SECRET is not.
+# @@REP(n,text)@@ stands for text written n times.
+# Most come from the second, third and fourth reviews of Timbre 0.5.2 (the
+# third's named A1, B2…; the fourth's P1, S1, C1…). A word after a picture
+# on a first line is hidden with the rest (P4e, P4g): it may be on the next
+# line. WebKit's 9-pixel floor for small relative font sizes is not
+# assumed: Mail may set it otherwise, and text would then be shown that
+# Mail hides.
+
+=== baseline-hide hide
+<p>hi</p><p style="display:none">SECRET</p>
+=== baseline-show show
+<p>VISIBLE</p>
+=== scope-nested-roots hide
+<style>@scope (.a) to (.b){.x{display:none}}</style><div class=a><div class=b><div class=a><p class=x>SECRET</p></div></div></div>
+=== scope-proximity-vs-unscoped hide
+<style>@scope (.a){.x{display:none}} .x{display:block}</style><div class=a><p class=x>SECRET</p></div>
+=== scope-proximity-two-roots hide
+<style>@scope (.inner){.x{display:none}} @scope (.outer){.x{display:block}}</style><div class=outer><div class=inner><p class=x>SECRET</p></div></div>
+=== scope-colon-scope-specificity hide
+<style>@scope (.a){:scope{display:none}} .a{display:block}</style><div class=a>SECRET</div>
+=== scope-escaped-scope hide
+<style>@scope (.w){:\73 cope{display:none}}</style><div class=w>SECRET</div>
+=== scope-implicit-in-shadow hide
+<div><template shadowrootmode=open><style>@scope{p{display:none}}</style><p>SECRET</p></template></div>
+=== nesting-ident-colon-not hide
+<style>.w{p:not(.y){display:none}}</style><div class=w><p>SECRET</p></div>
+=== nesting-ident-colon-first-child hide
+<style>.w{p:first-child{display:none}}</style><div class=w><p>SECRET</p></div>
+=== nesting-ident-colon-in-scope hide
+<style>@scope (.w){p:not(.y){display:none}}</style><div class=w><p>SECRET</p></div>
+=== nesting-top-level-amp hide
+<style>& .x{display:none}</style><p class=x>SECRET</p>
+=== timbre-owner-pseudo hide
+<style>.x{display:none}.x:not(:-timbre-owner){display:block}</style><p class=x>SECRET</p>
+=== host-context-unsupported hide
+<style>.x{display:none}.x:not(:host-context(a)){display:block}</style><p class=x>SECRET</p>
+=== dsd-empty-host hide
+<style>.w:empty{display:none}</style><div class=w><template shadowrootmode=open>SECRET</template></div>
+=== dsd-nth-child hide
+<style>.x{display:none}.x:nth-child(2){display:block}</style><div><template shadowrootmode=open><slot></slot></template><p class=x>SECRET</p></div>
+=== dsd-has-template hide
+<style>.x{display:none}div:has(>template) .x{display:block}</style><div><template shadowrootmode=open><slot></slot></template><p class=x>SECRET</p></div>
+=== dsd-template-not-first-child hide
+<div><b>x</b><template shadowrootmode=open>shadow</template><p>SECRET</p></div>
+=== dsd-part hide
+<style>.h::part(p){display:none}</style><div class=h><template shadowrootmode=open><p part=p>SECRET</p></template></div>
+=== container-maxwidth-pct hide
+<style>.c{container-type:inline-size;max-width:100%}.x{display:none}@container (max-width:100px){.x{display:block}}</style><div class=c><p class=x>SECRET</p></div>
+=== container-width-calc-pct hide
+<style>.c{container-type:inline-size;width:calc(100% - 10px)}.x{display:none}@container (max-width:100px){.x{display:block}}</style><div class=c><p class=x>SECRET</p></div>
+=== container-name-case hide
+<style>.w{container:A / inline-size}.x{display:none}@container a (min-width:0){.x{display:block}}</style><div class=w><p class=x>SECRET</p></div>
+=== container-style-value-case hide
+<style>.x{display:none}@container style(--t: a){.x{display:block}}</style><div style="--t:A"><p class=x>SECRET</p></div>
+=== custom-prop-name-case hide
+<div style="--d:none;--D:block"><p style="display:var(--d)">SECRET</p></div>
+=== keyframes-name-case hide
+<style>@keyframes k{to{opacity:0}}@keyframes K{to{opacity:1}}.x{animation:k 1ms forwards}</style><p class=x>SECRET</p>
+=== layer-name-case hide
+<style>@layer a, b;@layer b{.x{display:block}}@layer A{.x{display:none}}</style><p class=x>SECRET</p>
+=== keyframes-unlayered-beats-layered hide
+<style>@keyframes k{to{opacity:0}}@layer l{@keyframes k{to{opacity:1}}}.x{animation:k 1ms forwards}</style><p class=x>SECRET</p>
+=== anim-infinite-constant hide
+<style>@keyframes k{from,to{opacity:0}}.x{animation:k 1s infinite}</style><p class=x>SECRET</p>
+=== anim-running-step-start hide
+<style>@keyframes k{to{opacity:0}}.x{animation:k 1000s step-start}</style><p class=x>SECRET</p>
+=== anim-paused-near-end hide
+<style>@keyframes k{to{opacity:0}}.x{animation:k 1s -0.999s paused}</style><p class=x>SECRET</p>
+=== anim-keyword-as-name hide
+<style>@keyframes forwards{to{opacity:0}}.x{animation:forwards 1ms forwards}</style><p class=x>SECRET</p>
+=== anim-huge-delay-backwards hide
+<style>@keyframes k{from{opacity:0}}.x{animation:k 1ms 1e30s backwards}</style><p class=x>SECRET</p>
+=== first-line-reveals-all hide
+<style>.x{color:#fff}.x::first-line{color:#000}</style><p class=x>Visible first line<br>SECRET</p>
+=== first-letter-reveals-all hide
+<style>.x{color:#fff}.x::first-letter{color:#000}</style><p class=x>XSECRET</p>
+=== media-min-aspect-ratio hide
+<style>.x{display:none}@media (min-aspect-ratio:100/1){.x{display:block}}</style><p class=x>SECRET</p>
+=== media-not-aspect-ratio hide
+<style>@media not all and (min-aspect-ratio:100/1){.x{display:none}}</style><p class=x>SECRET</p>
+=== media-range-aspect-ratio hide
+<style>@media (aspect-ratio > 1/1000){.x{display:none}}</style><p class=x>SECRET</p>
+=== media-range-resolution hide
+<style>@media (resolution >= 1dppx){.x{display:none}}</style><p class=x>SECRET</p>
+=== media-range-color hide
+<style>@media (color > 0){.x{display:none}}</style><p class=x>SECRET</p>
+=== media-min-height-reveal hide
+<style>.x{display:none}@media (min-height:1199px){.x{display:block}}</style><p class=x>SECRET</p>
+=== media-min-device-width-reveal hide
+<style>.x{display:none}@media (min-device-width:2560px){.x{display:block}}</style><p class=x>SECRET</p>
+=== supports-font-format hide
+<style>@supports not font-format(bogus){.x{display:none}}</style><p class=x>SECRET</p>
+=== dialog-display-revert hide
+<dialog style="display:revert">SECRET</dialog>
+=== popover-closed hide
+<div popover>SECRET</div>
+=== color-revert-inherits hide
+<div style="color:#fff"><p style="color:revert">SECRET</p></div>
+=== fill-revert-inherits hide
+<div style="-webkit-text-fill-color:transparent"><p style="-webkit-text-fill-color:revert">SECRET</p></div>
+=== color-webkit-bogus hide
+<p style="color:#fff;color:-webkit-bogus">SECRET</p>
+=== font-size-bogus-fn hide
+<p style="font-size:0;font-size:bogus(1)">SECRET</p>
+=== font-webkit-bogus hide
+<p style="font:0/0 a;font:-webkit-bogus">SECRET</p>
+=== bg-element-fn hide
+<p style="color:#fff;background-image:element(#x)">SECRET</p>
+=== clip-rect-bogus hide
+<div style="position:absolute;clip:rect(0,0,0,0);clip:rect(x)">SECRET</div>
+=== transform-scale-bogus-arg hide
+<div style="transform:scale(0);transform:scale(x)">SECRET</div>
+=== clip-path-circle-bogus hide
+<div style="clip-path:inset(50%);clip-path:circle(x)">SECRET</div>
+=== mask-bogus hide
+<div style="-webkit-mask-image:linear-gradient(transparent,transparent);-webkit-mask-image:bogus">SECRET</div>
+=== height-calc-bogus hide
+<div style="height:0;height:calc(x);overflow:hidden">SECRET</div>
+=== opacity-calc-bogus hide
+<p style="opacity:0;opacity:calc(x)">SECRET</p>
+=== color-light-dark hide
+<p style="color:light-dark(#fff,#000)">SECRET</p>
+=== color-relative-syntax hide
+<p style="color:rgb(from #fff r g b)">SECRET</p>
+=== color-system-menu hide
+<p style="color:Menu">SECRET</p>
+=== mathml-style-not-a-sheet hide
+<style>.x{display:none}</style><math style="display:none"><style>.x{display:block}</style></math><p class=x>SECRET</p>
+=== link-data-css hide
+<link rel="stylesheet" href="data:text/css,.x%7Bdisplay:none%7D"><p class=x>SECRET</p>
+=== import-data-css hide
+<style>@import url("data:text/css,.x{display:none}");</style><p class=x>SECRET</p>
+=== namespace-prefix hide
+<style>@namespace h url(http://www.w3.org/1999/xhtml);h|p.x{display:none}</style><p class=x>SECRET</p>
+=== display-run-in hide
+<p style="display:none;display:run-in">SECRET</p>
+=== keyframes-shadow-scope hide
+<div><template shadowrootmode=open><style>@keyframes k{to{opacity:0}}p{animation:k 1ms forwards}</style><p>SECRET</p></template></div><style>@keyframes k{to{opacity:1}}</style>
+=== filter-invert hide
+<p style="filter:invert(1)">SECRET</p>
+=== mix-blend-screen hide
+<p style="mix-blend-mode:screen">SECRET</p>
+=== text-security-disc hide
+<p style="-webkit-text-security:disc">SECRET</p>
+=== bgclip-text-own-bg hide
+<div style="background:linear-gradient(red,blue);-webkit-background-clip:text;color:transparent"><p style="background:#fff">SECRET</p></div>
+=== dsd-invalid-host-td show
+<table><tr><td><template shadowrootmode=open></template>VISIBLE</td></tr></table>
+=== dsd-invalid-host-a show
+<a href="https://x.example/"><template shadowrootmode=open></template>VISIBLE</a>
+=== keyframes-case-over show
+<style>@keyframes K{to{opacity:0}}.x{animation:k 1ms forwards}</style><p class=x>VISIBLE</p>
+=== container-maxwidth-pct-over show
+<style>.c{container-type:inline-size;max-width:100%}@container (max-width:100px){.x{display:none}}</style><div class=c><p class=x>VISIBLE</p></div>
+=== body-bg-propagates show
+<body style="background:#000;height:0;color:#fff">VISIBLE</body>
+=== object-fallback show
+<object data="missing.bin">VISIBLE</object>
+=== map-content show
+<map name=m><p>VISIBLE</p></map>
+=== text-shadow-only show
+<p style="color:transparent;text-shadow:0 0 0 #000">VISIBLE</p>
+=== hidden-attr-display-revert-layer hide
+<div hidden style="display:revert-layer">SECRET</div>
+=== hidden-attr-display-revert-shows show
+<div hidden style="display:revert">VISIBLE</div>
+=== scope-explicit-scope-specificity-only hide
+<style>@scope (.a){:scope .x{display:none}} @scope (.a){.x{display:block}}</style><div class=a><p class=x>SECRET</p></div>
+=== color-system-background hide
+<p style="color:Background">SECRET</p>
+=== display-ruby hide
+<p style="display:none;display:ruby">SECRET</p>
+=== display-math hide
+<p style="display:none;display:math">SECRET</p>
+=== display-block-list-item hide
+<p style="display:none;display:block list-item">SECRET</p>
+=== pseudo-cue-region hide
+<style>.x{display:none}.x,::cue-region{display:block}</style><p class=x>SECRET</p>
+=== pc-target-within hide
+<style>.x{display:none}.x:not(:target-within){display:block}</style><p class=x>SECRET</p>
+=== pc-current hide
+<style>.x{display:none}.x:not(:current){display:block}</style><p class=x>SECRET</p>
+=== pc-has-attachment hide
+<style>.x{display:none}.x:not(:has-attachment){display:block}</style><p class=x>SECRET</p>
+=== supports-selector-webkit-unknown hide
+<style>@supports not selector(::-webkit-bogus){.x{display:none}}</style><p class=x>SECRET</p>
+=== keyframes-layer-order hide
+<style>@layer a, b;@layer b{@keyframes k{to{opacity:0}}}@layer a{@keyframes k{to{opacity:1}}}.x{animation:k 1ms forwards}</style><p class=x>SECRET</p>
+=== anim-count-zero-forwards hide
+<style>@keyframes k{from{opacity:0}}.x{animation:k 1s 0 forwards}</style><p class=x>SECRET</p>
+=== media-orientation-portrait hide
+<style>@media (orientation:portrait){.x{display:none}}</style><p class=x>SECRET</p>
+=== top-level-amp-plain hide
+<style>&{}.x{display:none}</style><p class=x>SECRET</p>
+=== dsd-template-after-text-and-element hide
+<p>intro</p><div><span>a</span><template shadowrootmode="open"><p>shadow text</p></template>SECRET</div>
+=== dsd-second-template-inert-light-hidden show
+<div><template shadowrootmode=open><slot></slot></template><template shadowrootmode=open>x</template>VISIBLE</div>
+=== anim-delay-exponent-1e10 hide
+<style>@keyframes k{from{opacity:0}}.x{animation:k 1ms 10000000000s backwards}</style><p class=x>SECRET</p>
+=== anim-delay-longhand-exponent hide
+<style>@keyframes k{from{opacity:0}}.x{animation:k 1ms backwards;animation-delay:1e21s}</style><p class=x>SECRET</p>
+=== nesting-ident-colon-media-inside hide
+<style>.w{@media screen{p:not(.y){display:none}}}</style><div class=w><p>SECRET</p></div>
+=== nesting-decl-unknown-then-rule hide
+<style>.w{foo:bar; span:is(.s){display:none}}</style><div class=w><span class=s>SECRET</span></div>
+=== shadow-slot-display-none-host-style hide
+<div><template shadowrootmode=open><style>slot{display:none}</style><slot></slot></template><p>SECRET</p></div>
+=== container-inline-block-shrink hide
+<style>.c{display:inline-block;container-type:inline-size}.x{display:none}@container (min-width:500px){.x{display:block}}</style><div class=c><p class=x>SECRET</p></div>
+=== media-scripting hide
+<style>@media (scripting:none){.x{display:none}}</style><p class=x>SECRET</p>
+=== deep-calc-opacity-15 hide
+<p style="opacity:calc((((((((((((((((0))))))))))))))))">SECRET</p>
+=== deep-calc-fontsize-15 hide
+<p style="font-size:calc((((((((((((((((0px))))))))))))))))">SECRET</p>
+=== deep-calc-opacity-16 hide
+<p style="opacity:calc(((((((((((((((((0)))))))))))))))))">SECRET</p>
+=== deep-calc-fontsize-16 hide
+<p style="font-size:calc(((((((((((((((((0px)))))))))))))))))">SECRET</p>
+=== deep-calc-opacity-20 hide
+<p style="opacity:calc(((((((((((((((((((((0)))))))))))))))))))))">SECRET</p>
+=== deep-calc-fontsize-20 hide
+<p style="font-size:calc(((((((((((((((((((((0px)))))))))))))))))))))">SECRET</p>
+=== deep-calc-opacity-40 hide
+<p style="opacity:calc(((((((((((((((((((((((((((((((((((((((((0)))))))))))))))))))))))))))))))))))))))))">SECRET</p>
+=== deep-calc-fontsize-40 hide
+<p style="font-size:calc(((((((((((((((((((((((((((((((((((((((((0px)))))))))))))))))))))))))))))))))))))))))">SECRET</p>
+=== deep-is-16 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x)))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-17 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-30 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x)))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-31 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x))))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-32 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x)))))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-33 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x))))))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-40 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x)))))))))))))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-64 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-74 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-75 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-76 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-100 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-128 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-200 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== deep-is-256 withhold
+<style>:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(:is(.x)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))){display:none}</style><p class=x>SECRET</p>
+=== empty-var-tree-8-levels withhold
+<p style="--v0:var(--v1)var(--v1)var(--v1)var(--v1);--v1:var(--v2)var(--v2)var(--v2)var(--v2);--v2:var(--v3)var(--v3)var(--v3)var(--v3);--v3:var(--v4)var(--v4)var(--v4)var(--v4);--v4:var(--v5)var(--v5)var(--v5)var(--v5);--v5:var(--v6)var(--v6)var(--v6)var(--v6);--v6:var(--v7)var(--v7)var(--v7)var(--v7);--v7:var(--v8)var(--v8)var(--v8)var(--v8);--v8:;">x</p><p style="display:none">SECRET</p>
+=== empty-var-tree-9-levels withhold
+<p style="--v0:var(--v1)var(--v1)var(--v1)var(--v1);--v1:var(--v2)var(--v2)var(--v2)var(--v2);--v2:var(--v3)var(--v3)var(--v3)var(--v3);--v3:var(--v4)var(--v4)var(--v4)var(--v4);--v4:var(--v5)var(--v5)var(--v5)var(--v5);--v5:var(--v6)var(--v6)var(--v6)var(--v6);--v6:var(--v7)var(--v7)var(--v7)var(--v7);--v7:var(--v8)var(--v8)var(--v8)var(--v8);--v8:var(--v9)var(--v9)var(--v9)var(--v9);--v9:;">x</p><p style="display:none">SECRET</p>
+=== empty-var-tree-10-levels withhold
+<p style="--v0:var(--v1)var(--v1)var(--v1)var(--v1);--v1:var(--v2)var(--v2)var(--v2)var(--v2);--v2:var(--v3)var(--v3)var(--v3)var(--v3);--v3:var(--v4)var(--v4)var(--v4)var(--v4);--v4:var(--v5)var(--v5)var(--v5)var(--v5);--v5:var(--v6)var(--v6)var(--v6)var(--v6);--v6:var(--v7)var(--v7)var(--v7)var(--v7);--v7:var(--v8)var(--v8)var(--v8)var(--v8);--v8:var(--v9)var(--v9)var(--v9)var(--v9);--v9:var(--v10)var(--v10)var(--v10)var(--v10);--v10:;">x</p><p style="display:none">SECRET</p>
+=== empty-var-tree-11-levels withhold
+<p style="--v0:var(--v1)var(--v1)var(--v1)var(--v1);--v1:var(--v2)var(--v2)var(--v2)var(--v2);--v2:var(--v3)var(--v3)var(--v3)var(--v3);--v3:var(--v4)var(--v4)var(--v4)var(--v4);--v4:var(--v5)var(--v5)var(--v5)var(--v5);--v5:var(--v6)var(--v6)var(--v6)var(--v6);--v6:var(--v7)var(--v7)var(--v7)var(--v7);--v7:var(--v8)var(--v8)var(--v8)var(--v8);--v8:var(--v9)var(--v9)var(--v9)var(--v9);--v9:var(--v10)var(--v10)var(--v10)var(--v10);--v10:var(--v11)var(--v11)var(--v11)var(--v11);--v11:;">x</p><p style="display:none">SECRET</p>
+=== empty-var-tree-12-levels withhold
+<p style="--v0:var(--v1)var(--v1)var(--v1)var(--v1);--v1:var(--v2)var(--v2)var(--v2)var(--v2);--v2:var(--v3)var(--v3)var(--v3)var(--v3);--v3:var(--v4)var(--v4)var(--v4)var(--v4);--v4:var(--v5)var(--v5)var(--v5)var(--v5);--v5:var(--v6)var(--v6)var(--v6)var(--v6);--v6:var(--v7)var(--v7)var(--v7)var(--v7);--v7:var(--v8)var(--v8)var(--v8)var(--v8);--v8:var(--v9)var(--v9)var(--v9)var(--v9);--v9:var(--v10)var(--v10)var(--v10)var(--v10);--v10:var(--v11)var(--v11)var(--v11)var(--v11);--v11:var(--v12)var(--v12)var(--v12)var(--v12);--v12:;">x</p>
+=== A1-container-type-no-stacking hide
+<div style="container-type:inline-size"><p style="mix-blend-mode:screen">SECRET</p></div>
+=== A1b-contain-size-no-stacking hide
+<div style="contain:size"><p style="mix-blend-mode:screen">SECRET</p></div>
+=== A2-backdrop-inside-filter hide
+<div style="filter:invert(1)"><p style="backdrop-filter:invert(1)">SECRET</p></div>
+=== A3-body-filter-canvas-bg hide
+<body style="filter:invert(1);background:#fff">SECRET</body>
+=== A4-body-bg-over-negative-z hide
+<html style="background:#fff"><body style="background:#fff"><div style="position:relative;z-index:-1">SECRET</div></body></html>
+=== A5-bg-shorthand-resets-clip hide
+<p style="color:transparent;background-clip:text;background:#000">SECRET</p>
+=== A6-shadow-off-page hide
+<p style="color:transparent;text-shadow:-100px 0 0 #000">SECRET</p>
+=== A7-stroke-blob hide
+<p style="color:transparent;-webkit-text-stroke:40px #000">SECRET</p>
+=== A8-meta-first-wins hide
+<meta name="color-scheme" content="light"><meta name="color-scheme" content="dark"><p style="color:#fff">SECRET</p>
+=== A8b-meta-invalid hide
+<meta name="color-scheme" content="normal dark"><p style="color:#fff">SECRET</p>
+=== A8c-css-scheme-invalid hide
+<div style="color-scheme:normal dark;background:#000">SECRET</div>
+=== A9-svg-filter-data-url hide
+<p style="filter:url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='a'%3E%3CfeFlood flood-color='white'/%3E%3C/filter%3E%3C/svg%3E#a&quot;)">SECRET</p>
+=== A10-fl-float hide
+<style>.x{color:#fff}.x::first-line{color:#000}</style><p class=x><span style="float:left">SECRET</span> rest</p>
+=== A10b-fl-inline-block hide
+<style>.x{color:#fff}.x::first-line{color:#000}</style><p class=x><span style="display:inline-block">SECRET</span></p>
+=== A10c-fl-flex hide
+<style>.x{color:#fff}.x::first-line{color:#000}</style><div class=x><div style="display:flex">SECRET</div></div>
+=== A10d-fl-table hide
+<style>.x{color:#fff}.x::first-line{color:#000}</style><div class=x><table><tr><td>SECRET</td></tr></table></div>
+=== A10e-fl-overflow-hidden hide
+<style>.x{color:#fff}.x::first-line{color:#000}</style><div class=x><div style="overflow:hidden">SECRET</div></div>
+=== A11-fl-big-font split
+<style>.x{color:#fff}.x::first-line{color:#000;font-size:200px}</style><p class=x>VISIBLE SECRET1 SECRET2 SECRET3</p>
+=== A11b-fl-letter-spacing split
+<style>.x{color:#fff}.x::first-line{color:#000;letter-spacing:100px}</style><p class=x>VISIBLE SECRET1 SECRET2 SECRET3</p>
+=== A11c-fl-padding split
+<style>.x{color:#fff;width:880px;padding-left:800px;box-sizing:border-box}.x::first-line{color:#000}</style><p class=x>VISIBLE SECRET1 SECRET2 SECRET3</p>
+=== A11d-fl-text-indent split
+<style>.x{color:#fff;text-indent:95%}.x::first-line{color:#000}</style><p class=x>VISIBLE SECRET1 SECRET2 SECRET3</p>
+=== A11e-fl-pre split
+<style>.x{color:#fff}.x::first-line{color:#000}</style><pre class=x>VISIBLE
+SECRET</pre>
+=== A12-fl-tiny-font hide
+<style>.x::first-line{font-size:1px}</style><p class=x>@@REP(100,word )@@SECRET</p>
+=== A13-cq-flex-basis-band hide
+<style>.x{display:block}@container (min-width:300px){.x{display:none}}@container (min-width:600px){.x{display:block}}</style><div style="display:flex"><div style="container-type:inline-size;flex:0 0 450px"><p class=x>SECRET</p></div></div>
+=== A13b-cq-grid-band hide
+<style>.x{display:block}@container (min-width:300px){.x{display:none}}@container (min-width:600px){.x{display:block}}</style><div style="display:grid;grid-template-columns:450px"><div style="container-type:inline-size"><p class=x>SECRET</p></div></div>
+=== A14-cq-vw-width hide
+<style>.c{container-type:inline-size;width:100vw}@container (min-width:850px){.x{display:none}}</style><div class=c><p class=x>SECRET</p></div>
+=== A15-cq-content-box hide
+<style>.c{container-type:inline-size;width:500px;padding:0 200px;box-sizing:border-box}.x{display:none}@container (min-width:400px){.x{display:block}}</style><div class=c><p class=x>SECRET</p></div>
+=== B1-translate-isolates show
+<div style="translate:0 0"><p style="mix-blend-mode:screen">VISIBLE</p></div>
+=== B1b-perspective-isolates show
+<div style="perspective:100px"><p style="mix-blend-mode:screen">VISIBLE</p></div>
+=== B2-drop-shadow show
+<p style="color:#fff;filter:drop-shadow(1px 1px 0 #000)">VISIBLE</p>
+=== B3-svg-id-case show
+<svg width=0 height=0><filter id=F><feFlood flood-color=white /></filter></svg><p style="filter:url(#f)">VISIBLE</p>
+=== B3b-html-filter-element show
+<filter id=F></filter><p style="filter:url(#F)">VISIBLE</p>
+=== B4-mark show
+<div style="color:#fff"><mark>VISIBLE</mark></div>
+=== B4b-button-on-black show
+<div style="background:#000"><button>VISIBLE</button></div>
+=== B5-supported-color-schemes show
+<meta name="supported-color-schemes" content="dark"><p style="color:#fff">VISIBLE</p>
+=== P1-fl-fill-color-not-allowed hide
+<style>.x{color:#fff}.x::first-line{-webkit-text-fill-color:#000}</style><p class=x>SECRET</p>
+=== P1b-fl-stroke-not-allowed hide
+<style>.x{color:#fff}.x::first-line{-webkit-text-stroke:1px #000}</style><p class=x>SECRET</p>
+=== P1c-fl-fill-over-fill hide
+<style>.x{-webkit-text-fill-color:#fff}.x::first-line{-webkit-text-fill-color:#000}</style><p class=x>SECRET</p>
+=== P2-fl-not-first-block-empty-p hide
+<style>.x{color:#fff}.x::first-line{color:#000}</style><div class=x><p></p><p>SECRET</p></div>
+=== P2b-fl-not-first-block-abspos hide
+<style>.x{color:#fff}.x::first-line{color:#000}</style><div class=x><div style="position:absolute"></div><p>SECRET</p></div>
+=== P2c-fl-anon-after-empty-block hide
+<style>.x{color:#fff}.x::first-line{color:#000}</style><div class=x><div></div>SECRET</div>
+=== P3-fl-span-then-block show
+<style>.x{color:#fff}.x::first-line{color:#000}</style><div class=x><span>A</span><p>VISIBLE</p></div>
+=== P3b-fl-table-then-block show
+<style>.x{color:#fff}.x::first-line{color:#000}</style><div class=x><table><tr><td>a</td></tr></table><p>VISIBLE</p></div>
+=== P3c-fl-flex-then-block show
+<style>.x{color:#fff}.x::first-line{color:#000}</style><div class=x><div style="display:flex"></div><p>VISIBLE</p></div>
+=== P4-fl-inline-margin split
+<style>.x{color:#fff}.x::first-line{color:#000}</style><p class=x><span style="margin-left:780px">VISIBLE</span> SECRET SECRET SECRET</p>
+=== P4b-fl-inline-padding split
+<style>.x{color:#fff}.x::first-line{color:#000}</style><p class=x><span style="padding-left:780px">VISIBLE</span> SECRET SECRET SECRET</p>
+=== P4c-fl-nbsp split
+<style>.x{color:#fff;width:300px;font:16px monospace}.x::first-line{color:#000}</style><p class=x>@@REP(20,&nbsp;)@@VISIBLE SECRET SECRET SECRET</p>
+=== P4d-fl-word-spacing split
+<style>.x{color:#fff;word-spacing:1000px}.x::first-line{color:#000}</style><p class=x>VISIBLE SECRET SECRET SECRET</p>
+=== P4e-fl-svg-room hide
+<style>.x{color:#fff}.x::first-line{color:#000}</style><p class=x><svg width=800 height=10></svg>VISIBLE SECRET SECRET SECRET</p>
+=== P4f-fl-float-before split
+<style>.x{color:#fff}.x::first-line{color:#000}</style><div style="float:left;width:780px;height:100px"></div><p class=x>VISIBLE SECRET SECRET SECRET</p>
+=== P4g-fl-canvas-room hide
+<style>.x{color:#fff}.x::first-line{color:#000}</style><p class=x><canvas width=800 height=10></canvas>VISIBLE SECRET SECRET SECRET</p>
+=== C11-fl-inline-size split
+<style>.x{color:#fff;inline-size:100px}.x::first-line{color:#000}</style><p class=x>VISIBLE SECRET SECRET SECRET</p>
+=== C12-fl-padding-inline split
+<style>.x{color:#fff;padding-inline-start:780px}.x::first-line{color:#000}</style><p class=x>VISIBLE SECRET SECRET SECRET</p>
+=== P5-drop-shadow-transparent hide
+<p style="color:transparent;filter:drop-shadow(1px 1px 0 #000)">SECRET</p>
+=== P5b-drop-shadow-fill-transparent hide
+<p style="-webkit-text-fill-color:transparent;filter:drop-shadow(1px 1px 0 #000)">SECRET</p>
+=== P6-rem-root-zero hide
+<html style="font-size:0"><body><p style="font-size:1rem">SECRET</p></body></html>
+=== P6b-rem-root-1px hide
+<html style="font-size:1px"><body><p style="font-size:2rem">SECRET</p></body></html>
+=== P7-cqw-container hide
+<div style="container-type:inline-size;width:100px"><p style="font-size:1cqw">SECRET</p></div>
+=== P8-template-meta-dark hide
+<template><meta name="color-scheme" content="dark"></template><p style="color:#fff">SECRET</p>
+=== P8b-shadow-meta-dark hide
+<div><template shadowrootmode=open><meta name="color-scheme" content="dark"></template></div><p style="color:#fff">SECRET</p>
+=== S1-meta-name-case hide
+<meta name="Color-Scheme" content="dark"><p style="color:#1e1e1e">SECRET</p>
+=== S2-meta-name-space hide
+<meta name=" color-scheme" content="dark"><p style="color:#fff">SECRET</p>
+=== S3-meta-content-comment hide
+<meta name="color-scheme" content="dark/**/"><p style="color:#1e1e1e">SECRET</p>
+=== S4-meta-dark-root-light hide
+<meta name="color-scheme" content="dark"><style>html{color-scheme:light}</style><p style="color:#fff">SECRET</p>
+=== C10-scheme-initial hide
+<div style="color-scheme:dark;background:#000"><p style="color-scheme:initial">SECRET</p></div>
+=== P9-template-filter show
+<template><svg><filter id=F><feFlood flood-color=white /></filter></svg></template><p style="filter:url(#F)">VISIBLE</p>
+=== P9b-id-first-not-filter show
+<div id=F></div><svg width=0 height=0><filter id=F><feFlood flood-color=white /></filter></svg><p style="filter:url(#F)">VISIBLE</p>
+=== C1-cq-inline-size-prop hide
+<style>.c{container-type:inline-size;inline-size:100px}.x{display:none}@container (min-width:600px){.x{display:block}}</style><div class=c><p class=x>SECRET</p></div>
+=== C2-cq-padding-inline hide
+<style>.c{container-type:inline-size;padding-inline:300px}.x{display:none}@container (min-width:600px){.x{display:block}}</style><div class=c><p class=x>SECRET</p></div>
+=== C3-cq-border-longhands hide
+<style>.c{container-type:inline-size;border-style:solid;border-width:0 300px}.x{display:none}@container (min-width:600px){.x{display:block}}</style><div class=c><p class=x>SECRET</p></div>
+=== C4-cq-margin-inline hide
+<style>.c{container-type:inline-size;margin-inline:300px}.x{display:none}@container (min-width:600px){.x{display:block}}</style><div class=c><p class=x>SECRET</p></div>
+=== C5-cq-max-inline-size hide
+<style>.c{container-type:inline-size;max-inline-size:100px}.x{display:none}@container (min-width:600px){.x{display:block}}</style><div class=c><p class=x>SECRET</p></div>
+=== C6-cq-padding-calc-spaces hide
+<style>.c{container-type:inline-size;padding:0 calc(100px + 200px)}.x{display:none}@container (min-width:600px){.x{display:block}}</style><div class=c><p class=x>SECRET</p></div>
+=== C7-cq-float-container hide
+<style>.c{container-type:inline-size;float:left}.x{display:none}@container (min-width:600px){.x{display:block}}</style><div class=c><p class=x>SECRET</p></div>
+=== C9-cq-em-container-font hide
+<style>.c{container-type:inline-size;width:700px;font-size:32px}.x{display:none}@container (min-width:30em){.x{display:block}}</style><div class=c><p class=x>SECRET</p></div>
+=== C9b-cq-em-container-font show
+<style>.c{container-type:inline-size;width:700px;font-size:32px}@container (min-width:30em){.x{display:none}}</style><div class=c><p class=x>VISIBLE</p></div>
+=== C13-body-margin-left-only hide
+<style>.x{display:none}@container (min-width:895px){.x{display:block}}</style><body style="margin-left:0"><div style="container-type:inline-size"><p class=x>SECRET</p></div></body>
+=== P11-vw-hidden-wide hide
+<p style="font-size:clamp(0px, (1000px - 100vw) * 1000, 16px)">SECRET</p>
+=== P11b-vw-in-media-wide-only hide
+<style>@media (min-width:1200px) and (max-width:100vw){.x{display:none}}</style><p class=x>SECRET</p>

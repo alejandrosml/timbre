@@ -142,23 +142,50 @@ pub fn watch_parent() {
     });
 }
 
+/// Exit codes of `timbre probe`.
+pub const PROBE_OK: i32 = 0;
+/// Mail's data is there but macOS does not let Timbre read it.
+pub const PROBE_NO_ACCESS: i32 = 1;
+/// Something else: Mail never set up, a damaged or unknown database.
+pub const PROBE_OTHER: i32 = 2;
+
 /// In a launched server that cannot read Mail's data yet: check every few
 /// seconds, from a fresh process (macOS settles a process's access when it
-/// starts), and ask the launcher for a restart once Mail's data is readable.
-pub fn restart_when_readable() {
+/// starts), keep `why` up to date, and ask the launcher for a restart once
+/// Mail's data is readable.
+pub fn restart_when_readable(why: Arc<Mutex<String>>) {
     if !launched() {
         return;
     }
-    let _ = std::thread::Builder::new().name("timbre-access".into()).spawn(|| {
+    let _ = std::thread::Builder::new().name("timbre-access".into()).spawn(move || {
         let started = Instant::now();
         let spawner = Spawner::pick();
+        let mut code = PROBE_NO_ACCESS;
         loop {
-            let pause = if started.elapsed() < Duration::from_secs(600) { 2 } else { 10 };
+            // Access is usually granted within minutes; other causes (Mail to
+            // set up) take longer to change.
+            let early = started.elapsed() < Duration::from_secs(600);
+            let pause = match code {
+                PROBE_NO_ACCESS if early => 2,
+                PROBE_NO_ACCESS => 10,
+                _ if early => 5,
+                _ => 30,
+            };
             std::thread::sleep(Duration::from_secs(pause));
-            let readable = spawner.spawn(&["probe".into()], false).map(|c| (c.wait)() == 0).unwrap_or(false);
-            if readable {
+            let Ok(probe) = spawner.spawn(&["probe".into()], true) else { continue };
+            drop(probe.stdin);
+            let mut said = String::new();
+            if let Some(mut out) = probe.stdout {
+                let _ = out.read_to_string(&mut said);
+            }
+            code = (probe.wait)();
+            if code == PROBE_OK {
                 tracing::info!("Mail's data is readable now: restarting");
                 std::process::exit(RESTART);
+            }
+            let said = said.trim();
+            if !said.is_empty() {
+                *why.lock().unwrap_or_else(|e| e.into_inner()) = said.to_string();
             }
         }
     });
@@ -198,6 +225,9 @@ impl Relay {
     /// A new server: replay the handshake if Claude completed it, else send
     /// what waits.
     fn start_child(&mut self, tx: mpsc::Sender<String>) {
+        if self.client_closed {
+            return; // Claude is gone: `tx` dropped, the server reads end of input and stops
+        }
         self.to_child = Some(tx);
         match self.initialize.clone() {
             Some((id, line)) if self.init_answered => {
@@ -211,6 +241,11 @@ impl Relay {
 
     /// Send unanswered requests in order, then the other waiting messages.
     fn flush(&mut self) {
+        if self.initialize.is_none() && self.pending.is_empty() {
+            // A client without a handshake: notifications and replies meant
+            // for the previous server must not be the new one's first message.
+            self.queue.clear();
+        }
         let lines: Vec<String> =
             self.pending.values().map(|(_, l)| l.clone()).chain(std::mem::take(&mut self.queue)).collect();
         for l in &lines {
@@ -222,6 +257,12 @@ impl Relay {
     fn on_client(&mut self, line: String, msg: Option<&Value>) {
         let method = msg.and_then(|m| m.get("method")).and_then(Value::as_str);
         let id = msg.and_then(|m| m.get("id")).filter(|v| !v.is_null()).cloned();
+        if method == Some("notifications/cancelled")
+            && let Some(cancelled) = msg.and_then(|m| m.pointer("/params/requestId"))
+        {
+            // Not to be run again after a restart.
+            self.pending.retain(|_, (p, _)| !same_id(p, cancelled));
+        }
         match (method, id) {
             (Some(method), Some(id)) => {
                 if method == "initialize" {
@@ -258,7 +299,7 @@ impl Relay {
             return true;
         }
         let Some(id) = m.get("id").filter(|v| !v.is_null()) else { return true };
-        if self.replaying.as_ref() == Some(id) {
+        if self.replaying.as_ref().is_some_and(|r| same_id(r, id)) {
             self.replaying = None;
             if let Some(l) = self.initialized.clone() {
                 self.write_child(&l);
@@ -266,14 +307,35 @@ impl Relay {
             self.flush();
             return false;
         }
-        if let Some(seq) = self.pending.iter().find(|(_, (p, _))| p == id).map(|(s, _)| *s) {
+        if let Some(seq) = self.pending.iter().find(|(_, (p, _))| same_id(p, id)).map(|(s, _)| *s) {
             self.pending.remove(&seq);
         }
-        if self.initialize.as_ref().is_some_and(|(i, _)| i == id) {
+        if self.initialize.as_ref().is_some_and(|(i, _)| same_id(i, id)) {
             self.init_answered = true;
         }
         true
     }
+}
+
+/// JSON-RPC ids compare by value: 7 and 7.0 are the same request.
+fn same_id(a: &Value, b: &Value) -> bool {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// Lines of a stream, as text even when a byte is not UTF-8 (rmcp ignores
+/// a line it cannot read; it must not end the session).
+fn lines_lossy(mut input: impl BufRead) -> impl Iterator<Item = String> {
+    let mut buf = Vec::new();
+    std::iter::from_fn(move || {
+        buf.clear();
+        match input.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(String::from_utf8_lossy(&buf).trim_end_matches(['\n', '\r']).to_string()),
+        }
+    })
 }
 
 fn lock(state: &Mutex<Relay>) -> MutexGuard<'_, Relay> {
@@ -292,8 +354,7 @@ fn writer(mut stdin: Box<dyn Write + Send>, rx: mpsc::Receiver<String>) {
 /// Forward a server's messages to Claude.
 fn forward_child(stdout: Box<dyn Read + Send>, state: &Mutex<Relay>) {
     let out = std::io::stdout();
-    for line in BufReader::new(stdout).lines() {
-        let Ok(line) = line else { break };
+    for line in lines_lossy(BufReader::new(stdout)) {
         let msg = serde_json::from_str::<Value>(&line).ok();
         if !lock(state).on_child(msg.as_ref()) {
             continue;
@@ -307,8 +368,7 @@ fn forward_child(stdout: Box<dyn Read + Send>, state: &Mutex<Relay>) {
 
 /// Forward Claude's messages to the server, keeping what a restart needs.
 fn forward_client(input: impl BufRead, state: &Mutex<Relay>) {
-    for line in input.lines() {
-        let Ok(line) = line else { break };
+    for line in lines_lossy(input) {
         if line.trim().is_empty() {
             continue;
         }
@@ -327,13 +387,24 @@ fn relay(spawner: Spawner, args: &[OsString], first: Spawned) -> i32 {
     loop {
         let child = match next.take() {
             Some(c) => c,
-            None => match spawner.spawn(args, true) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!("could not restart the server: {e}");
-                    return 1;
+            None => {
+                // A busy system may refuse a new process for a moment.
+                let mut tries = 0;
+                loop {
+                    match spawner.spawn(args, true) {
+                        Ok(c) => break c,
+                        Err(e) if tries < 5 => {
+                            tracing::warn!("could not restart the server ({e}), trying again");
+                            tries += 1;
+                            std::thread::sleep(Duration::from_secs(1));
+                        }
+                        Err(e) => {
+                            tracing::error!("could not restart the server: {e}");
+                            return 1;
+                        }
+                    }
                 }
-            },
+            }
         };
         let (Some(stdin), Some(stdout)) = (child.stdin, child.stdout) else { return 1 };
         let (tx, rx) = mpsc::channel();

@@ -40,6 +40,32 @@ fn env_str(key: &str) -> Option<String> {
     if v.is_empty() || v.starts_with("${") || v.eq_ignore_ascii_case("null") { None } else { Some(v.to_string()) }
 }
 
+/// The mailbox roles search skips. Unset: junk and trash. Set but empty (the
+/// user cleared the setting), or "none": nothing. Words are read as roles in
+/// any language Timbre knows ("spam", "corbeille"…).
+fn excluded_roles(raw: Option<&str>) -> Vec<String> {
+    let default = || vec!["junk".to_string(), "trash".to_string()];
+    let Some(v) = raw.map(str::trim) else { return default() };
+    if v.starts_with("${") || v.eq_ignore_ascii_case("null") {
+        return default();
+    }
+    if v.is_empty() || v.eq_ignore_ascii_case("none") {
+        return vec![];
+    }
+    let mut roles: Vec<String> = vec![];
+    for word in v.split([',', ';', '\n']).map(str::trim).filter(|w| !w.is_empty()) {
+        match crate::store::Role::from_alias(word) {
+            Some(r) if r != crate::store::Role::Inbox => {
+                if !roles.iter().any(|x| x == r.as_str()) {
+                    roles.push(r.as_str().to_string());
+                }
+            }
+            _ => tracing::warn!("excluded mailboxes: '{word}' is not a role (junk, trash, sent, drafts, archive)"),
+        }
+    }
+    roles
+}
+
 fn env_bool(key: &str, default: bool) -> bool {
     match env_str(key).map(|s| s.to_ascii_lowercase()) {
         Some(s) if ["1", "true", "yes", "on"].contains(&s.as_str()) => true,
@@ -71,10 +97,7 @@ impl Config {
                 })
                 .unwrap_or_default()
         };
-        let excluded = {
-            let l = list("TIMBRE_EXCLUDED_MAILBOXES");
-            if l.is_empty() { vec!["junk".to_string(), "trash".to_string()] } else { l }
-        };
+        let excluded = excluded_roles(std::env::var("TIMBRE_EXCLUDED_MAILBOXES").ok().as_deref());
         Config {
             mail_root: path("TIMBRE_MAIL_ROOT", "~/Library/Mail"),
             accounts_db: path("TIMBRE_ACCOUNTS_DB", "~/Library/Accounts/Accounts4.sqlite"),
@@ -117,6 +140,15 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excluded_mailboxes_setting() {
+        assert_eq!(excluded_roles(None), vec!["junk", "trash"]);
+        assert_eq!(excluded_roles(Some("${user_config.excluded_mailboxes}")), vec!["junk", "trash"]);
+        assert_eq!(excluded_roles(Some("")), Vec::<String>::new(), "cleared: nothing skipped");
+        assert_eq!(excluded_roles(Some("spam, Corbeille, sent")), vec!["junk", "trash", "sent"]);
+        assert_eq!(excluded_roles(Some("junk,inbox,whatever")), vec!["junk"]);
+    }
 
     #[test]
     fn allowlist_rules() {

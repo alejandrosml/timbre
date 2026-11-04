@@ -181,7 +181,9 @@ pub fn write_message(v10: &Path, conn: &Connection, m: &Msg) -> Result<()> {
     let sender = conn.last_insert_rowid();
     conn.execute("INSERT INTO addresses(address, comment) VALUES(?1, '')", [m.to])?;
     let to = conn.last_insert_rowid();
-    let attach = if m.raw.contains("attachment;") { 1i64 << 10 } else { 0 };
+    // Like Mail today: the attachment count bits mostly hold 63 (unknown),
+    // and Mail's own counts include inline images (102: 17 of them).
+    let attach = if m.id == 102 { 17i64 << 10 } else { 63i64 << 10 };
     let flags = attach | if m.read { 1 } else { 0 };
     conn.execute(
         "INSERT INTO messages(ROWID, sender, subject_prefix, subject, date_sent, date_received, mailbox, flags, read, flagged, deleted, size, conversation_id)
