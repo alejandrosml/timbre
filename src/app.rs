@@ -117,35 +117,35 @@ pub struct MailView {
     pub id: i64,
     pub date: String,
     pub from: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reply_to: Vec<String>,
     pub to: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cc: Vec<String>,
     pub subject: String,
     pub mailbox: String,
     pub account: String,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unread: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flagged: bool,
     /// Signs the sender may not be who they claim to be.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// SPF/DKIM/DMARC results from the receiving server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
     /// Characters of hidden or invisible text removed from the body.
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub hidden_text_removed: usize,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unsubscribe: Option<String>,
     pub body: String,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
     pub notice: String,
 }
@@ -237,12 +237,12 @@ pub struct ThreadMessage {
     pub from: String,
     pub subject: String,
     pub mailbox: String,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unread: bool,
-    #[serde(skip_serializing_if = "is_zero_i64")]
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub attachments: i64,
     pub text: String,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
 }
 
@@ -299,7 +299,7 @@ pub struct MailboxView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     pub total: i64,
-    #[serde(skip_serializing_if = "is_zero_i64")]
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub unread: i64,
 }
 
@@ -358,7 +358,7 @@ pub struct AttachmentText {
     pub mime: String,
     pub size: usize,
     pub text: String,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
     pub notice: String,
 }
@@ -460,11 +460,11 @@ pub struct StatusView {
     pub index_megabytes: Option<u64>,
     pub read_only: bool,
     pub sending_enabled: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub send_allowlist: Vec<String>,
     pub excluded_from_search: Vec<String>,
     pub attachments_folder: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
 }
 

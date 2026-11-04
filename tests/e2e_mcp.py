@@ -51,11 +51,62 @@ assert "move_mail" not in ro and tools[names.index("move_mail")]["annotations"][
 size = len(json.dumps(tools))
 print(f"tools/list payload: {size} chars (~{size//4} tokens)")
 
+# Clients such as Claude Desktop reject a result that does not match the
+# tool's advertised output schema: check every result the same way.
+schemas = {t["name"]: t.get("outputSchema") for t in tools}
+
+def conforms(schema, value, defs, path="$"):
+    if schema is None or schema is True:
+        return
+    if "$ref" in schema:
+        name = schema["$ref"].rsplit("/", 1)[-1]
+        return conforms(defs[name], value, defs, path)
+    for key in ("anyOf", "oneOf"):
+        if key in schema:
+            errors = []
+            for option in schema[key]:
+                try:
+                    conforms(option, value, defs, path)
+                    break
+                except AssertionError as e:
+                    errors.append(str(e))
+            else:
+                raise AssertionError(f"{path}: matches no option: {errors}")
+    types = schema.get("type")
+    if types is not None:
+        types = types if isinstance(types, list) else [types]
+        kinds = {"null": value is None, "boolean": isinstance(value, bool),
+                 "integer": isinstance(value, int) and not isinstance(value, bool),
+                 "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+                 "string": isinstance(value, str), "array": isinstance(value, list),
+                 "object": isinstance(value, dict)}
+        assert any(kinds[t] for t in types), f"{path}: {value!r} is not {types}"
+    if "enum" in schema:
+        assert value in schema["enum"], f"{path}: {value!r} not in {schema['enum']}"
+    if isinstance(value, dict):
+        for key in schema.get("required", []):
+            assert key in value, f"{path}: missing required property {key!r}"
+        for key, sub in (schema.get("properties") or {}).items():
+            if key in value:
+                conforms(sub, value[key], defs, f"{path}.{key}")
+    if isinstance(value, list) and "items" in schema:
+        for i, item in enumerate(value):
+            conforms(schema["items"], item, defs, f"{path}[{i}]")
+
+checked = set()
 def call(name, args):
     r = rpc("tools/call", {"name": name, "arguments": args})
     if r.get("isError"):
         raise SystemExit(f"{name} error: {r['content']}")
-    return r.get("structuredContent") or json.loads(r["content"][0]["text"])
+    out = r.get("structuredContent")
+    if schemas.get(name):
+        assert out is not None, f"{name}: structured content missing"
+        try:
+            conforms(schemas[name], out, schemas[name].get("$defs", {}))
+        except AssertionError as e:
+            raise SystemExit(f"{name}: result does not match its output schema: {e}")
+        checked.add(name)
+    return out or json.loads(r["content"][0]["text"])
 
 for _ in range(50):  # wait for the background index
     st = call("mail_status", {})
@@ -77,6 +128,15 @@ print("read 101: body ok, hidden removed:", m["hidden_text_removed"], "| notice:
 m = call("read_mail", {"id": 105})
 print("read 105 warnings:", m["warnings"])
 assert any("DMARC" in w for w in m["warnings"])
+# Results with optional parts left out (no attachment, read, not flagged…).
+m = call("read_mail", {"id": 102})
+call("search_mail", {"query": "project", "group_threads": False})
+call("search_mail", {"unread": False, "sort": "newest", "limit": 50})
+call("get_thread", {"id": 101})
+call("list_mailboxes", {})
+att = call("read_attachment", {"id": 101, "index": 0})
+assert "42,50" in att["text"], att
+print("results match their output schemas:", sorted(checked))
 r = rpc("tools/call", {"name": "search_mail", "arguments": {"mailbox": "nowhere"}})
 assert r.get("isError") and "list_mailboxes" in r["content"][0]["text"]
 print("errors guide the model: ok")

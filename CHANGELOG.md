@@ -5,6 +5,16 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-04
+
+### Fixed
+- Claude Desktop rejected most results ("Structured content does not match
+  the tool's output schema"). Fields left out when empty (a message without
+  attachments, already read, without warnings…) were listed as required in
+  the output schemas; they are optional now. The end-to-end test checks
+  every result against the schema the server advertises, and a unit test
+  keeps such fields optional.
+
 ## [0.4.2] - 2026-11-04
 
 ### Fixed

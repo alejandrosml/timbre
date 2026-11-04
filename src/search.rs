@@ -56,11 +56,11 @@ pub struct Hit {
     pub subject: String,
     pub mailbox: String,
     pub account: String,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unread: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flagged: bool,
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub attachments: i64,
     /// Matching excerpt, matches marked «like this».
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,7 +80,7 @@ fn is_zero(v: &i64) -> bool {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SearchResult {
     pub total: u64,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub total_is_lower_bound: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_offset: Option<u32>,

@@ -471,3 +471,34 @@ fn filters_ignore_accents_and_case() {
     let r = search(&env, SearchParams { subject: Some("comite".into()), ..Default::default() });
     assert_eq!(ids(&r), vec![104]);
 }
+
+/// MCP clients such as Claude Desktop reject a result missing a property
+/// that the output schema lists as required. A field left out when empty
+/// must therefore also be optional in the schema: `#[serde(default, ...)]`.
+#[test]
+fn fields_left_out_are_optional_in_schemas() {
+    let sources = [
+        ("actions.rs", include_str!("actions.rs")),
+        ("app.rs", include_str!("app.rs")),
+        ("degraded.rs", include_str!("degraded.rs")),
+        ("mime.rs", include_str!("mime.rs")),
+        ("search.rs", include_str!("search.rs")),
+        ("server.rs", include_str!("server.rs")),
+    ];
+    let mut checked = 0;
+    for (file, text) in sources {
+        for (n, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if !line.starts_with("#[serde(") || !line.contains("skip_serializing_if") {
+                continue;
+            }
+            checked += 1;
+            // Option fields are optional in schemas without help.
+            if line.contains("Option::is_none") {
+                continue;
+            }
+            assert!(line.contains("default"), "{file}:{}: add `default` to {line}", n + 1);
+        }
+    }
+    assert!(checked > 20, "the scan found the attributes ({checked})");
+}

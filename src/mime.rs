@@ -14,7 +14,7 @@ pub struct AttachmentInfo {
     #[serde(rename = "type")]
     pub mime: String,
     pub size: usize,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inline: bool,
     /// Executable, disguised or macro-enabled file.
     #[serde(skip_serializing_if = "Option::is_none")]

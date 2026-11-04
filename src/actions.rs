@@ -115,9 +115,9 @@ pub struct DraftResult {
     pub status: String,
     pub subject: String,
     pub to: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cc: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bcc: Vec<String>,
     pub note: String,
 }
@@ -245,7 +245,7 @@ pub struct MarkParams {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BatchResult {
     pub done: usize,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed: Vec<Failure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub undo_token: Option<String>,
@@ -442,9 +442,9 @@ pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
 pub struct PreparedSend {
     pub token: String,
     pub to: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cc: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bcc: Vec<String>,
     pub subject: String,
     pub expires_in_minutes: u32,
