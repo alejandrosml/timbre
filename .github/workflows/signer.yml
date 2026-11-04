@@ -67,6 +67,43 @@ jobs:
           codesign --display --entitlements - out/server/timbre 2>&1 | grep -q "automation.apple-events"
           test -x out/server/timbre
           zipinfo ~/Downloads/timbre-9.9.9-test.mcpb | grep -q 'rwxr-xr-x.*server/timbre'
+          # Timbre 0.5 and later: an app bundle.
+          mkdir -p app/server/Timbre.app/Contents/MacOS app/server/Timbre.app/Contents/Resources
+          printf '{"name": "timbre", "version": "9.9.8"}\n' > app/manifest.json
+          cp pkg/server/timbre app/server/Timbre.app/Contents/MacOS/timbre
+          printf 'icon' > app/server/Timbre.app/Contents/Resources/Timbre.icns
+          cat > app/server/Timbre.app/Contents/Info.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleIdentifier</key><string>io.github.alejandrosml.timbre</string>
+          <key>CFBundleExecutable</key><string>timbre</string>
+          <key>CFBundleIconFile</key><string>Timbre</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          </dict></plist>
+          PLIST
+          python3 - <<'EOF'
+          import os, zipfile
+          with zipfile.ZipFile("timbre-9.9.8.mcpb", "w", zipfile.ZIP_DEFLATED) as z:
+              for base, _, files in os.walk("app"):
+                  for f in files:
+                      path = os.path.join(base, f)
+                      info = zipfile.ZipInfo(os.path.relpath(path, "app"))
+                      info.create_system = 3
+                      info.external_attr = (0o755 if f == "timbre" else 0o644) << 16
+                      z.writestr(info, open(path, "rb").read())
+          EOF
+          mv timbre-9.9.8.mcpb ~/Downloads/
+          TIMBRE_SIGNER_TEST=1 bash $S sign-run timbre-9.9.8.mcpb || true
+          cat "$HOME/Library/Application Support/Timbre/signing/last-sign.log"
+          mkdir out2 && ditto -x -k ~/Downloads/timbre-9.9.8-test.mcpb out2
+          codesign --verify --strict --deep --verbose=2 out2/server/Timbre.app
+          codesign --display --verbose=2 out2/server/Timbre.app 2>&1 | tee sig2.txt
+          grep -q "Identifier=io.github.alejandrosml.timbre" sig2.txt
+          grep -q "Authority=Developer ID Application: Timbre Test" sig2.txt
+          grep -q "flags=0x10000(runtime)" sig2.txt
+          test -x out2/server/Timbre.app/Contents/MacOS/timbre
+          zipinfo ~/Downloads/timbre-9.9.8-test.mcpb | grep -q 'rwxr-xr-x.*Contents/MacOS/timbre'
           after="$(security list-keychains -d user)"
           [ "$before" = "$after" ] || { echo "keychain search list not restored"; exit 1; }
           bash $S status

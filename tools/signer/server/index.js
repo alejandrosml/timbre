@@ -90,7 +90,7 @@ rl.on('line', (line) => {
         result: {
           protocolVersion: (params && params.protocolVersion) || '2025-06-18',
           capabilities: { tools: {} },
-          serverInfo: { name: 'timbre-signer', title: 'Timbre Signer', version: '0.1.1' },
+          serverInfo: { name: 'timbre-signer', title: 'Timbre Signer', version: '0.2.0' },
         },
       });
     case 'tools/list':

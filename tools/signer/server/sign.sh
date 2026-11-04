@@ -142,11 +142,22 @@ sign_run() {
   SIGN_TMP="$tmp" # the EXIT trap runs after this function's locals are gone
   trap 'search_restore; [ -n "$SIGN_TMP" ] && rm -rf "$SIGN_TMP"' EXIT
   ditto -x -k "$DL/$file" "$tmp/x" || die "cannot unpack $file"
-  # Zip entries written by mcpb carry no file type, so ditto drops their
-  # modes: restore them (the signature does not cover file modes).
-  chmod -R u+rwX,go+rX "$tmp/x" && chmod 755 "$tmp/x/server/timbre"
   grep -q '"name": *"timbre"' "$tmp/x/manifest.json" || die "$file is not a Timbre package"
   version="$(sed -n 's/.*"version": *"\([0-9.]*\)".*/\1/p' "$tmp/x/manifest.json" | head -1)"
+  # Timbre 0.5 ships an app bundle, for its name and icon in System
+  # Settings and Finder; earlier versions a bare executable.
+  local target exe
+  if [ -d "$tmp/x/server/Timbre.app" ]; then
+    target="$tmp/x/server/Timbre.app"
+    exe="$target/Contents/MacOS/timbre"
+  else
+    target="$tmp/x/server/timbre"
+    exe="$target"
+  fi
+  [ -f "$exe" ] || die "$file holds no Timbre executable"
+  # Zip entries written by mcpb carry no file type, so ditto drops their
+  # modes: restore them (the signature does not cover file modes).
+  chmod -R u+rwX,go+rX "$tmp/x" && chmod 755 "$exe"
   cat > "$tmp/entitlements.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -160,18 +171,22 @@ PLIST
   echo "signing with $(identity_name)"
   search_add
   codesign --force --timestamp --options runtime --identifier io.github.alejandrosml.timbre \
-    --entitlements "$tmp/entitlements.plist" --keychain "$KC" --sign "$id" "$tmp/x/server/timbre" \
+    --entitlements "$tmp/entitlements.plist" --keychain "$KC" --sign "$id" "$target" \
     || die "codesign failed"
   search_restore
-  codesign --verify --strict --verbose=2 "$tmp/x/server/timbre" || die "the signature does not verify"
+  codesign --verify --strict --deep --verbose=2 "$target" || die "the signature does not verify"
   if [ "$testing" = 1 ]; then
     out="$DL/timbre-$version-test.mcpb"
-    (cd "$tmp/x" && zip -qr -X "$tmp/signed.mcpb" .) && mv "$tmp/signed.mcpb" "$out"
+    (cd "$tmp/x" && zip -qr -X -y "$tmp/signed.mcpb" .) && mv "$tmp/signed.mcpb" "$out"
     echo "done (test, not notarized): $out"
     return 0
   fi
   echo "notarizing (Apple usually answers within minutes)…"
-  ditto -c -k "$tmp/x/server/timbre" "$tmp/notarize.zip"
+  if [ -d "$target" ]; then
+    ditto -c -k --keepParent "$target" "$tmp/notarize.zip"
+  else
+    ditto -c -k "$target" "$tmp/notarize.zip"
+  fi
   xcrun notarytool submit "$tmp/notarize.zip" --key "$(conf KEY_FILE)" --key-id "$(conf KEY_ID)" \
     --issuer "$(conf ISSUER)" --wait --timeout 30m --output-format json > "$tmp/notary.json" 2>&1
   cat "$tmp/notary.json"; echo
@@ -180,8 +195,12 @@ PLIST
     [ -n "$sub" ] && xcrun notarytool log "$sub" --key "$(conf KEY_FILE)" --key-id "$(conf KEY_ID)" --issuer "$(conf ISSUER)"
     die "notarization was not accepted"
   fi
+  # An app bundle carries the notarization ticket, for checks offline.
+  if [ -d "$target" ]; then
+    xcrun stapler staple "$target" || echo "stapling failed: macOS will check the notarization online"
+  fi
   out="$DL/timbre-$version-signed.mcpb"
-  (cd "$tmp/x" && zip -qr -X "$tmp/signed.mcpb" .) || die "cannot repackage"
+  (cd "$tmp/x" && zip -qr -X -y "$tmp/signed.mcpb" .) || die "cannot repackage"
   mv "$tmp/signed.mcpb" "$out"
   shasum -a 256 "$out"
   echo "done: $out"
