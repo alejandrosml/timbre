@@ -14,8 +14,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::actions::{
-    self, BatchResult, ConfirmParams, DeleteMailboxParams, DeletedMailbox, DraftParams, DraftResult, MarkParams,
-    MoveParams, PreparedSend, Selected, SentResult, UndoParams,
+    self, BatchResult, ConfirmParams, DraftParams, DraftResult, MarkParams, MoveParams, PreparedSend, Selected,
+    SentResult, UndoParams,
 };
 use crate::app::{
     self, AttachmentParams, AttachmentText, Ctx, MailView, MailboxesView, ReadParams, SavedAttachment, StatusView,
@@ -51,16 +51,8 @@ pub fn instructions(cfg: &crate::config::Config) -> String {
     text
 }
 
-const WRITE_TOOLS: &[&str] = &[
-    "save_attachment",
-    "create_draft",
-    "mark_mail",
-    "move_mail",
-    "undo_move",
-    "delete_mailbox",
-    "prepare_send",
-    "confirm_send",
-];
+const WRITE_TOOLS: &[&str] =
+    &["save_attachment", "create_draft", "mark_mail", "move_mail", "undo_move", "prepare_send", "confirm_send"];
 
 #[derive(Clone)]
 pub struct Timbre {
@@ -318,24 +310,6 @@ impl Timbre {
     )]
     async fn undo_move(&self, Parameters(p): Parameters<UndoParams>) -> Result<Json<BatchResult>, String> {
         actions::undo(&self.ctx, &p).await.map(Json)
-    }
-
-    #[tool(
-        name = "delete_mailbox",
-        description = "Delete an empty mailbox (a folder, or a Gmail label) in Mail, on the server too, without Mail's confirmation dialog: nothing is lost. A mailbox holding messages is refused: move them first with move_mail (which can be undone), then delete it; one holding other mailboxes too. An account's inbox, drafts, sent mail, trash and junk, Gmail's own folders and the mailboxes Mail keeps for itself are never deleted.",
-        annotations(
-            title = "Delete an empty mailbox",
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn delete_mailbox(
-        &self,
-        Parameters(p): Parameters<DeleteMailboxParams>,
-    ) -> Result<Json<DeletedMailbox>, String> {
-        actions::delete_mailbox(&self.ctx, &p).await.map(Json)
     }
 
     #[tool(

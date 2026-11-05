@@ -1,6 +1,6 @@
 [package]
 name = "timbre-mail"
-version = "0.6.0"
+version = "0.5.7"
 edition = "2024"
 rust-version = "1.98"
 description = "Timbre — the connector for Apple Mail and Claude: instant full-text search, safe reading and filing over MCP."

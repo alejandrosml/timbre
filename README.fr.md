@@ -136,7 +136,6 @@ L'index plein texte se construit en arrière-plan au premier lancement (environ 
 | `create_draft` | Nouveau, réponse, réponse à tous, transfert — en brouillon | ajoute un brouillon |
 | `mark_mail` | Lu ou non lu, drapeau | oui |
 | `move_mail` / `undo_move` | Archives, corbeille, n'importe quelle boîte — et retour (Gmail : corbeille et indésirables) | oui, réversible |
-| `delete_mailbox` | Supprimer une boîte vide ou un libellé Gmail, sans la confirmation de Mail (jamais une boîte qui contient du courrier, ni la réception, les envoyés, les brouillons, la corbeille ou les indésirables) | oui, rien n'est perdu |
 | `prepare_send` / `confirm_send` | Envoi en deux étapes (seulement si activé) | envoie |
 
 ## Réglages

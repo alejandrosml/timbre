@@ -1250,39 +1250,3 @@ fn mailboxes_are_found_as_mail_shows_them() {
     let e = move_mail(&env, vec![1234], "Archives/2009").unwrap_err();
     assert!(e.contains(crate::mailapp::unavailable().unwrap()), "{e}");
 }
-
-/// Only an empty mailbox of the user's is deleted: one holding mail or
-/// other mailboxes is refused with what to do, and so are the mailboxes an
-/// account, Gmail or Mail keeps for itself.
-#[test]
-fn only_empty_mailboxes_of_the_users_are_deleted() {
-    let env = setup_with("deletebox", false, folders_inside_inbox);
-    let delete = |mailbox: &str, account: Option<&str>| {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let p = crate::actions::DeleteMailboxParams { mailbox: mailbox.into(), account: account.map(Into::into) };
-        rt.block_on(crate::actions::delete_mailbox(&env.ctx, &p)).unwrap_err()
-    };
-    let refused = |mailbox: &str, account: Option<&str>, why: &str| {
-        let e = delete(mailbox, account);
-        assert!(e.contains(why), "{mailbox}: {e}");
-    };
-    refused("Archives/Important", Some(LAPOSTE), "holds 1 message(s)");
-    refused("Archives", Some(LAPOSTE), "holds 2 other mailbox(es)");
-    refused("INBOX/OUTBOX", Some(LAPOSTE), "sent mailbox");
-    refused("inbox", Some(LAPOSTE), "inbox mailbox");
-    refused("[Gmail]/Tous les messages", None, "Gmail keeps it");
-    refused("INBOX", None, "matches several mailboxes");
-    refused("Nulle part", None, "No mailbox named");
-    // Empty, and the user's: Mail is asked (never from tests).
-    refused("Archives/2009", Some(LAPOSTE), crate::mailapp::unavailable().unwrap());
-    // Mail's own mailboxes at the top of On My Mac or an account.
-    let kept = |url: &str| {
-        let m = crate::store::parse_mailbox_url(1, url, &Default::default());
-        crate::actions::kept_by_mail(&m)
-    };
-    assert!(kept("local:///SendLater").is_some());
-    assert!(kept("local:///Outbox").is_some());
-    assert!(kept(&format!("imap://{GMAIL}/Notes")).is_some());
-    assert!(kept(&format!("imap://{GMAIL}/Perso")).is_none());
-    assert!(kept(&format!("imap://{LAPOSTE}/INBOX/Archive")).is_none(), "an archive of the user's can go");
-}
