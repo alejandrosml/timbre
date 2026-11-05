@@ -103,19 +103,27 @@ fn real_host(href: &str) -> Option<String> {
 /// Registrable-ish part of a host: the last two labels (three for common
 /// second-level suffixes like co.uk).
 pub fn base_domain(host: &str) -> String {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
     let labels: Vec<&str> = host.split('.').collect();
     let n = labels.len();
     if n <= 2 {
-        return host.to_string();
+        return host;
     }
     let two = format!("{}.{}", labels[n - 2], labels[n - 1]);
-    if ["co.uk", "com.au", "co.jp", "com.br", "com.es", "gouv.fr", "co.nz", "com.mx", "org.uk"].contains(&two.as_str())
-    {
-        format!("{}.{}", labels[n - 3], two)
-    } else {
-        two
-    }
+    if TWO_LABEL_SUFFIXES.contains(&two.as_str()) { format!("{}.{}", labels[n - 3], two) } else { two }
 }
+
+/// Suffixes under which a name is registered at the third level
+/// ("barclays.co.uk"): the common ones of the public suffix list.
+const TWO_LABEL_SUFFIXES: &[&str] = &[
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "nhs.uk", "com.au", "net.au",
+    "org.au", "edu.au", "gov.au", "co.nz", "org.nz", "net.nz", "govt.nz", "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp",
+    "co.kr", "or.kr", "com.cn", "net.cn", "org.cn", "gov.cn", "com.hk", "com.tw", "com.sg", "com.my", "com.ph",
+    "com.vn", "co.th", "co.id", "co.in", "net.in", "org.in", "gov.in", "co.il", "com.tr", "gov.tr", "co.za", "org.za",
+    "com.br", "net.br", "org.br", "gov.br", "com.ar", "com.mx", "gob.mx", "com.co", "com.pe", "com.uy", "com.ve",
+    "com.ec", "com.es", "gob.es", "com.pt", "gouv.fr", "asso.fr", "com.pl", "net.pl", "co.at", "or.at", "com.ua",
+    "com.ru", "com.eg", "com.sa", "com.ng", "co.ke",
+];
 
 const SKIP: &[&str] = &[
     "script", "style", "head", "title", "template", "svg", "math", "embed", "iframe", "frame", "noembed", "noframes",
@@ -1039,13 +1047,33 @@ const MAX_PARSE_DEPTH: usize = 2000;
 fn too_deep(html: &str, limit: usize) -> bool {
     // Linear: every byte is looked at a bounded number of times. End tags
     // only close an element of that name that is open, the self-closing
-    // slash only counts inside svg/math (HTML ignores it), and elements with
-    // implied end tags replace their open sibling instead of nesting.
+    // slash only counts inside svg/math (HTML ignores it, and an HTML
+    // element there leaves them), and elements with implied end tags replace
+    // their open sibling instead of nesting. Comments and the text of
+    // script, style and the like hold no tags, whatever they look like.
     let b = html.as_bytes();
     let mut open: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
     let (mut depth, mut foreign, mut i) = (0usize, 0usize, 0usize);
     while let Some(off) = b[i..].iter().position(|&c| c == b'<') {
         let at = i + off + 1;
+        if b[at..].starts_with(b"!--") {
+            match find_bytes(&b[at + 3..], b"-->") {
+                Some(k) => {
+                    i = at + 3 + k + 3;
+                    continue;
+                }
+                None => return false, // the rest is a comment
+            }
+        }
+        if matches!(b.get(at), Some(b'!' | b'?')) {
+            match b[at..].iter().position(|&c| c == b'>') {
+                Some(k) => {
+                    i = at + k + 1;
+                    continue;
+                }
+                None => return false,
+            }
+        }
         let closing = b.get(at) == Some(&b'/');
         let name_start = if closing { at + 1 } else { at };
         if !b.get(name_start).is_some_and(u8::is_ascii_alphabetic) {
@@ -1059,8 +1087,24 @@ fn too_deep(html: &str, limit: usize) -> bool {
         };
         i = gt + 1;
         let name = b[name_start..name_end].to_ascii_lowercase();
+        if !closing && RAW_TEXT.contains(&name.as_slice()) {
+            if name == b"plaintext" {
+                return false; // text to the end
+            }
+            // Its text, to its end tag, holds no tags.
+            let mut end_tag = b"</".to_vec();
+            end_tag.extend_from_slice(&name);
+            match find_bytes_ci(&b[i..], &end_tag) {
+                Some(k) => i += k + end_tag.len(),
+                None => return false,
+            }
+            continue;
+        }
         if VOID.contains(&name.as_slice()) {
             continue;
+        }
+        if foreign > 0 && !closing && BREAKS_OUT.contains(&name.as_slice()) {
+            foreign = 0; // an HTML element ends svg and math there
         }
         let is_foreign = name == b"svg" || name == b"math";
         if closing {
@@ -1069,7 +1113,7 @@ fn too_deep(html: &str, limit: usize) -> bool {
             {
                 *n -= 1;
                 depth -= 1;
-                foreign -= usize::from(is_foreign);
+                foreign = foreign.saturating_sub(usize::from(is_foreign));
             }
             continue;
         }
@@ -1088,6 +1132,66 @@ fn too_deep(html: &str, limit: usize) -> bool {
         }
     }
     false
+}
+
+/// Elements whose text holds no tags.
+const RAW_TEXT: &[&[u8]] =
+    &[b"script", b"style", b"textarea", b"title", b"xmp", b"iframe", b"noembed", b"noframes", b"plaintext"];
+/// HTML elements that end svg or math content where they appear.
+const BREAKS_OUT: &[&[u8]] = &[
+    b"b",
+    b"big",
+    b"blockquote",
+    b"body",
+    b"br",
+    b"center",
+    b"code",
+    b"dd",
+    b"div",
+    b"dl",
+    b"dt",
+    b"em",
+    b"embed",
+    b"h1",
+    b"h2",
+    b"h3",
+    b"h4",
+    b"h5",
+    b"h6",
+    b"head",
+    b"hr",
+    b"i",
+    b"img",
+    b"li",
+    b"listing",
+    b"menu",
+    b"meta",
+    b"nobr",
+    b"ol",
+    b"p",
+    b"pre",
+    b"ruby",
+    b"s",
+    b"small",
+    b"span",
+    b"strong",
+    b"strike",
+    b"sub",
+    b"sup",
+    b"table",
+    b"tt",
+    b"u",
+    b"ul",
+    b"var",
+    b"font",
+];
+
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn find_bytes_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w.eq_ignore_ascii_case(needle))
 }
 
 /// Formatting elements: closed by a block before their end tag, the parser
@@ -1171,7 +1275,8 @@ fn costly_to_parse(html: &str) -> bool {
 
 /// Pictures written into the HTML (`data:…;base64,…`) shrunk to nothing:
 /// megabytes the parser would carry for no text. What is shown stays the
-/// same: a picture is still there for `url(…)` and `<img>`.
+/// same: a picture is still there for `url(…)` and `<img>`. Only inside a
+/// tag or a style sheet: in the text, "base64," is words a reader sees.
 fn without_inline_pictures(html: &str) -> std::borrow::Cow<'_, str> {
     const KEEP: usize = 64;
     let lower_has = html.as_bytes().windows(7).any(|w| w.eq_ignore_ascii_case(b"base64,"));
@@ -1180,10 +1285,35 @@ fn without_inline_pictures(html: &str) -> std::borrow::Cow<'_, str> {
     }
     let b = html.as_bytes();
     let mut out = String::with_capacity(html.len().min(1 << 20));
-    let mut last = 0;
-    let mut i = 0;
-    while i + 7 <= b.len() {
-        if b[i..i + 7].eq_ignore_ascii_case(b"base64,") {
+    let (mut last, mut i) = (0, 0);
+    let (mut in_tag, mut quote, mut in_style) = (false, None::<u8>, false);
+    while i < b.len() {
+        let c = b[i];
+        if in_tag {
+            match quote {
+                Some(q) if c == q => quote = None,
+                Some(_) => {}
+                None if c == b'"' || c == b'\'' => quote = Some(c),
+                None if c == b'>' => in_tag = false,
+                None => {}
+            }
+        } else if c == b'<' && b.get(i + 1).is_some_and(|n| n.is_ascii_alphabetic() || *n == b'/') {
+            let rest = &b[i + 1..];
+            let names = |n: &[u8]| {
+                rest.len() > n.len()
+                    && rest[..n.len()].eq_ignore_ascii_case(n)
+                    && !rest[n.len()].is_ascii_alphanumeric()
+            };
+            if names(b"style") {
+                in_style = true;
+            } else if names(b"/style") {
+                in_style = false;
+            }
+            (in_tag, quote) = (true, None);
+            i += 1;
+            continue;
+        }
+        if (in_tag || in_style) && i + 7 <= b.len() && b[i..i + 7].eq_ignore_ascii_case(b"base64,") {
             let start = i + 7;
             let mut end = start;
             while end < b.len()
@@ -1198,9 +1328,9 @@ fn without_inline_pictures(html: &str) -> std::borrow::Cow<'_, str> {
                 last = end;
             }
             i = end.max(i + 1);
-        } else {
-            i += 1;
+            continue;
         }
+        i += 1;
     }
     out.push_str(&html[last..]);
     std::borrow::Cow::Owned(out)
@@ -1458,6 +1588,28 @@ mod tests {
         assert!(t0.elapsed() < crate::util::time_limit(2), "{:?}", t0.elapsed());
     }
 
+    /// Pictures written in the HTML shrink; "base64," in the text a reader
+    /// sees is words, kept.
+    #[test]
+    fn only_pictures_written_in_tags_shrink() {
+        let data = "QUJD".repeat(40);
+        let html = format!(
+            "<p>Encoding: base64, then wire the deposit of 9800 EUR to the new account and call me back now</p>\
+             <img src=\"data:image/png;base64,{data}\"><style>.a{{background:url(data:image/png;base64,{data})}}</style>"
+        );
+        let out = without_inline_pictures(&html);
+        assert!(out.contains("then wire the deposit of 9800 EUR"), "{out}");
+        assert!(!out.contains(&data), "{out}");
+        assert!(to_text(&html).text.contains("9800 EUR"));
+    }
+
+    #[test]
+    fn registered_domains_count_their_country_suffix() {
+        assert_eq!(base_domain("alerts.barclays.co.uk"), "barclays.co.uk");
+        assert_eq!(base_domain("evil.co.uk"), "evil.co.uk");
+        assert_eq!(base_domain("Mail.Example.COM."), "example.com");
+    }
+
     #[test]
     fn extreme_nesting_skips_the_tree_builder() {
         let depth = 200_000;
@@ -1481,6 +1633,18 @@ mod tests {
             assert!(to_text(&hostile).degraded);
             assert!(t0.elapsed() < crate::util::time_limit(5));
         }
+        // End tags inside comments or a script close nothing; an HTML element
+        // inside svg leaves it, its slash then meaning nothing.
+        for hostile in ["<div><!--</div>-->".repeat(50_000), format!("<svg>{}", "<div/>".repeat(40_000))] {
+            let t0 = std::time::Instant::now();
+            assert!(too_deep(&hostile, MAX_PARSE_DEPTH));
+            assert!(to_text(&hostile).degraded);
+            assert!(t0.elapsed() < crate::util::time_limit(5), "took {:?}", t0.elapsed());
+        }
+        assert!(too_deep(&"<div><script>x='</div>'</script>".repeat(3000), MAX_PARSE_DEPTH));
+        // Comments and scripts holding tags in ordinary mail change nothing.
+        let ordinary = "<div>a<!-- <div><div><div> --><script>if(a<b){}</script></div>".repeat(3000);
+        assert!(!too_deep(&ordinary, MAX_PARSE_DEPTH));
         let t0 = std::time::Instant::now();
         assert!(!too_deep(&"<br".repeat(n), MAX_PARSE_DEPTH));
         assert!(strip_tags(&"<script>".repeat(n)).len() < 10 * n);

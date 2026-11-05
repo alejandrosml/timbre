@@ -754,12 +754,18 @@ pub fn search(
     // Words with no letter or digit ("€", "@", "🎉"): the index holds none,
     // so they are left out, and said so. A search of such words alone finds
     // nothing rather than every message.
-    let unsearchable: Vec<&str> = parsed
-        .text
-        .iter()
-        .map(|t| t.trim_start_matches('-'))
-        .filter(|t| *t != "OR" && *t != "|" && !t.chars().any(char::is_alphanumeric))
-        .collect();
+    // ("™" folds to letters, and is searched.) Without the index yet,
+    // subjects and senders are matched as written, symbols too.
+    let unsearchable: Vec<&str> = if progress.ready() {
+        parsed
+            .text
+            .iter()
+            .map(|t| t.trim_start_matches('-'))
+            .filter(|t| *t != "OR" && *t != "|" && !crate::norm::fold(t).chars().any(char::is_alphanumeric))
+            .collect()
+    } else {
+        vec![]
+    };
     if !unsearchable.is_empty() {
         notes.push(format!(
             "Left out of the search, having no letter or digit to look for: {}.",

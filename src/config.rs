@@ -106,10 +106,11 @@ impl Config {
             read_only: env_bool("TIMBRE_READ_ONLY", false),
             allow_send: env_bool("TIMBRE_ALLOW_SEND", false),
             send_allowlist: list("TIMBRE_SEND_ALLOWLIST"),
+            // "2.5" or " 3 " as written in a settings field: the whole part.
             max_sends_per_hour: env_str("TIMBRE_MAX_SENDS_PER_HOUR")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10)
-                .min(100),
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .filter(|n| n.is_finite() && *n >= 0.0)
+                .map_or(10, |n| n.floor().min(100.0) as u32),
             excluded_roles: excluded,
             index_enabled: env_bool("TIMBRE_INDEX", true),
             check_updates: env_bool("TIMBRE_CHECK_UPDATES", true),

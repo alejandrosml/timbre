@@ -27,6 +27,10 @@ struct Reader {
     conn: Connection,
     mode: OpenMode,
     checked: Instant,
+    /// The files this connection reads (Mail's database, Timbre's index),
+    /// and when that was checked.
+    files: [Option<(u64, u64)>; 2],
+    file_checked: Instant,
 }
 
 /// A locked reader connection (Mail's database attached as `mail`).
@@ -65,6 +69,7 @@ impl Ctx {
         // kept the file busy when they were to be added), and fail now, with
         // the reason, rather than on each tool.
         let ready = |c: &rusqlite::Connection| c.prepare("SELECT attachments, parser FROM main.docs LIMIT 0").is_ok();
+        let files = [crate::store::file_identity(&store.db_path), crate::store::file_identity(&cfg.index_path())];
         for _ in 0..3 {
             if ready(&conn) {
                 break;
@@ -82,7 +87,7 @@ impl Ctx {
             cfg,
             store,
             progress,
-            reader: Mutex::new(Reader { conn, mode, checked: Instant::now() }),
+            reader: Mutex::new(Reader { conn, mode, checked: Instant::now(), files, file_checked: Instant::now() }),
             locator: Locator::new(),
             undo: Mutex::new(undo),
             sends: Mutex::new(SendState::default()),
@@ -97,6 +102,22 @@ impl Ctx {
             if let Ok((conn, OpenMode::ReadOnly)) = index::open_with_mode(&self.cfg, &self.store, false) {
                 g.conn = conn;
                 g.mode = OpenMode::ReadOnly;
+            }
+        }
+        // Mail rebuilt its database, or Timbre set a damaged index aside (a
+        // new file in its place): read the new one.
+        let every = if cfg!(test) { Duration::ZERO } else { Duration::from_secs(2) };
+        if g.file_checked.elapsed() >= every {
+            g.file_checked = Instant::now();
+            let now =
+                [crate::store::file_identity(&self.store.db_path), crate::store::file_identity(&self.cfg.index_path())];
+            if now.iter().all(Option::is_some)
+                && now != g.files
+                && let Ok((conn, mode)) = index::open_with_mode(&self.cfg, &self.store, false)
+            {
+                tracing::warn!("a database Timbre reads was replaced: reading the new one");
+                let _ = self.store.reload_mailboxes(&conn);
+                (g.conn, g.mode, g.files) = (conn, mode, now);
             }
         }
         Db(g)
@@ -178,7 +199,9 @@ pub struct MailView {
     /// Signs the sender may not be who they claim to be.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    /// SPF/DKIM/DMARC results from the receiving server.
+    /// SPF/DKIM/DMARC results the receiving server wrote in the headers.
+    /// Where a provider writes none, a sender may have written its own: a
+    /// failure tells more than a pass.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
     /// Characters of hidden or invisible text removed from the body.
@@ -229,17 +252,7 @@ pub fn read_mail(ctx: &Ctx, p: &ReadParams) -> Result<MailView, String> {
     match ctx.raw(p.id) {
         Ok((raw, _)) => {
             let parsed = mime::parse(&raw).ok_or_else(|| format!("message {} could not be parsed", p.id))?;
-            view.warnings = mime::warnings(&parsed);
-            for s in security::injection_signals(&parsed.body, &parsed.hidden_sample) {
-                view.warnings.push(format!("possible prompt injection: {s}"));
-            }
-            let incoming = ctx.store.mailbox(meta.mailbox).is_none_or(|m| !matches!(m.role, Role::Sent | Role::Drafts));
-            if incoming
-                && !meta.from_addr.is_empty()
-                && let Ok((0, 0)) = ctx.store.sender_history(&ctx.db(), &meta.from_addr, meta.id)
-            {
-                view.warnings.push("first message from this sender: you have never corresponded".to_string());
-            }
+            view.warnings = warnings_of(ctx, &meta, &parsed);
             view.reply_to = mime::fmt_list(&parsed.reply_to);
             view.to = mime::fmt_list(&parsed.to);
             view.cc = mime::fmt_list(&parsed.cc);
@@ -291,6 +304,13 @@ pub struct ThreadMessage {
     pub unread: bool,
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub attachments: i64,
+    /// What to know before trusting it, as read_mail says: sender checks,
+    /// a first contact, hidden text, instructions aimed at an assistant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Characters of hidden or invisible text removed.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub hidden_text_removed: usize,
     pub text: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
@@ -321,6 +341,8 @@ pub fn get_thread(ctx: &Ctx, p: &ThreadParams) -> Result<ThreadView, String> {
         let parsed = ctx.raw(m.id).ok().and_then(|(raw, _)| mime::parse(&raw));
         let attachments =
             parsed.as_ref().map_or(m.attachments, |p| p.attachments.iter().filter(|a| !a.inline).count() as i64);
+        let warnings = parsed.as_ref().map(|p| warnings_of(ctx, &m, p)).unwrap_or_default();
+        let hidden_text_removed = parsed.as_ref().map_or(0, |p| p.hidden_chars + p.invisible_chars);
         let (text, truncated) = match parsed {
             Some(p) => {
                 let (t, cut) = clip(&quote::strip_quotes_of(&p.body, &p.subject), per);
@@ -338,11 +360,30 @@ pub fn get_thread(ctx: &Ctx, p: &ThreadParams) -> Result<ThreadView, String> {
             mailbox,
             unread: m.unread,
             attachments,
+            warnings,
+            hidden_text_removed,
             text,
             truncated,
         });
     }
     Ok(ThreadView { count, messages, notice: UNTRUSTED.to_string() })
+}
+
+/// What to know before trusting a message: its sender's checks, a first
+/// contact, instructions aimed at an assistant (read_mail and get_thread).
+fn warnings_of(ctx: &Ctx, meta: &crate::store::Meta, parsed: &mime::Parsed) -> Vec<String> {
+    let mut w = mime::warnings(parsed);
+    for s in security::injection_signals(&parsed.body, &parsed.hidden_sample) {
+        w.push(format!("possible prompt injection: {s}"));
+    }
+    let incoming = ctx.store.mailbox(meta.mailbox).is_none_or(|m| !matches!(m.role, Role::Sent | Role::Drafts));
+    if incoming
+        && !meta.from_addr.is_empty()
+        && let Ok((0, 0)) = ctx.store.sender_history(&ctx.db(), &meta.from_addr, meta.id)
+    {
+        w.push("first message from this sender: you have never corresponded".to_string());
+    }
+    w
 }
 
 // ---------------------------------------------------------------- list_mailboxes
@@ -377,8 +418,7 @@ pub fn list_mailboxes(ctx: &Ctx) -> Result<MailboxesView, String> {
     let mailboxes = ctx.store.mailboxes();
     // Rows Mail's database keeps for mailboxes Mail no longer has: not shown
     // in Mail, so not listed.
-    let leftovers = ctx.store.leftovers();
-    let mut list: Vec<_> = mailboxes.values().filter(|m| !leftovers.contains(&m.id)).collect();
+    let mut list: Vec<_> = mailboxes.values().filter(|m| !ctx.store.is_leftover(m)).collect();
     list.sort_by_key(|m| (m.account.to_lowercase(), m.role != Role::Inbox, m.display_path().to_lowercase()));
     // Empty folders that only hold others ("[Gmail]") are left out; an empty
     // folder of the user's is listed, so it can be found and filed into, and
@@ -429,10 +469,21 @@ pub struct AttachmentText {
     #[serde(rename = "type")]
     pub mime: String,
     pub size: usize,
+    /// What to know before trusting it: hidden text, instructions aimed at
+    /// an assistant, an attached message's sender checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Characters of hidden or invisible text removed.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub hidden_text_removed: usize,
     pub text: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
     pub notice: String,
+}
+
+fn is_zero_usize(v: &usize) -> bool {
+    *v == 0
 }
 
 fn attachment(ctx: &Ctx, id: i64, index: usize) -> Result<mime::AttachmentData, String> {
@@ -452,10 +503,28 @@ fn attachment(ctx: &Ctx, id: i64, index: usize) -> Result<mime::AttachmentData, 
 pub fn read_attachment(ctx: &Ctx, p: &AttachmentParams) -> Result<AttachmentText, String> {
     let mime::AttachmentData { name, mime, bytes, charset, .. } = attachment(ctx, p.id, p.index)?;
     let max = p.max_chars.unwrap_or(20_000).clamp(200, 200_000) as usize;
-    let text = crate::extract::to_text(&name, &mime, &bytes, charset.as_deref())?;
-    let (text, truncated) = clip(&text, max);
+    let got = crate::extract::to_text(&name, &mime, &bytes, charset.as_deref()).map_err(|e| no_save_hint(ctx, e))?;
+    let (text, truncated) = clip(&got.text, max);
     let text = security::fence(&text);
-    Ok(AttachmentText { name, mime, size: bytes.len(), text, truncated, notice: UNTRUSTED.to_string() })
+    Ok(AttachmentText {
+        name,
+        mime,
+        size: bytes.len(),
+        warnings: got.warnings,
+        hidden_text_removed: got.hidden,
+        text,
+        truncated,
+        notice: UNTRUSTED.to_string(),
+    })
+}
+
+/// In read-only mode there is no save_attachment to point to.
+fn no_save_hint(ctx: &Ctx, e: String) -> String {
+    if !ctx.cfg.read_only || !e.contains("save_attachment") {
+        return e;
+    }
+    let cut = e.find("Use save_attachment").or_else(|| e.find("use save_attachment")).unwrap_or(e.len());
+    format!("{} The user can open it from the message in Mail.", e[..cut].trim_end().trim_end_matches([';', ',']))
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

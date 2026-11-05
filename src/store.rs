@@ -388,6 +388,13 @@ pub fn text_at(row: &Row<'_>, at: usize) -> rusqlite::Result<String> {
     Ok(lossy(row.get_ref(at)?).unwrap_or_default())
 }
 
+/// Which file is at this path (device, inode): Mail rebuilding its
+/// database puts a new file there, which open connections do not see.
+pub fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
 /// Where Mail keeps a mailbox's folder on the Mac: under its account's
 /// folder (or "Mailboxes" for On My Mac), one `.mbox` per level. None for a
 /// name that cannot be a folder's.
@@ -406,6 +413,17 @@ pub fn mailbox_folder(version_dir: &Path, m: &Mailbox) -> Option<PathBuf> {
         dir.push(format!("{part}.mbox"));
     }
     Some(dir)
+}
+
+/// Whether Mail has the mailbox's folder on the Mac, its name written with
+/// accents composed or not (a volume may tell the two apart).
+pub fn folder_present(version_dir: &Path, m: &Mailbox) -> bool {
+    let Some(folder) = mailbox_folder(version_dir, m) else { return false };
+    if folder.is_dir() {
+        return true;
+    }
+    let decomposed = Mailbox { path: m.path.iter().map(|p| p.nfd().collect()).collect(), ..m.clone() };
+    decomposed.path != m.path && mailbox_folder(version_dir, &decomposed).is_some_and(|f| f.is_dir())
 }
 
 /// Gmail's own trash or spam ("[Gmail]/Corbeille", "[Gmail]/Spam"): never
@@ -794,12 +812,21 @@ impl Store {
         self.leftovers.read().unwrap_or_else(|e| e.into_inner()).1.clone()
     }
 
+    /// Whether this mailbox is such a row now: found so at the last look,
+    /// and its folder still missing (a mailbox made again under its old row
+    /// is Mail's again at once).
+    pub fn is_leftover(&self, m: &Mailbox) -> bool {
+        self.leftovers().contains(&m.id) && !folder_present(&self.version_dir, m)
+    }
+
     fn find_leftovers(&self, conn: &Connection, map: &HashMap<i64, Mailbox>) -> HashSet<i64> {
         let mut present: HashSet<(bool, &str)> = HashSet::new();
         let mut missing: Vec<&Mailbox> = vec![];
         for m in map.values() {
-            let Some(folder) = mailbox_folder(&self.version_dir, m) else { continue };
-            if folder.is_dir() {
+            if mailbox_folder(&self.version_dir, m).is_none() {
+                continue;
+            }
+            if folder_present(&self.version_dir, m) {
                 present.insert((m.local, m.account_id.as_str()));
             } else if !(m.path.len() == 1 && m.path[0].eq_ignore_ascii_case("INBOX")) {
                 missing.push(m);
@@ -1164,29 +1191,38 @@ impl Store {
         Ok(rows.flatten().map(|(id, t, u)| (id, (t, u))).collect())
     }
 
-    /// Resolve a mailbox name, path or role alias to mailbox ids.
-    /// Matching is case-insensitive on the full path or the leaf name.
-    /// Rows Mail keeps for mailboxes it no longer has are left out.
+    /// Resolve a mailbox name, path or role alias to mailbox ids, case and
+    /// accents aside: the mailbox at that path first ("Clients" at the top,
+    /// not also "INBOX/Clients"); else the one with that role, as Mail or
+    /// the provider names it, or at that path from Mail's INBOX prefix on
+    /// (La Poste's "Archives"); else those with that last name. Rows Mail
+    /// keeps for mailboxes it no longer has are left out.
     pub fn resolve_mailboxes(&self, spec: &str, account: Option<&str>) -> Vec<i64> {
         let role = Role::from_alias(spec);
-        let want = name_key(spec);
+        let want = name_key(spec.trim().trim_matches('/'));
         let accounts = account.filter(|a| !account_key(a).is_empty()).map(|a| self.accounts_named(a));
-        let leftovers = self.leftovers();
-        let mut out: Vec<i64> = self
-            .mailboxes()
+        let mailboxes = self.mailboxes();
+        let candidates: Vec<&Mailbox> = mailboxes
             .values()
-            .filter(|m| !leftovers.contains(&m.id))
             .filter(|m| accounts.as_ref().is_none_or(|a| a.iter().any(|(id, n)| same_account(m, id, n))))
-            .filter(|m| {
-                role.is_some_and(|r| m.role == r)
-                    || name_key(&m.display_path()) == want
-                    || name_key(&m.name) == want
-                    || path_in_mail(m).is_some_and(|p| name_key(&p) == want)
-            })
-            .map(|m| m.id)
+            .filter(|m| !self.is_leftover(m))
             .collect();
-        out.sort_unstable();
-        out
+        let tiers: [&dyn Fn(&Mailbox) -> bool; 3] = [
+            &|m| name_key(&m.display_path()) == want,
+            &|m| {
+                role.is_some_and(|r| m.role == r && m.role_strength == 2)
+                    || path_in_mail(m).is_some_and(|p| name_key(&p) == want)
+            },
+            &|m| name_key(&m.name) == want,
+        ];
+        for tier in tiers {
+            let mut out: Vec<i64> = candidates.iter().filter(|m| tier(m)).map(|m| m.id).collect();
+            if !out.is_empty() {
+                out.sort_unstable();
+                return out;
+            }
+        }
+        vec![]
     }
 
     /// The accounts (id, name) a name the user gave means: the account so
@@ -1256,10 +1292,11 @@ impl Store {
 
     /// The account's mailbox for a role, named as Mail or the provider names
     /// it ("Archive", "[Gmail]/Corbeille"): never a folder of the user's
-    /// that merely holds the word ("Archives clients 2019"). Gmail's own
-    /// first, then the shallowest, then one that holds mail (Mail's
-    /// database may keep a row for a mailbox it deleted), then the newest
-    /// row — the same answer every time.
+    /// that merely holds the word ("Archives clients 2019"). A row Mail
+    /// keeps for a mailbox it no longer has comes last; then Gmail's own,
+    /// the shallowest, and the oldest row: the account's own mailbox, made
+    /// with the account, before any folder of the user's named the same
+    /// ("Trash" beside iCloud's "Deleted Messages").
     pub fn role_mailbox_for_account(&self, account_id: &str, account: &str, role: Role) -> Option<Mailbox> {
         let mailboxes = self.mailboxes();
         let mut candidates: Vec<&Mailbox> = mailboxes
@@ -1267,8 +1304,7 @@ impl Store {
             .filter(|m| m.role == role && m.role_strength == 2 && same_account(m, account_id, account))
             .collect();
         let system = |m: &Mailbox| m.path.first().is_some_and(|p| p.starts_with('['));
-        let leftovers = self.leftovers();
-        candidates.sort_by_key(|m| (!system(m), m.path.len(), leftovers.contains(&m.id), std::cmp::Reverse(m.id)));
+        candidates.sort_by_cached_key(|m| (self.is_leftover(m), !system(m), m.path.len(), m.id));
         candidates.first().map(|m| (*m).clone())
     }
 

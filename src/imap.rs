@@ -344,11 +344,11 @@ pub fn connect(server: &Server) -> Result<Session, Error> {
 }
 
 fn tcp(host: &str, port: u16) -> Result<TcpStream, Error> {
-    let addrs: Vec<std::net::SocketAddr> = (host, port)
+    let found: Vec<std::net::SocketAddr> = (host, port)
         .to_socket_addrs()
         .map_err(|e| Error::Network(format!("{host} could not be found ({e})")))?
-        .take(4)
         .collect();
+    let addrs = in_turn(found);
     // Several addresses (IPv6 and IPv4): less time for each, so a network
     // where one kind does not go through costs seconds, not minutes.
     let each = if addrs.len() > 1 { CONNECT_EACH } else { CONNECT_TIMEOUT };
@@ -366,6 +366,23 @@ fn tcp(host: &str, port: u16) -> Result<TcpStream, Error> {
     }
     let why = last.map_or_else(|| "no address".to_string(), |e| e.to_string());
     Err(Error::Network(format!("{host}:{port} could not be reached ({why})")))
+}
+
+/// A server's addresses, IPv6 and IPv4 in turn from the system's first
+/// choice, six at most: a network where one kind does not go through
+/// reaches the other at the second try.
+fn in_turn(found: Vec<std::net::SocketAddr>) -> Vec<std::net::SocketAddr> {
+    let first_v6 = found.first().is_some_and(std::net::SocketAddr::is_ipv6);
+    let (mut a, mut b): (Vec<_>, Vec<_>) = found.into_iter().partition(|x| x.is_ipv6() == first_v6);
+    a.reverse();
+    b.reverse();
+    let mut out = vec![];
+    while out.len() < 6 && (!a.is_empty() || !b.is_empty()) {
+        out.extend(a.pop());
+        out.extend(b.pop());
+    }
+    out.truncate(6);
+    out
 }
 
 fn tls_config() -> Result<Arc<rustls::ClientConfig>, Error> {
@@ -629,7 +646,9 @@ impl Session {
                         self.write(format!("{token}\r\n").as_bytes())?;
                         self.finish(&tag)?.1
                     }
-                    Err(Error::Refused(t)) => Done { status: Status::No, text: t },
+                    // Ended before the password was asked for: the server
+                    // refuses the way of signing in, not the password.
+                    Err(Error::Refused(t)) => Done { status: Status::Bad, text: t },
                     Err(e) => return Err(e),
                 }
             }
@@ -1084,6 +1103,24 @@ mod tests {
         ] {
             assert!(matches!(login(answer), Error::Refused(_)), "{answer}");
         }
+    }
+
+    #[test]
+    fn both_kinds_of_address_are_tried() {
+        let a = |s: &str| s.parse::<std::net::SocketAddr>().unwrap();
+        let v6: Vec<_> = (1..=4).map(|i| a(&format!("[2001:db8::{i}]:993"))).collect();
+        let found: Vec<_> = v6.iter().copied().chain([a("192.0.2.1:993"), a("192.0.2.2:993")]).collect();
+        let tried = in_turn(found);
+        assert_eq!(tried.len(), 6);
+        assert_eq!((tried[0], tried[1], tried[3]), (v6[0], a("192.0.2.1:993"), a("192.0.2.2:993")));
+    }
+
+    /// A refusal before the password was even asked for (no SASL-IR): the
+    /// way of signing in is refused, never the password.
+    #[test]
+    fn an_early_refusal_is_not_a_wrong_password() {
+        let (mut s, _server) = fake(vec![("AUTHENTICATE PLAIN", "$T BAD mechanism not allowed\r\n")]);
+        assert!(matches!(s.login("u", "p"), Err(Error::Refused(_))));
     }
 
     /// An answer past the size limit ending with a bare line feed and a

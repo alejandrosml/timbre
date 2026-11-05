@@ -1155,18 +1155,20 @@ fn a_missing_archive_is_made_beside_the_accounts_mailboxes() {
     let inbox_of = |account: &str| {
         store.mailboxes().values().find(|m| m.account_id == account && m.path == ["INBOX"]).cloned().unwrap()
     };
-    let laposte = crate::actions::new_archive(store, &inbox_of(LAPOSTE)).unwrap();
+    let archive_of = |account: &str| {
+        let inbox = inbox_of(account);
+        crate::actions::new_archive(store, &inbox.account_id, &inbox.account)
+    };
+    let laposte = archive_of(LAPOSTE).unwrap();
     assert_eq!(
         (laposte.path.clone(), laposte.role, laposte.local),
         (vec!["INBOX".into(), "Archive".into()], Role::Archive, false)
     );
     // Mailboxes at the top: the archive too.
-    assert_eq!(crate::actions::new_archive(store, &inbox_of(fixture::ACCOUNT)).unwrap().path, vec!["Archive"]);
+    assert_eq!(archive_of(fixture::ACCOUNT).unwrap().path, vec!["Archive"]);
     // Gmail's archive is All Mail; On My Mac has none to make.
-    assert!(crate::actions::new_archive(store, &inbox_of(GMAIL)).is_none());
-    let mut local = inbox_of(fixture::ACCOUNT);
-    local.local = true;
-    assert!(crate::actions::new_archive(store, &local).is_none());
+    assert!(archive_of(GMAIL).is_none());
+    assert!(crate::actions::new_archive(store, "", "On My Mac").is_none());
     // Archiving from La Poste makes the mailbox first; Mail is never driven
     // from tests, so nothing is moved and the result says why.
     let r = move_mail(&env, vec![1234], "archive").unwrap();
@@ -1511,4 +1513,174 @@ fn queries_say_what_they_cannot_search() {
 #[test]
 fn ids_given_twice_are_acted_on_once() {
     assert_eq!(crate::actions::unique_for_tests(&[3, 1, 3, 2, 1]), vec![3, 1, 2]);
+}
+
+// ---------------------------------------------------------------- second bug review
+
+/// Folders of the user's named like an account's own (made after it, as
+/// when imported) never take the role's moves: the account's own, oldest,
+/// do. A row Mail keeps for a deleted mailbox comes last, deep or not.
+#[test]
+fn the_accounts_own_mailboxes_keep_their_roles() {
+    let env = setup_with("ownroles", false, |cfg| {
+        gmail_and_laposte(cfg);
+        add_mailboxes(cfg, fixture::ACCOUNT, &["Trash", "Spam", "Sent", "Archives"]);
+        add_mailboxes(cfg, LAPOSTE, &["Archive", "INBOX/Archive"]);
+    });
+    let store = &env.ctx.store;
+    let role = |account: &str, r: Role| store.role_mailbox_for_account(account, account, r).map(|m| m.display_path());
+    assert_eq!(role(fixture::ACCOUNT, Role::Trash).as_deref(), Some("Deleted Messages"));
+    assert_eq!(role(fixture::ACCOUNT, Role::Junk).as_deref(), Some("Junk"));
+    assert_eq!(role(fixture::ACCOUNT, Role::Sent).as_deref(), Some("Sent Messages"));
+    assert_eq!(role(fixture::ACCOUNT, Role::Archive).as_deref(), Some("Archive"));
+    // La Poste's top-level "Archive" is a row Mail keeps, its folder gone.
+    std::fs::remove_dir_all(store.version_dir.join(LAPOSTE).join("Archive.mbox")).unwrap();
+    store.refresh_leftovers_now(&env.ctx.db());
+    assert_eq!(role(LAPOSTE, Role::Archive).as_deref(), Some("INBOX/Archive"));
+}
+
+/// "archive" with the account named means that account's archive, as
+/// without: never a folder of the user's holding the word.
+#[test]
+fn a_role_with_an_account_named_is_that_accounts_own() {
+    let env = setup_with("roleaccount", false, |cfg| {
+        gmail_and_laposte(cfg);
+        add_mailboxes(cfg, LAPOSTE, &["INBOX/Archives%20clients%202019"]);
+    });
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let p = crate::actions::MoveParams { ids: vec![1234], to: "archive".into(), account: Some(LAPOSTE.into()) };
+    let r = rt.block_on(crate::actions::move_mail(&env.ctx, &p)).unwrap();
+    assert_eq!(r.done, 0);
+    assert!(r.failed[0].error.contains("archive mailbox"), "{:?}", r.failed);
+    let p = crate::actions::MoveParams { ids: vec![1234], to: "archive".into(), account: Some("nowhere".into()) };
+    assert!(rt.block_on(crate::actions::move_mail(&env.ctx, &p)).unwrap().failed[0].error.contains("No account"));
+}
+
+/// A mailbox at the top and one of the same name inside the inbox (iCloud):
+/// the name alone is the one at the top, the full path the other.
+#[test]
+fn a_mailbox_at_the_top_is_named_by_its_name() {
+    let env = setup_with("topname", false, |cfg| {
+        add_mailboxes(cfg, fixture::ACCOUNT, &["Clients", "INBOX/Clients"]);
+    });
+    let store = &env.ctx.store;
+    let path_of =
+        |ids: Vec<i64>| ids.iter().filter_map(|i| store.mailbox(*i)).map(|m| m.display_path()).collect::<Vec<_>>();
+    assert_eq!(path_of(store.resolve_mailboxes("Clients", None)), ["Clients"]);
+    assert_eq!(path_of(store.resolve_mailboxes("INBOX/Clients", None)), ["INBOX/Clients"]);
+    let pick = |spec: &str| {
+        crate::mailboxes::mailbox_to_delete(store, spec, Some(fixture::ACCOUNT)).map(|m| m.map(|m| m.display_path()))
+    };
+    assert_eq!(pick("Clients"), Ok(Some("Clients".into())));
+    assert_eq!(pick("INBOX/Clients"), Ok(Some("INBOX/Clients".into())));
+}
+
+/// A mailbox made again under the row Mail kept is found at once, before
+/// the next look for leftovers.
+#[test]
+fn a_mailbox_made_again_is_found_at_once() {
+    let env = setup_with("madeagain", false, |cfg| add_mailboxes(cfg, fixture::ACCOUNT, &["Clients"]));
+    let store = &env.ctx.store;
+    let folder = store.version_dir.join(fixture::ACCOUNT).join("Clients.mbox");
+    std::fs::remove_dir_all(&folder).unwrap();
+    store.refresh_leftovers_now(&env.ctx.db());
+    assert!(store.resolve_mailboxes("Clients", None).is_empty());
+    std::fs::create_dir_all(&folder).unwrap();
+    assert_eq!(store.resolve_mailboxes("Clients", None).len(), 1);
+}
+
+/// Without a token, undo takes this Timbre's latest move, or one made
+/// before it started; never another Claude window's, made since.
+#[test]
+fn undo_without_a_token_is_this_windows() {
+    let env = setup("undoowner", false);
+    let other = crate::actions::UndoEntry {
+        token: "t-other".into(),
+        created: crate::util::now_unix() + 60,
+        description: "moved 1 message(s) to archive".into(),
+        items: vec![],
+        undone: false,
+        owner: std::process::id().wrapping_add(1),
+    };
+    std::fs::create_dir_all(&env.ctx.cfg.data_dir).unwrap();
+    std::fs::write(env.ctx.cfg.data_dir.join("undo.json"), serde_json::to_vec(&vec![other]).unwrap()).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let r = rt.block_on(crate::actions::undo(&env.ctx, &crate::actions::UndoParams { token: None }));
+    assert_eq!(r.unwrap_err(), "Nothing to undo with that token.");
+    // With its token, it is found (and has nothing left to move back).
+    let r = rt.block_on(crate::actions::undo(&env.ctx, &crate::actions::UndoParams { token: Some("t-other".into()) }));
+    assert!(r.is_ok() || r.as_ref().is_err_and(|e| !e.contains("Nothing to undo")), "{r:?}");
+}
+
+/// Files that never come (bodies Mail does not download): the store is
+/// walked again less and less often.
+#[test]
+fn walks_for_files_that_never_come_slow_down() {
+    let env = setup("neverfile", true);
+    let (cfg, store) = (env.ctx.cfg.clone(), env.ctx.store.clone());
+    let mut conn = index::open(&cfg, &store, true).unwrap();
+    let mut indexer = Indexer::new(cfg.clone(), store.clone(), env.ctx.progress.clone());
+    let mail = rusqlite::Connection::open(store.db_path.clone()).unwrap();
+    let mut m = fixture::messages().remove(1);
+    m.id = 1701;
+    fixture::write_message(&store.version_dir, &mail, &m).unwrap();
+    let file = walkdir::WalkDir::new(store.version_dir.join(fixture::ACCOUNT))
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name() == "1701.emlx")
+        .unwrap()
+        .into_path();
+    std::fs::remove_file(&file).unwrap();
+    indexer.full_build(&mut conn, false).unwrap();
+    let every = |conn: &rusqlite::Connection| index::get_meta(conn, "late_walk_every");
+    let long_ago = (crate::util::now_unix() - 7 * 3600).to_string();
+    index::set_meta(&conn, "last_walk", &long_ago).unwrap();
+    indexer.reconcile_now(&mut conn).unwrap();
+    assert_eq!(every(&conn).as_deref(), Some("43200"), "found nothing: twice as long");
+    index::set_meta(&conn, "last_walk", &long_ago).unwrap();
+    indexer.reconcile_now(&mut conn).unwrap();
+    assert_eq!(index::get_meta(&conn, "last_walk").as_deref(), Some(long_ago.as_str()), "not due yet");
+}
+
+/// A symbol that folds to letters is searched like them.
+#[test]
+fn symbols_that_fold_to_letters_are_searched() {
+    let env = setup("tm", true);
+    let r = search(&env, q("™"));
+    assert!(r.notice.as_deref().is_none_or(|n| !n.contains("no letter or digit")), "{:?}", r.notice);
+}
+
+/// Mail rebuilding its database puts a new file in its place: Timbre reads
+/// the new one, not the file it opened.
+#[test]
+fn a_database_mail_replaced_is_read_anew() {
+    let env = setup("newdb", false);
+    let path = env.ctx.store.db_path.clone();
+    let copy = path.with_extension("new");
+    std::fs::copy(&path, &copy).unwrap();
+    rusqlite::Connection::open(&copy)
+        .unwrap()
+        .execute(
+            "UPDATE subjects SET subject = 'Rebuilt by Mail' WHERE ROWID = (SELECT subject FROM messages WHERE ROWID = 101)",
+            [],
+        )
+        .unwrap();
+    assert_ne!(env.ctx.meta(101).unwrap().subject, "Rebuilt by Mail");
+    std::fs::rename(&copy, &path).unwrap();
+    assert_eq!(env.ctx.meta(101).unwrap().subject, "Rebuilt by Mail");
+}
+
+/// Each message of a thread carries the warnings read_mail gives it.
+#[test]
+fn a_thread_warns_as_reading_does() {
+    let env = setup("threadwarn", true);
+    let c = &env.ctx;
+    for id in [101, 102, 104, 1234] {
+        let t = app::get_thread(c, &ThreadParams { id, max_messages: None, max_chars_per_message: None }).unwrap();
+        for m in &t.messages {
+            let read = app::read_mail(c, &ReadParams { id: m.id, max_chars: None, strip_quotes: None }).unwrap();
+            assert_eq!(m.warnings, read.warnings, "message {}", m.id);
+            assert_eq!(m.hidden_text_removed, read.hidden_text_removed, "message {}", m.id);
+        }
+    }
 }

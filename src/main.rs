@@ -190,10 +190,14 @@ fn serve(cfg: Config) -> Result<()> {
         }
         Err(e) => {
             tracing::warn!("index unusable: {e:#}");
-            if index::damaged(&e) {
+            let what = if index::damaged(&e) {
                 index::set_aside(&cfg);
-            }
-            return serve_waiting(&rt, &cfg, format!("Timbre's own index could not be opened: {e:#}"), false);
+                " The damaged file has been set aside: Timbre builds a new one once restarted, and searches use \
+                 subjects and senders meanwhile."
+            } else {
+                ""
+            };
+            return serve_waiting(&rt, &cfg, format!("Timbre's own index could not be opened: {e:#}.{what}"), false);
         }
     };
     let result = rt.block_on(async move {
@@ -268,6 +272,12 @@ fn run_index(cfg: Config, rebuild: bool) -> Result<()> {
     });
     let start = Instant::now();
     let mut indexer = index::Indexer::new(cfg.clone(), store.clone(), progress.clone());
+    let Some(_lock) = indexer.take_lock() else {
+        progress.phase.store(index::PHASE_FAILED, Ordering::Relaxed);
+        let _ = reporter.join();
+        anyhow::bail!("Timbre is running in Claude and keeps the index: quit Claude to index from here.");
+    };
+    index::settle_bulk_settings(&conn);
     let res = indexer.full_build(&mut conn, rebuild);
     if res.is_err() {
         progress.phase.store(index::PHASE_FAILED, Ordering::Relaxed);
@@ -381,6 +391,7 @@ fn doctor(cfg: Config, automation: bool) -> Result<()> {
 
 #[allow(clippy::print_stdout)] // CLI output
 fn bench(cfg: Config, runs: usize) -> Result<()> {
+    let runs = runs.max(1);
     let ctx = open_ctx(cfg)?;
     let queries =
         ["facture", "réunion", "invoice", "meeting", "rendez-vous", "contrat", "merci", "projet", "factura", "urgent"];

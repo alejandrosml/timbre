@@ -40,13 +40,22 @@ pub struct UndoEntry {
     pub description: String,
     pub items: Vec<UndoItem>,
     pub undone: bool,
+    /// The Timbre (process) that made the move: an undo without a token
+    /// takes this Timbre's latest move, never another Claude window's.
+    #[serde(default)]
+    pub owner: u32,
 }
+
+/// When this Timbre started: moves made before, by any, are the user's
+/// earlier ones, which an undo without a token may take as before.
+static STARTED: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
 
 fn undo_path(cfg: &Config) -> std::path::PathBuf {
     cfg.data_dir.join("undo.json")
 }
 
 pub fn load_undo(cfg: &Config) -> Vec<UndoEntry> {
+    STARTED.get_or_init(now_unix);
     read_undo(cfg).unwrap_or_default()
 }
 
@@ -124,12 +133,15 @@ impl Failure {
 struct Source {
     shown: Mailbox,
     stored: Mailbox,
+    /// The Message-ID Timbre read in its file: Mail's scripts check that
+    /// the message they find by id is still that one.
+    mid: Option<String>,
 }
 
 impl Source {
     fn json(&self, id: i64) -> serde_json::Value {
         let alt = (self.stored.id != self.shown.id).then(|| Loc::from(&self.stored));
-        json!({"id": id, "loc": Loc::from(&self.shown), "alt": alt})
+        json!({"id": id, "loc": Loc::from(&self.shown), "alt": alt, "mid": self.mid})
     }
 }
 
@@ -143,7 +155,13 @@ fn source_of(ctx: &Ctx, id: i64) -> Result<Source, String> {
         ctx.store.mailbox_fresh(&conn, meta.mailbox).ok_or_else(|| format!("message {id} is in an unknown mailbox"))?;
     let shown_id = ctx.store.display_mailbox(&conn, id, meta.mailbox);
     let shown = ctx.store.mailbox_fresh(&conn, shown_id).unwrap_or_else(|| stored.clone());
-    Ok(Source { shown, stored })
+    let mid: Option<String> = conn
+        .query_row("SELECT msgid FROM main.docs WHERE id = ?1", [id], |r| r.get::<_, Option<String>>(0))
+        .ok()
+        .flatten()
+        .map(|m| m.trim().trim_matches(['<', '>']).trim().to_string())
+        .filter(|m| !m.is_empty());
+    Ok(Source { shown, stored, mid })
 }
 
 fn timeout_for(n: usize) -> Duration {
@@ -285,19 +303,23 @@ fn reply_body(ctx: &Ctx, id: i64, body: &str) -> String {
     out
 }
 
-async fn compose(ctx: &Arc<Ctx>, p: &DraftParams) -> Result<serde_json::Value, String> {
+/// The draft Mail made, and the files that go out with it (a forward
+/// keeps the original's attachments).
+async fn compose(ctx: &Arc<Ctx>, p: &DraftParams) -> Result<(serde_json::Value, Vec<String>), String> {
     let p = p.clone();
-    let (script, input) = blocking(ctx, move |ctx| draft_input(ctx, &p)).await??;
-    mailapp::run(script, &input, Duration::from_secs(40)).await.map_err(|e| e.to_string())
+    let (script, input, files) = blocking(ctx, move |ctx| draft_input(ctx, &p)).await??;
+    let made = mailapp::run(script, &input, Duration::from_secs(40)).await.map_err(|e| e.to_string())?;
+    Ok((made, files))
 }
 
-/// The script and its input for a draft: the message replied to or
-/// forwarded is read here, off the async threads.
-fn draft_input(ctx: &Ctx, p: &DraftParams) -> Result<(&'static str, serde_json::Value), String> {
+/// The script and its input for a draft, and the files a forward sends on:
+/// the message replied to or forwarded is read here, off the async threads.
+fn draft_input(ctx: &Ctx, p: &DraftParams) -> Result<(&'static str, serde_json::Value, Vec<String>), String> {
     let to = valid_addresses(&p.to)?;
     let cc = valid_addresses(&p.cc)?;
     let bcc = valid_addresses(&p.bcc)?;
     let mode = p.mode.trim().to_lowercase();
+    let mut files: Vec<String> = vec![];
     let (script, input) = match mode.as_str() {
         "new" => {
             if to.is_empty() {
@@ -328,17 +350,18 @@ fn draft_input(ctx: &Ctx, p: &DraftParams) -> Result<(&'static str, serde_json::
             input["bcc"] = json!(bcc);
             // Mail drops a forward's attachments when a script replaces its
             // text: with attachments, the text is left for the user to type.
-            let attached = ctx
+            files = ctx
                 .raw(id)
                 .ok()
                 .and_then(|(raw, _)| mime::parse(&raw))
-                .is_some_and(|m| m.attachments.iter().any(|a| !a.inline));
-            input["body"] = json!(if attached { "" } else { p.body.as_str() });
+                .map(|m| m.attachments.iter().filter(|a| !a.inline).map(|a| a.name.clone()).collect())
+                .unwrap_or_default();
+            input["body"] = json!(if files.is_empty() { p.body.as_str() } else { "" });
             (mailapp::DRAFT_FORWARD, input)
         }
         other => return Err(format!("Unknown mode '{other}': use new, reply, reply_all or forward.")),
     };
-    Ok((script, input))
+    Ok((script, input, files))
 }
 
 fn strings(v: &serde_json::Value, key: &str) -> Vec<String> {
@@ -349,7 +372,7 @@ fn strings(v: &serde_json::Value, key: &str) -> Vec<String> {
 }
 
 pub async fn create_draft(ctx: &Arc<Ctx>, p: &DraftParams) -> Result<DraftResult, String> {
-    let r = compose(ctx, p).await?;
+    let (r, _) = compose(ctx, p).await?;
     let mut note = "The draft is open in Mail for the user to review. Nothing was sent.".to_string();
     let text_left_out = p.mode.trim().eq_ignore_ascii_case("forward")
         && !p.body.trim().is_empty()
@@ -496,18 +519,32 @@ struct Target {
 
 fn destination(ctx: &Ctx, src: &Mailbox, to: &str, account: Option<&str>) -> Result<Target, String> {
     let found = |mailbox: Mailbox| Target { mailbox, create: false };
-    if let Some(role) = Role::from_alias(to)
-        && account.is_none()
-    {
-        if let Some(m) = ctx.store.role_mailbox_for_account(&src.account_id, &src.account, role) {
+    if let Some(role) = Role::from_alias(to) {
+        // The role's mailbox of each message's own account, or of the
+        // account named: as Mail or the provider names it, never a folder
+        // of the user's that holds the word.
+        let (account_id, name) = match account.filter(|a| !crate::store::account_key(a).is_empty()) {
+            None => (src.account_id.clone(), src.account.clone()),
+            Some(a) => match ctx.store.accounts_named(a).as_slice() {
+                [(id, name)] => (id.clone(), name.clone()),
+                [] => {
+                    return Err(format!("No account named '{a}'. Accounts: {}.", ctx.store.account_names().join(", ")));
+                }
+                many => {
+                    let names: Vec<&str> = many.iter().map(|(_, n)| n.as_str()).collect();
+                    return Err(format!("'{a}' matches several accounts ({}): give its full name.", names.join(", ")));
+                }
+            },
+        };
+        if let Some(m) = ctx.store.role_mailbox_for_account(&account_id, &name, role) {
             return Ok(found(m));
         }
         if role == Role::Archive
-            && let Some(mailbox) = new_archive(&ctx.store, src)
+            && let Some(mailbox) = new_archive(&ctx.store, &account_id, &name)
         {
             return Ok(Target { mailbox, create: true });
         }
-        return Err(format!("Account '{}' has no {} mailbox.", src.account, role.as_str()));
+        return Err(format!("Account '{name}' has no {} mailbox.", role.as_str()));
     }
     let ids = ctx.store.resolve_mailboxes(to, account);
     let all: Vec<Mailbox> = ids.iter().filter_map(|i| ctx.store.mailbox(*i)).collect();
@@ -528,28 +565,20 @@ fn destination(ctx: &Ctx, src: &Mailbox, to: &str, account: Option<&str>) -> Res
 /// ("INBOX/DRAFT", "INBOX/TRASH" at La Poste and Orange). None where Mail
 /// would not make one: On My Mac, Exchange, Gmail (whose All Mail is the
 /// archive).
-pub(crate) fn new_archive(store: &Store, src: &Mailbox) -> Option<Mailbox> {
-    if src.local || !src.url.starts_with("imap://") || store.is_gmail(&src.account_id, &src.account) {
+pub(crate) fn new_archive(store: &Store, account_id: &str, account: &str) -> Option<Mailbox> {
+    let mailboxes = store.mailboxes();
+    let any = mailboxes.values().find(|m| crate::store::same_account(m, account_id, account))?;
+    if any.local || !any.url.starts_with("imap://") || store.is_gmail(account_id, account) {
         return None;
     }
-    let mailboxes = store.mailboxes();
-    let own: Vec<&Mailbox> = mailboxes
-        .values()
-        .filter(|m| {
-            matches!(m.role, Role::Drafts | Role::Sent | Role::Trash | Role::Junk)
-                && crate::store::same_account(m, &src.account_id, &src.account)
-        })
-        .collect();
-    let inside = |m: &&Mailbox| m.path.len() >= 2 && m.path[0].eq_ignore_ascii_case("INBOX");
-    let path = match own.first() {
-        Some(first) if own.iter().all(inside) => vec![first.path[0].clone(), "Archive".to_string()],
-        _ => vec!["Archive".to_string()],
-    };
+    let loc = Loc { account_id: account_id.to_string(), account: account.to_string(), path: vec![], local: false };
+    let mut path = crate::mailboxes::mail_prefix(store, &loc).unwrap_or_default();
+    path.push("Archive".to_string());
     Some(Mailbox {
         id: -1,
         url: String::new(),
-        account_id: src.account_id.clone(),
-        account: src.account.clone(),
+        account_id: account_id.to_string(),
+        account: account.to_string(),
         name: "Archive".into(),
         path,
         role: Role::Archive,
@@ -752,17 +781,22 @@ pub async fn move_mail(ctx: &Arc<Ctx>, p: &MoveParams) -> Result<BatchResult, St
         blocking(ctx, move |ctx| message_ids(ctx, &ids)).await?
     };
     let token = token();
-    journal_edit(ctx, |journal| {
-        journal.push(UndoEntry {
-            token: token.clone(),
-            created: now_unix(),
-            description: String::new(),
-            items: vec![],
-            undone: false,
-        });
-        let excess = journal.len().saturating_sub(50);
-        journal.drain(..excess);
-    });
+    {
+        let t = token.clone();
+        journal(ctx, true, move |journal| {
+            journal.push(UndoEntry {
+                token: t,
+                created: now_unix(),
+                description: String::new(),
+                items: vec![],
+                undone: false,
+                owner: std::process::id(),
+            });
+            let excess = journal.len().saturating_sub(50);
+            journal.drain(..excess);
+        })
+        .await?;
+    }
     let (mut done, mut unjournaled) = (0, 0);
     let mut stopped: Option<String> = None;
     let mut chunks = items.chunks(CHUNK);
@@ -778,13 +812,16 @@ pub async fn move_mail(ctx: &Arc<Ctx>, p: &MoveParams) -> Result<BatchResult, St
                 })
             })
             .collect();
-        let mut before = 0;
-        journal_edit(ctx, |journal| {
-            if let Some(e) = journal.iter_mut().find(|e| e.token == token) {
-                before = e.items.len();
-                e.items.extend(planned.iter().cloned());
+        let t = token.clone();
+        let before = journal(ctx, true, move |journal| match journal.iter_mut().find(|e| e.token == t) {
+            Some(e) => {
+                let before = e.items.len();
+                e.items.extend(planned);
+                before
             }
-        });
+            None => 0,
+        })
+        .await?;
         let batch: Vec<_> = chunk.iter().map(|(_, v, _, _)| v.clone()).collect();
         let (tried, stop) = mailapp::run_batch(mailapp::MOVE, &json!({"items": batch}), timeout_for(batch.len())).await;
         let (n, keep, mut f, u) = settle(chunk, &tried, stop.as_ref(), &known);
@@ -793,12 +830,14 @@ pub async fn move_mail(ctx: &Arc<Ctx>, p: &MoveParams) -> Result<BatchResult, St
         failed.append(&mut f);
         // This batch's planned moves give way to what Mail said of them;
         // earlier batches' stay as they are.
-        journal_edit(ctx, |journal| {
-            if let Some(e) = journal.iter_mut().find(|e| e.token == token) {
+        let t = token.clone();
+        journal(ctx, true, move |journal| {
+            if let Some(e) = journal.iter_mut().find(|e| e.token == t) {
                 e.items.truncate(before);
                 e.items.extend(keep);
             }
-        });
+        })
+        .await?;
         if let Some(stop) = stop {
             stopped = Some(stop.text);
             break;
@@ -808,17 +847,17 @@ pub async fn move_mail(ctx: &Arc<Ctx>, p: &MoveParams) -> Result<BatchResult, St
         failed.extend(chunks.flatten().map(|(id, ..)| Failure::of(*id, format!("not tried: {why}"))));
     }
     // The entry stays only if it holds something to undo.
-    let mut undo_token = None;
-    journal_edit(ctx, |journal| {
-        if let Some(pos) = journal.iter().position(|e| e.token == token) {
-            if journal[pos].items.is_empty() {
-                journal.remove(pos);
-            } else {
-                journal[pos].description = format!("moved {} message(s) to {}", journal[pos].items.len(), p.to);
-                undo_token = Some(token.clone());
-            }
+    let to = p.to.clone();
+    let undo_token = journal(ctx, true, move |journal| {
+        let pos = journal.iter().position(|e| e.token == token)?;
+        if journal[pos].items.is_empty() {
+            journal.remove(pos);
+            return None;
         }
-    });
+        journal[pos].description = format!("moved {} message(s) to {to}", journal[pos].items.len());
+        Some(token)
+    })
+    .await?;
     if done == 0
         && undo_token.is_none()
         && let Some(e) = stopped
@@ -895,13 +934,16 @@ fn settle(
     (done, keep, failed, unjournaled)
 }
 
-/// Change the undo journal and save it.
-fn journal_edit(ctx: &Ctx, change: impl FnOnce(&mut Vec<UndoEntry>)) {
-    with_journal(ctx, true, change);
-}
-
 /// The undo journal as it is on disk (another Timbre may have changed it),
 /// read, and changed and saved when `save`, under the lock both take.
+async fn journal<T: Send + 'static>(
+    ctx: &Arc<Ctx>,
+    save: bool,
+    f: impl FnOnce(&mut Vec<UndoEntry>) -> T + Send + 'static,
+) -> Result<T, String> {
+    blocking(ctx, move |ctx| with_journal(ctx, save, f)).await
+}
+
 fn with_journal<T>(ctx: &Ctx, save: bool, f: impl FnOnce(&mut Vec<UndoEntry>) -> T) -> T {
     let mut journal = ctx.undo.lock().unwrap_or_else(|e| e.into_inner());
     let _lock = lock_journal(&ctx.cfg);
@@ -942,16 +984,22 @@ pub struct UndoParams {
     pub token: Option<String>,
 }
 
-pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
-    let entry = with_journal(ctx, false, |journal| {
-        let found = match &p.token {
+pub async fn undo(ctx: &Arc<Ctx>, p: &UndoParams) -> Result<BatchResult, String> {
+    let token = p.token.clone();
+    let entry = journal(ctx, false, move |journal| {
+        let found = match &token {
             Some(t) => journal.iter().rev().find(|e| &e.token == t),
-            // Without a token, only the latest move: never an older one the
-            // user has forgotten about.
-            None => journal.last(),
+            // Without a token, only the latest move, never an older one the
+            // user has forgotten about; this Timbre's, or one made before it
+            // started, never another Claude window's.
+            None => {
+                let (me, started) = (std::process::id(), *STARTED.get_or_init(now_unix));
+                journal.iter().rev().find(|e| e.owner == me || e.created < started)
+            }
         };
         found.cloned()
     })
+    .await?
     .ok_or("Nothing to undo with that token.")?;
     if entry.undone {
         return Err(if p.token.is_some() {
@@ -978,10 +1026,10 @@ pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
                 {
                     notes.push(n);
                 }
-                let prefixed = crate::mailboxes::prefixed(&ctx.store, &to);
-                routed.push(
-                    json!({"message_id": i.message_id, "now_in": i.now_in, "back_to": to, "back_prefixed": prefixed}),
-                );
+                let (now_prefixed, back_prefixed) =
+                    (crate::mailboxes::prefixed(&ctx.store, &i.now_in), crate::mailboxes::prefixed(&ctx.store, &to));
+                routed.push(json!({"message_id": i.message_id, "now_in": i.now_in, "now_prefixed": now_prefixed,
+                                   "back_to": to, "back_prefixed": back_prefixed}));
             }
             Err(why) => failed.push(Failure { id: None, message_id: Some(i.message_id.clone()), error: why }),
         }
@@ -1006,10 +1054,11 @@ pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
             break;
         }
     }
-    let complete = with_journal(ctx, true, |journal| {
+    let (t, moved_back) = (entry.token.clone(), back.clone());
+    let complete = journal(ctx, true, move |journal| {
         let mut complete = false;
-        if let Some(e) = journal.iter_mut().find(|e| e.token == entry.token) {
-            for mid in &back {
+        if let Some(e) = journal.iter_mut().find(|e| e.token == t) {
+            for mid in &moved_back {
                 if let Some(item) = e.items.iter_mut().find(|i| !i.done && &i.message_id == mid) {
                     item.done = true;
                 }
@@ -1018,7 +1067,8 @@ pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
             complete = e.undone;
         }
         complete
-    });
+    })
+    .await?;
     // Those Mail cannot move back stay as they are: trying again changes nothing.
     let refused = todo.len() - routed.len();
     let retry = !complete && back.len() + refused < todo.len();
@@ -1057,6 +1107,9 @@ pub struct PreparedSend {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bcc: Vec<String>,
     pub subject: String,
+    /// Files that go out with it: a forward sends the original's on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
     pub expires_in_minutes: u32,
     pub next_step: String,
 }
@@ -1064,7 +1117,17 @@ pub struct PreparedSend {
 const SEND_TTL: i64 = 15 * 60;
 
 pub async fn prepare_send(ctx: &Arc<Ctx>, p: &DraftParams) -> Result<PreparedSend, String> {
-    let r = compose(ctx, p).await?;
+    let (r, attachments) = compose(ctx, p).await?;
+    // Never a forward without the text the user agreed to.
+    let text_left_out = p.mode.trim().eq_ignore_ascii_case("forward")
+        && !p.body.trim().is_empty()
+        && r.get("text_added").and_then(|v| v.as_bool()) == Some(false);
+    if text_left_out {
+        return Err("This forward has attachments, which Mail drops when Timbre sets its text: it cannot go out \
+                    with your text. The draft is open in Mail: the user can type the text and send it, or call \
+                    prepare_send again with an empty body to forward it as it is."
+            .into());
+    }
     let (to, cc, bcc) = (strings(&r, "to"), strings(&r, "cc"), strings(&r, "bcc"));
     let all: Vec<String> = to.iter().chain(&cc).chain(&bcc).map(|a| a.to_lowercase()).collect();
     if all.is_empty() {
@@ -1088,10 +1151,13 @@ pub async fn prepare_send(ctx: &Arc<Ctx>, p: &DraftParams) -> Result<PreparedSen
         cc,
         bcc,
         subject,
+        next_step: format!(
+            "Show the user the recipients, subject{} and text (also visible in the open Mail window). Only after \
+             the user explicitly agrees, call confirm_send with this token.",
+            if attachments.is_empty() { "" } else { ", the attached files" }
+        ),
+        attachments,
         expires_in_minutes: (SEND_TTL / 60) as u32,
-        next_step: "Show the user the recipients, subject and text (also visible in the open Mail window). \
-                    Only after the user explicitly agrees, call confirm_send with this token."
-            .into(),
     })
 }
 
@@ -1141,14 +1207,12 @@ pub async fn confirm_send(ctx: &Ctx, p: &ConfirmParams) -> Result<SentResult, St
         if now - pending.created > SEND_TTL {
             return Err("This token expired: call prepare_send again.".into());
         }
+        // Counted with the check, before Mail answers: two sends at once
+        // cannot both take the last place, and one that times out may
+        // still have gone out.
+        st.sent.push_back(now);
         pending
     };
-    // Counted and logged before Mail answers: a send that times out may
-    // still have gone out.
-    {
-        let mut st = ctx.sends.lock().unwrap_or_else(|e| e.into_inner());
-        st.sent.push_back(now_unix());
-    }
     let r = mailapp::run(
         mailapp::SEND_OUTGOING,
         &json!({"outgoing_id": pending.outgoing_id, "allowed": pending.recipients, "subject": pending.subject}),

@@ -99,9 +99,8 @@ impl Degraded {
                 }
             ),
             Problem::Index => format!(
-                "{error}\n\nAsk the user to turn the Timbre extension off and on in Claude's settings. A damaged \
-                 index file has been set aside: Timbre then builds a new one, and searches meanwhile use subjects \
-                 and senders."
+                "{error}\n\nAsk the user to turn the Timbre extension off and on in Claude's settings (or to quit \
+                 and reopen Claude, if another Claude window may be running an older Timbre)."
             ),
             Problem::Other => format!(
                 "Timbre cannot open Mail's data: {error}\n\nAsk the user to check that Mail opens and shows their \
@@ -120,7 +119,12 @@ pub fn open_permission_settings() -> String {
     }
     let app = crate::util::app_path();
     let open = |args: &[&std::ffi::OsStr]| {
-        std::process::Command::new("/usr/bin/open").args(args).status().is_ok_and(|s| s.success())
+        std::process::Command::new("/usr/bin/open")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
     };
     let pane = open(&["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles".as_ref()]);
     let shown = open(&["-R".as_ref(), app.as_os_str()]);
@@ -145,6 +149,8 @@ pub fn open_automation_settings() -> String {
     }
     let opened = std::process::Command::new("/usr/bin/open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
         .status()
         .is_ok_and(|s| s.success());
     format!(

@@ -42,6 +42,10 @@ const POLL: Duration = Duration::from_secs(2);
 const PREDICT_LIMIT: usize = 5000;
 /// Messages whose file was missing at a walk wait this long for another one.
 const WALK_EVERY: i64 = 6 * 3600;
+/// How long after a failed build another is tried.
+const REBUILD_AFTER: Duration = Duration::from_secs(300);
+/// The longest wait between walks for files that never come.
+const LATE_WALK_MAX: i64 = 7 * 86_400;
 /// Messages per write transaction during a full build.
 const COMMIT_EVERY: usize = 4096;
 
@@ -233,11 +237,6 @@ pub fn open_with_mode(cfg: &Config, store: &Store, writable: bool) -> Result<(Co
         add_missing_columns(&conn)?;
         set_meta(&conn, "schema", SCHEMA_VERSION)?;
         set_meta(&conn, "mail_dir", &current_dir)?;
-        // A build that was killed may have left its bulk-load settings.
-        conn.execute_batch(
-            "INSERT INTO fts(fts, rank) VALUES('automerge', 4);
-             INSERT INTO fts(fts, rank) VALUES('hashsize', 1048576);",
-        )?;
     }
     let mode = store::attach(&conn, &store.db_path)?;
     if !writable {
@@ -562,6 +561,15 @@ fn consistent(conn: &Connection) -> Result<bool> {
 }
 
 /// Runs one indexing step, turning a panic into an error so the loop goes on.
+/// Settings a build that was killed may have left for bulk loading, put
+/// back by the Timbre that keeps the index (never by another, mid-build).
+pub fn settle_bulk_settings(conn: &Connection) {
+    let _ = conn.execute_batch(
+        "INSERT INTO fts(fts, rank) VALUES('automerge', 4);
+         INSERT INTO fts(fts, rank) VALUES('hashsize', 1048576);",
+    );
+}
+
 fn guarded<T>(what: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
         .unwrap_or_else(|_| Err(anyhow::anyhow!("{what} panicked")))
@@ -776,7 +784,8 @@ impl Indexer {
     }
 
     /// The right to keep the index, held as long as the file stays open.
-    fn take_lock(&self) -> Option<std::fs::File> {
+    /// The lock of the Timbre that keeps the index, if no other has it.
+    pub fn take_lock(&self) -> Option<std::fs::File> {
         std::fs::create_dir_all(&self.cfg.data_dir).ok()?;
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -1101,12 +1110,25 @@ impl Indexer {
             }
             tx.commit()?;
         }
-        let walked_long_ago = get_meta(conn, "last_walk")
-            .and_then(|s| s.parse::<i64>().ok())
-            .is_none_or(|t| now_unix() - t >= WALK_EVERY);
-        if found.len() < late.len() && walked_long_ago {
-            // full_build walks the store: the last walk is old.
-            return self.full_build(conn, false);
+        // Some still without their file: the store is walked again (full_build
+        // does), less and less often while walks find none of them (bodies
+        // Mail never downloads), every WALK_EVERY again once one finds some.
+        let still = late.len() - found.len();
+        if still == 0 {
+            return Ok(());
+        }
+        let every = get_meta(conn, "late_walk_every").and_then(|s| s.parse::<i64>().ok()).unwrap_or(WALK_EVERY);
+        let due =
+            get_meta(conn, "last_walk").and_then(|s| s.parse::<i64>().ok()).is_none_or(|t| now_unix() - t >= every);
+        if due {
+            self.full_build(conn, false)?;
+            let left: i64 = conn.query_row("SELECT count(*) FROM unlocated", [], |r| r.get(0))?;
+            let next = if usize::try_from(left).unwrap_or(usize::MAX) < still {
+                WALK_EVERY
+            } else {
+                (every * 2).min(LATE_WALK_MAX)
+            };
+            set_meta(conn, "late_walk_every", &next.to_string())?;
         }
         Ok(())
     }
@@ -1139,15 +1161,20 @@ impl Indexer {
                 }
             }
         };
+        settle_bulk_settings(&conn);
         let built = get_meta(&conn, "built").is_some();
         let _ = self.refresh_count(&conn);
         if built {
             self.progress.built.store(true, Ordering::Relaxed);
             self.progress.phase.store(PHASE_READY, Ordering::Relaxed);
         }
+        // When to build the index (again): never said ready before a build
+        // has gone through.
+        let mut build_at: Option<Instant> = None;
         if let Err(e) = guarded("index build", || self.full_build(&mut conn, false)) {
             tracing::warn!("index build failed: {e:#}");
             self.progress.fail(&e);
+            build_at = Some(Instant::now() + REBUILD_AFTER);
         }
         // Messages read by an older Timbre are read again, newest first.
         let outdated = self.outdated(&conn).unwrap_or(0);
@@ -1161,8 +1188,22 @@ impl Indexer {
         let mut last_version: Option<i64> = None;
         let mut last_sync = Instant::now();
         let mut failures = 0;
+        let mut file = store::file_identity(&self.store.db_path);
         loop {
             std::thread::sleep(if rereading { Duration::from_millis(100) } else { POLL });
+            // Mail rebuilt its database (a new file in its place, its
+            // messages numbered anew): read the new one, and index it again.
+            let now = store::file_identity(&self.store.db_path);
+            if now.is_some()
+                && now != file
+                && let Ok((c, m)) = open_with_mode(&self.cfg, &self.store, true)
+            {
+                tracing::warn!("index: Mail replaced its database, reading the new one");
+                (conn, mode, file, last_version) = (c, m, now, None);
+                if let Err(e) = guarded("index reconcile", || self.reconcile(&mut conn)) {
+                    tracing::warn!("index: reconcile after Mail's new database failed: {e:#}");
+                }
+            }
             if rereading {
                 match guarded("index re-read", || self.reread_batch(&mut conn, REFRESH_BATCH)) {
                     Ok(0) => {
@@ -1185,6 +1226,16 @@ impl Indexer {
                 || version != last_version
                 || (!self.pending.is_empty() && last_sync.elapsed() >= Duration::from_secs(15))
                 || last_sync.elapsed() >= Duration::from_secs(60);
+            if build_at.is_some_and(|t| Instant::now() >= t) {
+                build_at = match guarded("index build", || self.full_build(&mut conn, false)) {
+                    Ok(()) => None,
+                    Err(e) => {
+                        tracing::warn!("index build failed again: {e:#}");
+                        self.progress.fail(&e);
+                        Some(Instant::now() + REBUILD_AFTER)
+                    }
+                };
+            }
             if !due {
                 continue;
             }
@@ -1201,6 +1252,19 @@ impl Indexer {
             }
             if let Err(e) = guarded("index sync", || self.sync(&mut conn)) {
                 tracing::warn!("index sync failed: {e:#}");
+                if damaged(&e) {
+                    // Timbre's own file damaged while running: set aside, and
+                    // a new one built at once (searches read it as it grows).
+                    set_aside(&self.cfg);
+                    match open_with_mode(&self.cfg, &self.store, true) {
+                        Ok((c, m)) => {
+                            (conn, mode) = (c, m);
+                            build_at = Some(Instant::now());
+                        }
+                        Err(e) => self.progress.fail(&e),
+                    }
+                    continue;
+                }
                 failures += 1;
                 if failures >= 3 {
                     // Searches still use what is indexed; say that new mail is not.
@@ -1219,7 +1283,7 @@ impl Indexer {
                     self.progress.set_error(None);
                 }
                 failures = 0;
-                if self.progress.phase.load(Ordering::Relaxed) == PHASE_FAILED {
+                if build_at.is_none() && self.progress.phase.load(Ordering::Relaxed) == PHASE_FAILED {
                     self.progress.phase.store(PHASE_READY, Ordering::Relaxed);
                 }
             }

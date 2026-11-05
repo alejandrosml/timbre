@@ -88,6 +88,39 @@ All notable changes are listed here. The format follows
   read from the server's answer about that very mailbox, and an endless
   answer is refused. A keychain item already under Timbre's name is
   replaced, never updated.
+- **Mailboxes, second review.** A role's mailbox is the account's own (its
+  oldest row) over a folder of the user's named alike ("Trash" beside
+  iCloud's "Deleted Messages"); "archive" with an account named is that
+  account's archive; a mailbox at the top is named by its name ("Clients",
+  not iCloud's "INBOX/Clients"); one made again under its old row is found
+  at once. Gmail asking for an app password, met with a password kept in
+  the keychain, opens the window with the server's message. Each call keeps
+  to its time; an undo without a token takes this Claude window's moves.
+- **Text Mail hides, read as Mail reads it.** An HTML page naming a charset
+  browsers do not read (UTF-7), or UTF-16 in its own `<meta>`, is read as
+  Mail's WebKit reads it: text Mail shows as a comment no longer reaches
+  Claude. "base64," written in the visible text is kept; only pictures
+  written in tags shrink.
+- **Mail built to stall a reader.** End tags inside comments or scripts,
+  and HTML elements inside svg, no longer pass the depth check: such a
+  message is withheld at once, not after minutes.
+- **Threads and attachments warn too.** `get_thread` gives each message the
+  warnings `read_mail` gives (sender checks, first contact, hidden text,
+  instructions aimed at an assistant); `read_attachment` says what it took
+  out of HTML and mail attachments, and when it withholds one.
+- **Sending.** A forward whose attachments would make Mail drop Claude's
+  text is refused at `prepare_send` instead of going out without it; the
+  files that go out are listed; the hourly limit holds with sends at once.
+- **Mail rebuilding its database.** Timbre reads the new file at once,
+  indexes it again, and acts on a message only if it is still the one it
+  read (its Message-ID is checked).
+- **Smaller things.** Reply-To domains under country suffixes
+  ("barclays.co.uk") are compared whole; a damaged index found while running
+  is set aside and rebuilt, and a first build that failed is tried again;
+  display names are shown on one line; attachment names are never "." or
+  ".."; `open_in_mail` no longer claims to change nothing (Mail marks the
+  message read); the update check stays daily when its cache cannot be
+  written.
 
 ## [0.5.7] - 2026-11-05
 

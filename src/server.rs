@@ -272,7 +272,14 @@ impl Timbre {
     #[tool(
         name = "open_in_mail",
         description = "Open a message in Mail on the user's screen.",
-        annotations(title = "Open in Mail", read_only_hint = true, open_world_hint = false)
+        // Mail marks a message it shows as read.
+        annotations(
+            title = "Open in Mail",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn open_in_mail(&self, Parameters(p): Parameters<IdParams>) -> Result<Json<Done>, String> {
         blocking(&self.ctx, move |c| actions::open_in_mail(c, p.id)).await.map(|status| Json(Done { status }))

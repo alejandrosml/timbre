@@ -83,10 +83,15 @@ pub fn start(cfg: &Config) {
 
 /// Check unless the cache is fresh; false when GitHub could not be asked.
 fn check(path: &Path) -> bool {
+    // When the cache file cannot be written, this run still asks once a day.
+    static ASKED: std::sync::Mutex<i64> = std::sync::Mutex::new(0);
     let now = crate::util::now_unix();
     let mut cache: Cache = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let asked = *ASKED.lock().unwrap_or_else(|e| e.into_inner());
+    cache.checked = cache.checked.max(asked).min(now.max(asked));
     let mut ok = true;
     if now - cache.checked >= DAY || cache.checked > now {
+        *ASKED.lock().unwrap_or_else(|e| e.into_inner()) = now;
         match fetch() {
             Some((tag, url)) => {
                 cache.latest = Some(tag);

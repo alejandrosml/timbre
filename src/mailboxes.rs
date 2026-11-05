@@ -47,6 +47,9 @@ const AT_HAND: Duration = Duration::from_secs(5);
 /// operation that follows.
 const READY_FOR: Duration = Duration::from_secs(60);
 
+/// What a deletion whose answer was lost says: done, perhaps.
+const MAYBE_DELETED: &str = "may have been deleted";
+
 /// When a tool call must be done by.
 #[derive(Debug, Clone, Copy)]
 struct Deadline(Instant);
@@ -138,9 +141,9 @@ const IN_MAIL: &str = "The user can do it in Mail: select the mailbox, then Mail
                        New Mailbox to make one).";
 
 /// How Mail reaches this account's server: what Timbre needs to act there.
-async fn account(loc: &Loc) -> Result<Account, String> {
+async fn account(loc: &Loc, deadline: Deadline) -> Result<Account, String> {
     let what = format!("'{}'", loc.account);
-    let v = mailapp::run(mailapp::ACCOUNT_SERVER, &json!({ "loc": loc }), Duration::from_secs(30))
+    let v = mailapp::run(mailapp::ACCOUNT_SERVER, &json!({ "loc": loc }), deadline.cap(Duration::from_secs(20)))
         .await
         .map_err(|e| e.to_string())?;
     let field = |k: &str| v.get(k).and_then(serde_json::Value::as_str).unwrap_or("").trim().to_string();
@@ -355,6 +358,13 @@ async fn wait_for_password(acct: &Account, k: &str, deadline: Deadline) -> Resul
     .await;
     let step = waited.unwrap_or_else(|_| rx.borrow().clone());
     let ask_again = "Ask the user to answer it, then call this tool again (nothing was done yet).";
+    if wait.is_zero() && matches!(step, Step::Looking | Step::Checking) {
+        return Err(format!(
+            "Mail was slow to answer about '{}', so this call ran out of time before the password step. Call this \
+             tool again (nothing was done yet).",
+            acct.name
+        ));
+    }
     match step {
         Step::Done(r) => {
             {
@@ -419,6 +429,8 @@ async fn find_password_steps(acct: &Account, k: &str, tx: &watch::Sender<Step>) 
                 blocking(move || keychain::forget(&h, &u)).await?;
                 note = Note::Stale;
             }
+            // The server's word for the user: the window asking shows it.
+            Err(imap::Error::Alert(why)) => note = Note::Alert(why),
             Err(e) => return Err(server_trouble(acct, &e)),
         }
     }
@@ -434,6 +446,9 @@ async fn find_password_steps(acct: &Account, k: &str, tx: &watch::Sender<Step>) 
                 return Ok(());
             }
             Err(imap::Error::Auth(_)) => {}
+            // Gmail asking for an app password instead of the account's own:
+            // the window asking shows it, with the button that makes one.
+            Err(imap::Error::Alert(why)) => note = Note::Alert(why),
             Err(e) => return Err(server_trouble(acct, &e)),
         }
     }
@@ -660,8 +675,8 @@ fn delete_in(s: &mut Session, path: &[String], what: &str) -> Result<(), String>
         // Asked, and the answer lost: the server may have done it.
         Err(e) => {
             return Err(format!(
-                "{what} may have been deleted: the server's answer did not come ({e}). Call list_mailboxes in a \
-                 moment to know."
+                "{what} {MAYBE_DELETED}: the server's answer did not come ({e}). Call list_mailboxes in a moment \
+                 to know."
             ));
         }
     }
@@ -725,7 +740,6 @@ fn parts_of(name: &str) -> Result<Vec<String>, String> {
 /// it, whatever the server's NAMESPACE says.
 pub(crate) fn mail_prefix(store: &Store, loc: &Loc) -> Option<Vec<String>> {
     let mailboxes = store.mailboxes();
-    let leftovers = store.leftovers();
     let inbox = |m: &Mailbox| m.path.len() == 1 && m.path[0].eq_ignore_ascii_case("INBOX");
     let others: Vec<&Mailbox> = mailboxes
         .values()
@@ -733,7 +747,7 @@ pub(crate) fn mail_prefix(store: &Store, loc: &Loc) -> Option<Vec<String>> {
             !m.local
                 && crate::store::same_account(m, &loc.account_id, &loc.account)
                 && !inbox(m)
-                && !leftovers.contains(&m.id)
+                && !store.is_leftover(m)
         })
         .collect();
     if others.is_empty() {
@@ -791,8 +805,26 @@ fn create_in(
 }
 
 /// Sign in (or take the session the password check left signed in) and run
-/// `f` on the server, off the async threads.
+/// `f` on the server, off the async threads, within the call's time: past
+/// it, the call says so (the server may still finish in a moment).
 async fn on_server<T: Send + 'static>(
+    acct: &Account,
+    password: String,
+    deadline: Deadline,
+    f: impl FnOnce(&mut Session) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let time = deadline.left().max(Duration::from_secs(5));
+    match tokio::time::timeout(time, signed_in(acct, password, f)).await {
+        Ok(r) => r,
+        Err(_) => Err(format!(
+            "The server of '{}' ({}) is slow to answer: what was asked may still be done in a moment. Call \
+             list_mailboxes shortly to see.",
+            acct.name, acct.server.host
+        )),
+    }
+}
+
+async fn signed_in<T: Send + 'static>(
     acct: &Account,
     password: String,
     f: impl FnOnce(&mut Session) -> Result<T, String> + Send + 'static,
@@ -830,11 +862,15 @@ async fn on_server<T: Send + 'static>(
 
 /// Whether Mail shows the mailbox at exactly `loc`, waiting up to `wait`
 /// for it to show it (`present`) or to stop showing it; none if Mail
-/// cannot be asked.
-async fn mail_shows(store: &Store, loc: &Loc, present: bool, wait: Duration) -> Option<bool> {
+/// cannot be asked, or the call has no time left for it.
+async fn mail_shows(store: &Store, loc: &Loc, present: bool, wait: Duration, deadline: Deadline) -> Option<bool> {
+    if deadline.left() < Duration::from_secs(3) {
+        return None;
+    }
+    let wait = deadline.cap(wait);
     let tries = u64::try_from(wait.as_millis() / 500).unwrap_or(1).max(1);
     let input = json!({ "loc": loc, "present": present, "tries": tries, "prefixed": prefixed(store, loc) });
-    let v = mailapp::run(mailapp::MAILBOX_SHOWN, &input, wait + Duration::from_secs(20)).await.ok()?;
+    let v = mailapp::run(mailapp::MAILBOX_SHOWN, &input, deadline.cap(wait + Duration::from_secs(10))).await.ok()?;
     v.get("found").and_then(serde_json::Value::as_bool)
 }
 
@@ -865,7 +901,8 @@ async fn reload(ctx: &Arc<Ctx>) {
     let c = ctx.clone();
     let _ = blocking(move || {
         let conn = c.db();
-        c.store.reload_mailboxes(&conn)
+        let _ = c.store.reload_mailboxes(&conn);
+        c.store.refresh_leftovers_now(&conn);
     })
     .await;
 }
@@ -877,7 +914,15 @@ async fn reload(ctx: &Arc<Ctx>) {
 /// mail waiting to be sent, and Apple Notes kept in the account ("Notes").
 /// An archive is not kept: Mail makes it again when it archives.
 pub(crate) fn kept_by_mail(m: &Mailbox) -> Option<String> {
-    if m.role_strength == 2 && matches!(m.role, Role::Inbox | Role::Drafts | Role::Sent | Role::Trash | Role::Junk) {
+    // Where an account keeps those: at the top, inside INBOX on servers
+    // that keep every mailbox there, or among Gmail's own. "Clients/Sent"
+    // is a folder of the user's.
+    let level = m.path.len() == 1
+        || (m.path.len() == 2 && (m.path[0].eq_ignore_ascii_case("INBOX") || m.path[0].starts_with('[')));
+    if level
+        && m.role_strength == 2
+        && matches!(m.role, Role::Inbox | Role::Drafts | Role::Sent | Role::Trash | Role::Junk)
+    {
         return Some(format!("it is the account's {} mailbox", m.role.as_str()));
     }
     if crate::store::gmail_folder(m) || (!m.local && m.path.len() == 1 && m.path[0].starts_with('[')) {
@@ -895,32 +940,43 @@ pub(crate) fn kept_by_mail(m: &Mailbox) -> Option<String> {
 }
 
 /// The mailbox Mail lists that the user means to delete: the one at that
-/// path (as list_mailboxes or Mail shows it), else the one whose path
-/// differs only in case or accents, else the one of that name; in the
-/// account so named, or, failing that, whose name holds the one given.
-/// Never another mailbox standing for a role's name ("Archives" is not the
-/// account's "Archive"). None when Mail lists none.
+/// path; else the one at that path from Mail's INBOX prefix on, in an
+/// account that keeps every mailbox inside INBOX (La Poste's "Archives");
+/// else one whose path differs only in case or accents, the same ways;
+/// else the one of that name; in the account so named, or, failing that,
+/// whose name holds the one given. Never another mailbox standing for a
+/// role's name ("Archives" is not the account's "Archive"), nor iCloud's
+/// "INBOX/Clients" for its "Clients". None when Mail lists none.
 pub(crate) fn mailbox_to_delete(store: &Store, spec: &str, account: Option<&str>) -> Result<Option<Mailbox>, String> {
     let accounts = account.filter(|a| !account_key(a).is_empty()).map(|a| store.accounts_named(a));
     if accounts.as_ref().is_some_and(Vec::is_empty) {
         return Ok(None);
     }
-    let leftovers = store.leftovers();
     let mailboxes = store.mailboxes();
     let candidates: Vec<&Mailbox> = mailboxes
         .values()
-        .filter(|m| !leftovers.contains(&m.id))
         .filter(|m| accounts.as_ref().is_none_or(|a| a.iter().any(|(id, n)| crate::store::same_account(m, id, n))))
+        .filter(|m| !store.is_leftover(m))
         .collect();
+    // Whether each account shows its mailboxes from INBOX on.
+    let mut inside: HashMap<(bool, String, String), bool> = HashMap::new();
+    for m in &candidates {
+        inside
+            .entry((m.local, m.account_id.clone(), m.account.clone()))
+            .or_insert_with(|| prefixed(store, &Loc::from(*m)) == Some(true));
+    }
     let want: Vec<String> = spec.trim().trim_matches('/').split('/').map(|p| p.trim().nfc().collect()).collect();
     let from_inbox = |m: &Mailbox| -> Option<Vec<String>> {
-        (m.path.len() >= 2 && m.path[0].eq_ignore_ascii_case("INBOX")).then(|| m.path[1..].to_vec())
+        let prefixed = inside.get(&(m.local, m.account_id.clone(), m.account.clone())).copied().unwrap_or(false);
+        (prefixed && m.path.len() >= 2 && m.path[0].eq_ignore_ascii_case("INBOX")).then(|| m.path[1..].to_vec())
     };
     let folded = |p: &[String]| crate::store::name_key(&p.join("/"));
     let want_folded = folded(&want);
-    let rules: [&dyn Fn(&Mailbox) -> bool; 3] = [
-        &|m| same_path(&m.path, &want) || from_inbox(m).is_some_and(|p| p == want),
-        &|m| folded(&m.path) == want_folded || from_inbox(m).is_some_and(|p| folded(&p) == want_folded),
+    let rules: [&dyn Fn(&Mailbox) -> bool; 5] = [
+        &|m| same_path(&m.path, &want),
+        &|m| from_inbox(m).is_some_and(|p| same_path(&p, &want)),
+        &|m| folded(&m.path) == want_folded,
+        &|m| from_inbox(m).is_some_and(|p| folded(&p) == want_folded),
         &|m| want.len() == 1 && crate::store::name_key(&m.name) == want_folded,
     ];
     for rule in rules {
@@ -945,7 +1001,7 @@ pub(crate) fn mailbox_to_delete(store: &Store, spec: &str, account: Option<&str>
 pub async fn delete_mailbox(ctx: &Arc<Ctx>, p: &DeleteMailboxParams) -> Result<MailboxDone, String> {
     let deadline = Deadline::new();
     let Some(mb) = mailbox_to_delete(&ctx.store, &p.mailbox, p.account.as_deref())? else {
-        return delete_unlisted(ctx, p).await;
+        return delete_unlisted(ctx, p, deadline).await;
     };
     let loc = Loc::from(&mb);
     let fix = prefixed(&ctx.store, &loc);
@@ -956,15 +1012,14 @@ pub async fn delete_mailbox(ctx: &Arc<Ctx>, p: &DeleteMailboxParams) -> Result<M
     if let Some(why) = kept_by_mail(&mb) {
         return Err(format!("{what} cannot be deleted: {why}."));
     }
-    let leftovers = ctx.store.leftovers();
     let inner = ctx
         .store
         .mailboxes()
         .values()
         .filter(|m| {
             !m.local
-                && !leftovers.contains(&m.id)
                 && crate::store::same_account(m, &mb.account_id, &mb.account)
+                && !ctx.store.is_leftover(m)
                 && m.path.len() > mb.path.len()
                 && m.path.starts_with(&mb.path)
         })
@@ -982,10 +1037,10 @@ pub async fn delete_mailbox(ctx: &Arc<Ctx>, p: &DeleteMailboxParams) -> Result<M
              messages first (move_mail, which can be undone), then delete the mailbox."
         ));
     }
-    let acct = account(&loc).await?;
+    let acct = account(&loc, deadline).await?;
     // Mail's database keeps some mailboxes Mail has deleted: one Mail no
     // longer shows never opens a password window.
-    if mail_shows(&ctx.store, &loc, true, Duration::ZERO).await == Some(false)
+    if mail_shows(&ctx.store, &loc, true, Duration::ZERO, deadline).await == Some(false)
         && password_at_hand(&acct).await.is_none()
     {
         return Err(format!(
@@ -994,9 +1049,15 @@ pub async fn delete_mailbox(ctx: &Arc<Ctx>, p: &DeleteMailboxParams) -> Result<M
     }
     let password = password(&acct, deadline).await?;
     let (path, label) = (mb.path.clone(), what.clone());
-    on_server(&acct, password, move |s| delete_in(s, &path, &label)).await?;
+    if let Err(e) = on_server(&acct, password, deadline, move |s| delete_in(s, &path, &label)).await {
+        // Perhaps done: Mail is asked to look, so list_mailboxes tells.
+        if e.contains(MAYBE_DELETED) {
+            ask_mail_to_sync(&loc);
+        }
+        return Err(e);
+    }
     ask_mail_to_sync(&loc);
-    let gone = mail_shows(&ctx.store, &loc, false, deadline.cap(MAIL_CATCHES_UP)).await == Some(false);
+    let gone = mail_shows(&ctx.store, &loc, false, MAIL_CATCHES_UP, deadline).await == Some(false);
     reload(ctx).await;
     let gmail = ctx.store.is_gmail(&mb.account_id, &mb.account) || acct.provider == Provider::Google;
     let note = match (gone, gmail) {
@@ -1019,15 +1080,15 @@ pub async fn delete_mailbox(ctx: &Arc<Ctx>, p: &DeleteMailboxParams) -> Result<M
 /// or kept where Mail does not look), in the account named: deleted on the
 /// server with the same checks, when Timbre has the password at hand (a
 /// name that matches nothing never opens a password window).
-async fn delete_unlisted(ctx: &Arc<Ctx>, p: &DeleteMailboxParams) -> Result<MailboxDone, String> {
+async fn delete_unlisted(ctx: &Arc<Ctx>, p: &DeleteMailboxParams, deadline: Deadline) -> Result<MailboxDone, String> {
     let not_found = format!("No mailbox named '{}'. Call list_mailboxes.", p.mailbox);
     let Some(name) = p.account.as_deref() else { return Err(not_found) };
     let loc = find_account(&ctx.store, name)?;
     let wanted = parts_of(&p.mailbox).map_err(|_| not_found.clone())?;
-    let acct = account(&loc).await?;
+    let acct = account(&loc, deadline).await?;
     let Some(password) = password_at_hand(&acct).await else { return Err(not_found) };
     let what = format!("'{}' ({})", wanted.join("/"), loc.account);
-    let path = on_server(&acct, password, move |s| {
+    let path = on_server(&acct, password, deadline, move |s| {
         let all = s.list().map_err(|e| format!("{what} was not deleted: {e}."))?;
         let mut ways = vec![wanted.clone()];
         if !wanted[0].eq_ignore_ascii_case("INBOX") {
@@ -1095,13 +1156,13 @@ async fn make(ctx: &Arc<Ctx>, loc: &Loc, wanted: &[String], deadline: Deadline) 
         on_server: path.join("/"),
         note: note.into(),
     };
-    if mail_shows(&ctx.store, &at, true, Duration::ZERO).await == Some(true) {
+    if mail_shows(&ctx.store, &at, true, Duration::ZERO, deadline).await == Some(true) {
         return Ok(done(&path, "It exists already."));
     }
     // Mail first: no password, and it shows the mailbox at once.
     match mailapp::make_mailbox(&loc.account_id, &rel.join("/"), deadline.cap(Duration::from_secs(25))).await {
         Ok(()) => {
-            let shown_now = mail_shows(&ctx.store, &at, true, deadline.cap(MAIL_CATCHES_UP)).await == Some(true);
+            let shown_now = mail_shows(&ctx.store, &at, true, MAIL_CATCHES_UP, deadline).await == Some(true);
             if shown_now {
                 reload(ctx).await;
             }
@@ -1113,7 +1174,7 @@ async fn make(ctx: &Arc<Ctx>, loc: &Loc, wanted: &[String], deadline: Deadline) 
         // No answer in time: Mail may still be making it, so neither the
         // server nor a password window is tried meanwhile.
         Err(e) if mailapp::no_answer(&e) => {
-            if mail_shows(&ctx.store, &at, true, deadline.cap(MAIL_CATCHES_UP)).await == Some(true) {
+            if mail_shows(&ctx.store, &at, true, MAIL_CATCHES_UP, deadline).await == Some(true) {
                 reload(ctx).await;
                 return Ok(done(&path, "Made by Mail, on the server too."));
             }
@@ -1126,14 +1187,14 @@ async fn make(ctx: &Arc<Ctx>, loc: &Loc, wanted: &[String], deadline: Deadline) 
         }
         Err(e) => tracing::info!("Mail would not make the mailbox, so the server is asked: {e:#}"),
     }
-    let acct = account(loc).await?;
+    let acct = account(loc, deadline).await?;
     let password = password(&acct, deadline).await?;
     let what = format!("'{}' ({})", rel.join("/"), loc.account);
-    let (path, existed) = on_server(&acct, password, move |s| create_in(s, &rel, &what, prefix)).await?;
+    let (path, existed) = on_server(&acct, password, deadline, move |s| create_in(s, &rel, &what, prefix)).await?;
     ask_mail_to_sync(loc);
-    let listed =
-        mail_shows(&ctx.store, &Loc { path: path.clone(), ..loc.clone() }, true, deadline.cap(MAIL_CATCHES_UP)).await
-            == Some(true);
+    let listed = mail_shows(&ctx.store, &Loc { path: path.clone(), ..loc.clone() }, true, MAIL_CATCHES_UP, deadline)
+        .await
+        == Some(true);
     if listed {
         reload(ctx).await;
     }
@@ -1161,27 +1222,46 @@ async fn password_at_hand(acct: &Account) -> Option<String> {
     if let Some(p) = known(&k) {
         return Some(p);
     }
-    let (h, u) = (acct.server.host.clone(), acct.server.user.clone());
-    match tokio::time::timeout(AT_HAND, blocking(move || keychain::saved(&h, &u))).await {
-        Ok(Ok(Found::Password(p))) => {
-            remember(&k, p.clone());
-            Some(p)
+    // One look at a time: a look still waiting on macOS (and the user) is
+    // joined, never doubled with a second question on the screen. What it
+    // finds is kept for the calls that follow.
+    let mut rx = {
+        let mut looks = AT_HAND_LOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        match looks.get(&k) {
+            Some(rx) => rx.clone(),
+            None => {
+                let (tx, rx) = watch::channel(false);
+                looks.insert(k.clone(), rx.clone());
+                let (h, u, k) = (acct.server.host.clone(), acct.server.user.clone(), k.clone());
+                tokio::task::spawn_blocking(move || {
+                    if let Found::Password(p) = keychain::saved(&h, &u) {
+                        remember(&k, p);
+                    }
+                    AT_HAND_LOOKS.lock().unwrap_or_else(|e| e.into_inner()).remove(&k);
+                    let _ = tx.send(true);
+                });
+                rx
+            }
         }
-        _ => None,
-    }
+    };
+    let _ = tokio::time::timeout(AT_HAND, rx.wait_for(|done| *done)).await;
+    known(&k)
 }
+
+/// Looks in the keychain under way, for calls that open no window.
+static AT_HAND_LOOKS: LazyLock<Mutex<HashMap<String, watch::Receiver<bool>>>> = LazyLock::new(Mutex::default);
 
 /// Make a mailbox only if the password is at hand (no window): for an
 /// archive Mail would not make.
 pub async fn make_if_password_known(ctx: &Ctx, loc: &Loc, name: &str) -> Result<(), String> {
     let deadline = Deadline(Instant::now() + Duration::from_secs(40));
-    let acct = account(loc).await?;
+    let acct = account(loc, deadline).await?;
     let password = password_at_hand(&acct).await.ok_or("no password kept for this account yet")?;
     let (wanted, prefix) = (vec![name.to_string()], mail_prefix(&ctx.store, loc));
     let what = format!("'{name}' ({})", loc.account);
-    let (path, _) = on_server(&acct, password, move |s| create_in(s, &wanted, &what, prefix)).await?;
+    let (path, _) = on_server(&acct, password, deadline, move |s| create_in(s, &wanted, &what, prefix)).await?;
     ask_mail_to_sync(loc);
-    mail_shows(&ctx.store, &Loc { path, ..loc.clone() }, true, deadline.cap(MAIL_CATCHES_UP)).await;
+    mail_shows(&ctx.store, &Loc { path, ..loc.clone() }, true, MAIL_CATCHES_UP, deadline).await;
     Ok(())
 }
 
@@ -1409,6 +1489,10 @@ mod tests {
         assert!(kept_by_mail(&mb(&["Notes"])).is_some());
         assert!(kept_by_mail(&mb(&["INBOX", "Archives"])).is_none());
         assert!(kept_by_mail(&mb(&["Projets"])).is_none());
+        assert!(kept_by_mail(&mb(&["INBOX", "Trash"])).is_some());
+        // A folder of the user's named like one, inside another.
+        assert!(kept_by_mail(&mb(&["Clients", "Sent"])).is_none());
+        assert!(kept_by_mail(&mb(&["Clients", "Werbung"])).is_none());
     }
 
     #[test]

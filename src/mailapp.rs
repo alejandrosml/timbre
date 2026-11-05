@@ -93,8 +93,10 @@ function mailbox(loc) {
 }
 // Where mail goes, and whether a mailbox is there: the mailbox at exactly
 // this path, or null. The path as Mail's database writes it (accents either
-// way), from Mail's path prefix on when the account keeps every mailbox
-// inside INBOX (`prefixed` true; false: never; unknown: both ways). Never
+// way), from Mail's path prefix on first when the account keeps every
+// mailbox inside INBOX (`prefixed` true: then as written too, for a Mail
+// with no prefix set; false: as written only, iCloud's "INBOX/Clients" is
+// not its "Clients"; unknown: as written, then from the prefix). Never
 // another mailbox that only shares its last name, nor one whose name
 // differs in case alone: a server may hold both "Clients" and "clients".
 function exactMailbox(loc, prefixed) {
@@ -106,7 +108,7 @@ function exactMailbox(loc, prefixed) {
   const seen = {};
   for (const form of ['', 'NFC', 'NFD']) {
     const p = loc.path.map((s) => (form ? String(s).normalize(form) : String(s)));
-    const ways = prefixed === true ? [inInbox(p) ? p.slice(1) : p] : prefixed === false || !inInbox(p) ? [p] : [p, p.slice(1)];
+    const ways = !inInbox(p) || prefixed === false ? [p] : prefixed === true ? [p.slice(1), p] : [p, p.slice(1)];
     for (const w of ways) { const k = w.join('/'); if (w.length && !seen[k]) { seen[k] = true; paths.push(w); } }
   }
   for (const p of paths) {
@@ -132,14 +134,31 @@ function exactOrThrow(loc, prefixed) {
 }
 // A message by id in the mailbox the user sees it in; for Gmail, where
 // Mail stores it (All Mail) if not found there. Returns [message, alt used].
-function find(loc, id, alt) {
-  try { const m = mailbox(loc).messages.byId(id); m.id(); return [m, false]; }
-  catch (e) { if (fatal(e) || !alt) throw e; }
-  const m = mailbox(alt).messages.byId(id);
-  m.id();
-  return [m, true];
+function find(loc, id, alt, mid) {
+  let m = null;
+  let viaAlt = false;
+  try { m = mailbox(loc).messages.byId(id); m.id(); }
+  catch (e) {
+    if (fatal(e) || !alt) throw e;
+    m = mailbox(alt).messages.byId(id);
+    m.id();
+    viaAlt = true;
+  }
+  sameMessage(m, mid);
+  return [m, viaAlt];
 }
-function message(loc, id, alt) { return find(loc, id, alt)[0]; }
+function message(loc, id, alt, mid) { return find(loc, id, alt, mid)[0]; }
+// The message Timbre means, not another one Mail now gives its id (after
+// Mail rebuilt its list of messages): its Message-ID is the one Timbre read.
+function sameMessage(m, mid) {
+  if (!mid) return;
+  let got = null;
+  try { got = m.messageId(); } catch (e) { if (fatal(e)) throw e; return; }
+  const norm = (s) => String(s === null || s === undefined ? '' : s).trim().replace(/^<+/, '').replace(/>+$/, '').trim().toLowerCase();
+  if (norm(got) !== '' && norm(got) !== norm(mid)) {
+    throw new Error('Mail now gives this id to another message (it rebuilt its list of messages?): nothing was done to it. Search again.');
+  }
+}
 function addRecipients(msg, i) {
   for (const a of (i.to || [])) msg.toRecipients.push(Mail.ToRecipient({address: a}));
   for (const a of (i.cc || [])) msg.ccRecipients.push(Mail.CcRecipient({address: a}));
@@ -183,7 +202,7 @@ function main(i) {
 
 pub const DRAFT_REPLY: &str = r#"
 function main(i) {
-  const orig = message(i.loc, i.id, i.alt);
+  const orig = message(i.loc, i.id, i.alt, i.mid);
   const r = Mail.reply(orig, {openingWindow: true, replyToAll: !!i.reply_all});
   r.content = i.body;
   addRecipients(r, {cc: i.cc, bcc: i.bcc});
@@ -194,7 +213,7 @@ function main(i) {
 
 pub const DRAFT_FORWARD: &str = r#"
 function main(i) {
-  const orig = message(i.loc, i.id, i.alt);
+  const orig = message(i.loc, i.id, i.alt, i.mid);
   const f = Mail.forward(orig, {openingWindow: true});
   addRecipients(f, i);
   let added = false;
@@ -211,7 +230,7 @@ function main(i) {
   const out = [];
   for (const it of i.items) {
     try {
-      const m = message(it.loc, it.id, it.alt);
+      const m = message(it.loc, it.id, it.alt, it.mid);
       if (i.action === 'read') m.readStatus = true;
       else if (i.action === 'unread') m.readStatus = false;
       else if (i.action === 'flag') { m.flaggedStatus = true; if (typeof i.color === 'number') m.flagIndex = i.color; }
@@ -228,7 +247,7 @@ function main(i) {
   const out = [];
   for (const it of i.items) {
     try {
-      const [m, viaAlt] = find(it.loc, it.id, it.alt);
+      const [m, viaAlt] = find(it.loc, it.id, it.alt, it.mid);
       if (viaAlt && JSON.stringify(it.alt) === JSON.stringify(it.dest)) throw new Error('already there');
       let mid = null;
       try { mid = m.messageId(); } catch (e) { if (fatal(e)) throw e; }
@@ -472,7 +491,8 @@ function main(i) {
   for (const it of i.items) {
     try {
       if (!it.message_id) throw new Error('no Message-ID to find it by');
-      const src = mailbox(it.now_in);
+      const src = exactMailbox(it.now_in, it.now_prefixed);
+      if (!src) throw new Error('message not found where it was moved: that mailbox is gone');
       let hits = src.messages.whose({messageId: it.message_id})();
       if (hits.length === 0) hits = src.messages.whose({messageId: '<' + it.message_id + '>'})();
       if (hits.length === 0) throw new Error('message not found where it was moved');
@@ -670,7 +690,11 @@ pub fn open_message_url(message_id: &str) -> Result<()> {
             other => enc.push_str(&format!("%{other:02X}")),
         }
     }
-    let status = std::process::Command::new("/usr/bin/open").arg(format!("message://{enc}")).status()?;
+    let status = std::process::Command::new("/usr/bin/open")
+        .arg(format!("message://{enc}"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .status()?;
     if !status.success() {
         bail!("Mail could not open the message");
     }
@@ -784,6 +808,8 @@ const ACCOUNTS = {
   IC: box('iCloud', 'ic', [box('INBOX', 'ic-inbox', [box('Clients', 'ic-inbox-clients')]), box('Clients', 'ic-clients')]),
   // iCloud with "Clients" at the top only.
   IT: box('iCloud 2', 'it', [box('INBOX', 'it-inbox'), box('Clients', 'it-clients')]),
+  // Every mailbox inside INBOX, which Mail (no path prefix set) shows there.
+  CP: box('cPanel', 'cp', [box('INBOX', 'cp-inbox', [box('Archives', 'cp-archives')])]),
   // A server holding "Clients", found by Mail in any case.
   CI: anyCase('Fastmail', 'ci', [box('INBOX', 'ci-inbox'), box('Clients', 'ci-clients')]),
 };
@@ -838,6 +864,21 @@ console.log(JSON.stringify(cases.map(([id, path]) => {
         );
     }
 
+    /// A message found by id is acted on only if it is still the one Timbre
+    /// read: after Mail rebuilt its list, the id may be another's.
+    #[test]
+    fn a_message_is_acted_on_only_if_it_is_the_one_read() {
+        let cases = r#"
+const msg = (mid) => ({messageId: () => mid});
+const tries = [[msg('<a@x>'), 'a@x'], [msg('A@X'), '<a@x>'], [msg('b@x'), 'a@x'], [msg(''), 'a@x'], [msg('b@x'), null]];
+console.log(JSON.stringify(tries.map(([m, mid]) => { try { sameMessage(m, mid); return 'ok'; } catch (e) { return 'refused'; } })));
+"#;
+        let Some(out) = node("same", &[], &format!("{FAKE_MAIL}\n{PRELUDE}\n{cases}")) else { return };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let got: Vec<String> = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(got, ["ok", "ok", "refused", "ok", "ok"]);
+    }
+
     /// Where mail goes, and whether a mailbox exists, is found at exactly
     /// its path: never a mailbox elsewhere with the same last name, nor one
     /// whose name differs in case, nor one at the top for one inside INBOX
@@ -861,6 +902,9 @@ const cases = [
   ['CI', ['Clients'], false],
   ['CI', ['clients'], false],
   ['CI', ['inbox'], false],
+  // Every mailbox inside INBOX, and a Mail with no prefix set showing them
+  // there: found as written too.
+  ['CP', ['INBOX', 'Archives'], true],
 ];
 console.log(JSON.stringify(cases.map(([id, path, prefixed]) => {
   const mb = exactMailbox({account_id: id, account: '', path, local: false}, prefixed === null ? undefined : prefixed);
@@ -890,6 +934,7 @@ console.log(JSON.stringify(cases.map(([id, path, prefixed]) => {
                 tag("ci-clients"),
                 None,
                 tag("ci-inbox"),
+                tag("cp-archives"),
             ]
         );
     }
