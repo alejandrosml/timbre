@@ -371,17 +371,21 @@ pub struct MailboxesView {
 pub fn list_mailboxes(ctx: &Ctx) -> Result<MailboxesView, String> {
     let conn = ctx.db();
     ctx.store.reload_mailboxes(&conn).map_err(|e| e.to_string())?;
+    ctx.store.refresh_leftovers_now(&conn);
     let counts = ctx.store.mailbox_counts(&conn).map_err(|e| e.to_string())?;
     let mut by_account: std::collections::BTreeMap<String, Vec<MailboxView>> = Default::default();
     let mailboxes = ctx.store.mailboxes();
-    let mut list: Vec<_> = mailboxes.values().collect();
+    // Rows Mail's database keeps for mailboxes Mail no longer has: not shown
+    // in Mail, so not listed.
+    let leftovers = ctx.store.leftovers();
+    let mut list: Vec<_> = mailboxes.values().filter(|m| !leftovers.contains(&m.id)).collect();
     list.sort_by_key(|m| (m.account.to_lowercase(), m.role != Role::Inbox, m.display_path().to_lowercase()));
     // Empty folders that only hold others ("[Gmail]") are left out; an empty
     // folder of the user's is listed, so it can be found and filed into, and
     // so is one with a role ("Archives" holding "Archives/2009"), so where
     // archived mail goes can be seen.
-    let parents: std::collections::HashSet<(String, String)> = mailboxes
-        .values()
+    let parents: std::collections::HashSet<(String, String)> = list
+        .iter()
         .filter(|m| m.path.len() > 1)
         .map(|m| (m.account_id.clone() + &m.account, m.path[..m.path.len() - 1].join("/")))
         .collect();
@@ -395,7 +399,9 @@ pub fn list_mailboxes(ctx: &Ctx) -> Result<MailboxesView, String> {
         }
         by_account.entry(m.account.clone()).or_default().push(MailboxView {
             name: m.display_path(),
-            role: (m.role != Role::Other).then(|| m.role.as_str().to_string()),
+            // A role only for the mailbox Mail or the provider keeps for it:
+            // "Archives clients" is a folder of the user's.
+            role: (m.role != Role::Other && m.role_strength == 2).then(|| m.role.as_str().to_string()),
             total,
             unread,
         });

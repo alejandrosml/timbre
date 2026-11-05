@@ -22,8 +22,11 @@ All notable changes are listed here. The format follows
   Mac's password before letting it read one.
 - **What is never deleted.** A mailbox is deleted only if the server says it
   holds no message and no other mailbox, and if neither the server nor Mail
-  keeps it for itself (inbox, sent mail, drafts, trash, junk, archive, the
-  provider's own folders); messages are never deleted with it. Exchange,
+  keeps it for itself (inbox, sent mail, drafts, trash, junk, mail being
+  sent, Apple Notes, the provider's own folders, any the server marks as its
+  own), by its flags or, where the server sets none, by its name; messages
+  are never deleted with it. An empty archive may go: Mail makes it again
+  when it next archives. Exchange,
   Outlook.com, POP accounts and On My Mac mailboxes are left to Mail's menu,
   and the result says so.
 - **Mail catching up.** A mailbox made on the server shows in Mail within
@@ -33,11 +36,58 @@ All notable changes are listed here. The format follows
   the first byte, or STARTTLS before anything is said; the certificate is
   checked by macOS, as Mail checks it; a password never travels unencrypted.
 
+- **Mailboxes Mail no longer has.** Mail's database keeps a row for some
+  mailboxes Mail deleted; Timbre knows them by their folder gone from the
+  Mac (in an account whose other folders are where they should be, and only
+  when nothing is in them), and leaves them out of `list_mailboxes`, of
+  names and of the roles' mailboxes.
+
 ### Fixed
 - **Archives at La Poste.** Archiving the mail of an account with no archive
   mailbox, where Mail will not make one for a script (La Poste), makes it on
   the server when Timbre has the password already; otherwise the result
   says to call `create_mailbox` once.
+- **Moves go exactly where asked.** Mail's mailbox is found at exactly its
+  path for a move, an undo, or to know whether a mailbox exists: never
+  another one sharing its last name, nor one whose name differs in case, nor
+  a mailbox at the top for one inside an iCloud inbox. "archive", "trash",
+  "junk" and "inbox" mean the mailbox Mail or the provider names so, never a
+  folder of the user's that holds the word ("Archives clients 2019"); with
+  no archive, one is made, as before.
+- **Gmail labels named like a bin.** A label of the user's named "Spam
+  reports" no longer makes the messages it holds count as junk: Gmail's own
+  trash and spam alone do.
+- **Accounts named alike.** "Gmail" means the account so named, not also
+  "Gmail Pro", in searches, moves and deletions; an account's id works with
+  or without a mailbox.
+- **Searches.** Words with no letter or digit ("€", "🎉") are said to be
+  left out, and alone find nothing instead of every message; `-subject:`
+  leaves out what holds the word in its subject only, not in its text; a
+  subject or a name that is not valid UTF-8 in Mail's database no longer
+  fails the searches and threads it belongs to.
+- **Late message files.** A message whose file Mail writes after Timbre
+  looked for it is indexed within minutes, not at the next start.
+- **Dates on a new Mac.** Started while Mail's database held no message
+  yet, Timbre read later dates 31 years off.
+- **Moves and undo.** An id given twice is moved once; a message without a
+  Message-ID is never journaled under an empty one (undo would have taken
+  another), and the result says it cannot be undone; two Timbres (two
+  Claude windows) no longer overwrite each other's undo journal; the
+  database is read off the server's threads, which a long search no longer
+  stalls.
+- **Making and deleting mailboxes, reviewed.** A server's answer is read
+  for what it is: a wrong password is asked again; the server's own message
+  for the user (Gmail asking for an app password) is shown in the window;
+  a server unable to sign in now is told as such, and the saved password is
+  kept. Each call stays under the time Claude waits, says when the server is
+  slow rather than blaming a window, and signs in once instead of twice. A
+  mailbox Mail lists is matched exactly on the server ("Clients" is not
+  "clients"); a deletion whose answer is lost says it may have happened.
+  Making a mailbox while Mail is slow never makes it twice. Drafts, Notes or
+  OUTBOX are kept on servers that flag nothing. The count of messages is
+  read from the server's answer about that very mailbox, and an endless
+  answer is refused. A keychain item already under Timbre's name is
+  replaced, never updated.
 
 ## [0.5.7] - 2026-11-05
 

@@ -365,7 +365,8 @@ fn register_functions(conn: &Connection) -> Result<()> {
         "timbre_fold",
         1,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-        |ctx| Ok(ctx.get::<Option<String>>(0)?.map(|s| norm::for_match(&s))),
+        // Text that is not valid UTF-8 in Mail's database is read anyway.
+        |ctx| Ok(crate::store::lossy(ctx.get_raw(0)).map(|s| norm::for_match(&s))),
     )?;
     // Weight of a message's age in the ranking: (1 + 3 / (1 + age / 60
     // days)) ^ p, from 4^p for today's mail down to about 1 for old mail.
@@ -515,7 +516,7 @@ fn subject_mismatch(conn: &Connection, store: &Store) -> Result<Option<f64>> {
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
-        let (ours, mail) = (key(&row.get::<_, String>(0)?), key(&row.get::<_, String>(1)?));
+        let (ours, mail) = (key(&crate::store::text_at(row, 0)?), key(&crate::store::text_at(row, 1)?));
         if ours.is_empty() || mail.is_empty() {
             continue;
         }
@@ -1040,7 +1041,72 @@ impl Indexer {
         let pending: HashSet<i64> = self.pending.iter().map(|(id, _, _)| *id).collect();
         let missed = live.keys().any(|id| !docs.contains_key(id) && !unlocated.contains(id) && !pending.contains(id));
         if missed {
-            self.full_build(conn, false)?;
+            return self.full_build(conn, false);
+        }
+        self.retry_unlocated(conn, &live, &docs, &unlocated)
+    }
+
+    /// Messages whose file was missing at the last walk: Mail downloads a
+    /// body later, so each is looked for where its file should be at every
+    /// reconcile, and the store is walked again once WALK_EVERY has passed.
+    /// Rows of messages gone since are dropped.
+    fn retry_unlocated(
+        &mut self,
+        conn: &mut Connection,
+        live: &HashMap<i64, i64>,
+        docs: &HashMap<i64, i64>,
+        unlocated: &HashSet<i64>,
+    ) -> Result<()> {
+        let gone: Vec<i64> =
+            unlocated.iter().filter(|id| !live.contains_key(id) || docs.contains_key(id)).copied().collect();
+        if !gone.is_empty() {
+            let tx = conn.transaction()?;
+            {
+                let mut del = tx.prepare_cached("DELETE FROM unlocated WHERE id = ?1")?;
+                for id in &gone {
+                    del.execute([id])?;
+                }
+            }
+            tx.commit()?;
+        }
+        let late: Vec<(i64, i64)> = unlocated
+            .iter()
+            .filter_map(|id| live.get(id).map(|mb| (*id, *mb)))
+            .filter(|(id, _)| !docs.contains_key(id))
+            .collect();
+        if late.is_empty() {
+            return Ok(());
+        }
+        let mut found: Vec<(i64, i64, Located)> = vec![];
+        if late.len() <= PREDICT_LIMIT {
+            let roots = self.data_roots(conn)?;
+            found = late
+                .iter()
+                .filter_map(|&(id, mb)| {
+                    roots.get(&mb).and_then(|root| emlx::predict(root, id)).map(|loc| (id, mb, loc))
+                })
+                .collect();
+        }
+        if !found.is_empty() {
+            let version_dir = self.store.version_dir.clone();
+            let rows: Vec<DocRow> =
+                found.par_iter().map(|(id, mb, loc)| build_doc_guarded(&version_dir, *id, *mb, loc)).collect();
+            write_docs(conn, &rows, true)?;
+            let tx = conn.transaction()?;
+            {
+                let mut del = tx.prepare_cached("DELETE FROM unlocated WHERE id = ?1")?;
+                for (id, ..) in &found {
+                    del.execute([id])?;
+                }
+            }
+            tx.commit()?;
+        }
+        let walked_long_ago = get_meta(conn, "last_walk")
+            .and_then(|s| s.parse::<i64>().ok())
+            .is_none_or(|t| now_unix() - t >= WALK_EVERY);
+        if found.len() < late.len() && walked_long_ago {
+            // full_build walks the store: the last walk is old.
+            return self.full_build(conn, false);
         }
         Ok(())
     }

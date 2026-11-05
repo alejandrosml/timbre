@@ -46,7 +46,15 @@ mod imp {
         found(passwords::get_generic_password(&service(host), user))
     }
 
+    /// An item already there under that name (another build's, or one an
+    /// app put there to receive the password) is deleted, never updated:
+    /// the new item is Timbre's own, which macOS lets Timbre alone read.
     pub fn save(host: &str, user: &str, password: &str) -> Result<(), String> {
+        match passwords::delete_generic_password(&service(host), user) {
+            Ok(()) => {}
+            Err(e) if e.code() == NOT_FOUND => {}
+            Err(e) => return Err(format!("the item already in the keychain could not be replaced ({e})")),
+        }
         passwords::set_generic_password(&service(host), user, password.as_bytes()).map_err(|e| e.to_string())
     }
 

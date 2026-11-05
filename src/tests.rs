@@ -32,10 +32,18 @@ fn setup(tag: &str, build_index: bool) -> Env {
 }
 
 /// Like `setup`, with a chance to change the synthetic store first.
+/// Mail keeps a folder for each mailbox it has: so does every test store,
+/// once `prepare` added its mailboxes.
 fn setup_with(tag: &str, build_index: bool, prepare: impl FnOnce(&crate::config::Config)) -> Env {
     let dir = tempdir::new(tag);
     let cfg = fixture::build(&dir.0).expect("fixture");
     prepare(&cfg);
+    fixture::mail_folders(&cfg).expect("folders");
+    setup_from(dir, cfg, build_index)
+}
+
+/// The test environment over a store already made.
+fn setup_from(dir: tempdir::Dir, cfg: crate::config::Config, build_index: bool) -> Env {
     let store = Arc::new(Store::open(&cfg).expect("store"));
     let progress = Arc::new(Progress::default());
     let mut conn = index::open(&cfg, &store, true).expect("index");
@@ -1254,4 +1262,253 @@ fn mailboxes_are_found_as_mail_shows_them() {
     let loc = |id: &str| crate::mailapp::Loc { account_id: id.into(), account: id.into(), path: vec![], local: false };
     assert_eq!(crate::mailboxes::mail_prefix(&env.ctx.store, &loc(LAPOSTE)), Some(vec!["INBOX".to_string()]));
     assert_eq!(crate::mailboxes::mail_prefix(&env.ctx.store, &loc(GMAIL)), Some(vec![]));
+}
+
+// ---------------------------------------------------------------- first bug review
+
+fn add_account(cfg: &crate::config::Config, pk: i64, id: &str, name: &str, user: &str) {
+    rusqlite::Connection::open(&cfg.accounts_db)
+        .unwrap()
+        .execute("INSERT INTO ZACCOUNT VALUES(?1, ?2, ?3, ?4, NULL)", rusqlite::params![pk, id, name, user])
+        .unwrap();
+}
+
+fn add_mailboxes(cfg: &crate::config::Config, account: &str, paths: &[&str]) {
+    let c = envelope_index(cfg);
+    for p in paths {
+        c.execute("INSERT INTO mailboxes(url) VALUES(?1)", [format!("imap://{account}/{p}")]).unwrap();
+    }
+}
+
+/// A label of the user's whose name holds "spam" is no junk: a message in
+/// the inbox that has it is shown, searched and moved as in the inbox.
+#[test]
+fn a_label_named_like_spam_is_not_the_junk() {
+    let env = setup_with("weakjunk", true, |cfg| {
+        gmail_and_laposte(cfg);
+        add_mailboxes(cfg, GMAIL, &["Spam%20reports"]);
+        envelope_index(cfg)
+            .execute(
+                &format!(
+                    "INSERT INTO labels VALUES(101, (SELECT ROWID FROM mailboxes WHERE url = 'imap://{GMAIL}/Spam%20reports'))"
+                ),
+                [],
+            )
+            .unwrap();
+    });
+    let store = &env.ctx.store;
+    let stored = env.ctx.meta(101).unwrap().mailbox;
+    let shown = store.display_mailbox(&env.ctx.db(), 101, stored);
+    assert_eq!(store.mailbox(shown).unwrap().path, ["INBOX"]);
+    assert!(ids(&search(&env, SearchParams { group_threads: Some(false), ..Default::default() })).contains(&101));
+    // Trashed from the inbox: Gmail's rules let it, so Mail is asked (it
+    // cannot be here).
+    let e = move_mail(&env, vec![101], "trash").unwrap_err();
+    assert!(e.contains("only available on macOS"), "{e}");
+}
+
+/// "archive" is the account's archive, never a folder of the user's that
+/// holds the word: with none, the archive is to be made.
+#[test]
+fn the_archive_is_never_a_folder_holding_the_word() {
+    let env = setup_with("weakarchive", false, |cfg| {
+        gmail_and_laposte(cfg);
+        add_mailboxes(cfg, LAPOSTE, &["INBOX/Archives%20clients%202019"]);
+    });
+    assert!(env.ctx.store.role_mailbox_for_account(LAPOSTE, LAPOSTE, Role::Archive).is_none());
+    let r = move_mail(&env, vec![1234], "archive").unwrap();
+    assert_eq!(r.done, 0);
+    assert!(r.failed[0].error.contains("archive mailbox"), "{:?}", r.failed);
+    // Listed as a folder of the user's, with no role.
+    let list = app::list_mailboxes(&env.ctx).unwrap();
+    let lp = list.accounts.iter().find(|a| a.account == LAPOSTE).unwrap();
+    let folder = lp.mailboxes.iter().find(|m| m.name == "INBOX/Archives clients 2019").unwrap();
+    assert_eq!(folder.role, None);
+}
+
+/// Mail's database with no message yet when Timbre starts (a new Mac, Mail
+/// rebuilding it): dates are read as Unix times, as Mail writes them.
+#[test]
+fn dates_are_right_when_mail_had_no_message_at_start() {
+    let env = setup_with("emptyatstart", false, |cfg| {
+        envelope_index(cfg).execute_batch("CREATE TABLE keep AS SELECT * FROM messages; DELETE FROM messages;").unwrap()
+    });
+    envelope_index(&env.ctx.cfg).execute_batch("INSERT INTO messages SELECT * FROM keep;").unwrap();
+    assert_eq!(env.ctx.store.epoch_offset, 0);
+    assert_eq!(env.ctx.meta(101).unwrap().date, fixture::messages()[0].date);
+}
+
+/// A subject that is not valid UTF-8 in Mail's database is read anyway:
+/// searches, threads, reading and the index never fail on it.
+#[test]
+fn text_that_is_not_utf8_never_fails_a_search() {
+    let env = setup_with("badutf8", false, |cfg| {
+        envelope_index(cfg)
+            .execute_batch(
+                "UPDATE subjects SET subject = CAST(x'50726f6a6563748e' AS TEXT)
+                 WHERE ROWID = (SELECT subject FROM messages WHERE ROWID = 102);",
+            )
+            .unwrap()
+    });
+    let c = &env.ctx;
+    let mut conn = index::open(&c.cfg, &c.store, true).unwrap();
+    Indexer::new(c.cfg.clone(), c.store.clone(), c.progress.clone()).full_build(&mut conn, false).unwrap();
+    assert!(ids(&search(&env, q("budget"))).contains(&102));
+    assert!(!ids(&search(&env, SearchParams::default())).is_empty());
+    assert!(!ids(&search(&env, SearchParams { subject: Some("project".into()), ..Default::default() })).is_empty());
+    assert!(app::get_thread(c, &ThreadParams { id: 103, max_messages: None, max_chars_per_message: None }).is_ok());
+    let m = app::read_mail(c, &ReadParams { id: 102, max_chars: None, strip_quotes: None }).unwrap();
+    assert!(m.subject.starts_with("Project"), "{}", m.subject);
+}
+
+/// The account alone, by name or by its id, as with a mailbox: the
+/// account so named, not every account whose name holds it.
+#[test]
+fn accounts_are_matched_alike_everywhere() {
+    const PRO: &str = "0C0C0C0C-1111-4E5F-9A8B-00000000000C";
+    let env = setup_with("accounts", true, |cfg| {
+        gmail_and_laposte(cfg);
+        add_account(cfg, 10, GMAIL, "Gmail", "bob@gmail.com");
+        add_account(cfg, 11, PRO, "Gmail Pro", "pro@gmail.com");
+        add_mailboxes(cfg, PRO, &["INBOX", "Factures"]);
+    });
+    let store = &env.ctx.store;
+    let by_id = search(&env, SearchParams { account: Some(fixture::ACCOUNT.into()), ..Default::default() });
+    assert!(!ids(&by_id).is_empty(), "by its id");
+    assert_eq!(store.accounts_named("gmail").len(), 1);
+    assert_eq!(store.accounts_named("pro").first().map(|a| a.1.as_str()), Some("Gmail Pro"));
+    assert!(store.resolve_mailboxes("Factures", Some("Gmail")).is_empty(), "not Gmail Pro's");
+    assert_eq!(store.resolve_mailboxes("Factures", Some("Gmail Pro")).len(), 1);
+    assert!(matches!(crate::mailboxes::mailbox_to_delete(store, "Factures", Some("Gmail")), Ok(None)));
+}
+
+/// What delete_mailbox takes for the mailbox named: never one standing for
+/// a role's name, nor one whose name merely starts the same.
+#[test]
+fn the_mailbox_to_delete_is_the_one_named() {
+    let env = setup_with("todelete", false, |cfg| {
+        gmail_and_laposte(cfg);
+        add_mailboxes(cfg, LAPOSTE, &["INBOX/Archive", "INBOX/Archives%202023", "INBOX/Projets", "INBOX/projets"]);
+    });
+    let pick = |spec: &str| {
+        crate::mailboxes::mailbox_to_delete(&env.ctx.store, spec, Some(LAPOSTE)).map(|m| m.map(|m| m.path.join("/")))
+    };
+    assert_eq!(pick("Archives"), Ok(None));
+    assert_eq!(pick("Archive"), Ok(Some("INBOX/Archive".into())));
+    assert_eq!(pick("INBOX/Archive"), Ok(Some("INBOX/Archive".into())));
+    assert_eq!(pick("archives 2023"), Ok(Some("INBOX/Archives 2023".into())));
+    // Exactly as written; two differing in case alone: the one written.
+    assert_eq!(pick("Projets"), Ok(Some("INBOX/Projets".into())));
+    assert_eq!(pick("projets"), Ok(Some("INBOX/projets".into())));
+    assert!(pick("PROJETS").is_err(), "{:?}", pick("PROJETS"));
+}
+
+/// Rows Mail's database keeps for mailboxes Mail deleted (their folder is
+/// gone from the Mac, no message is in them): not listed, not found by
+/// name, never a role's mailbox. An empty mailbox Mail has stays, and so
+/// does one that holds mail, and every mailbox of an account whose folders
+/// are not where Timbre looks.
+#[test]
+fn leftover_rows_of_deleted_mailboxes_are_left_out() {
+    let dir = tempdir::new("leftovers");
+    let cfg = fixture::build(&dir.0).unwrap();
+    gmail_and_laposte(&cfg);
+    // An old trash row Gmail renamed since, older than the live one.
+    let c = envelope_index(&cfg);
+    c.execute_batch(&format!(
+        "UPDATE mailboxes SET ROWID = 900 WHERE url = 'imap://{GMAIL}/%5BGmail%5D/Corbeille';
+         UPDATE messages SET mailbox = 900 WHERE ROWID = 102;
+         INSERT INTO mailboxes(ROWID, url) VALUES(800, 'imap://{GMAIL}/%5BGmail%5D/Trash');"
+    ))
+    .unwrap();
+    add_mailboxes(&cfg, GMAIL, &["Timbre%20essai", "Notes", "Vide"]);
+    c.execute(
+        &format!("INSERT INTO labels VALUES(101, (SELECT ROWID FROM mailboxes WHERE url = 'imap://{GMAIL}/Perso'))"),
+        [],
+    )
+    .unwrap();
+    fixture::mail_folders(&cfg).unwrap();
+    let v10 = cfg.mail_root.join("V10");
+    for gone in ["Timbre essai.mbox", "Notes.mbox", "[Gmail].mbox/Trash.mbox", "Perso.mbox"] {
+        std::fs::remove_dir_all(v10.join(GMAIL).join(gone)).unwrap();
+    }
+    // La Poste's folders are elsewhere: nothing is taken for a leftover there.
+    std::fs::remove_dir_all(v10.join(LAPOSTE)).unwrap();
+    let env = setup_from(dir, cfg, false);
+    let store = &env.ctx.store;
+    let named =
+        |p: &str| store.mailboxes().values().find(|m| m.account_id == GMAIL && m.display_path() == p).unwrap().id;
+    let leftovers = store.leftovers();
+    assert!(leftovers.contains(&named("Timbre essai")) && leftovers.contains(&named("Notes")));
+    assert!(leftovers.contains(&800));
+    assert!(!leftovers.contains(&named("Vide")), "empty, but Mail has it");
+    assert!(!leftovers.contains(&named("Perso")), "a label points to it");
+    assert!(!store.mailboxes().values().any(|m| m.account_id == LAPOSTE && leftovers.contains(&m.id)));
+    assert!(store.resolve_mailboxes("Timbre essai", None).is_empty());
+    assert_eq!(store.role_mailbox_for_account(GMAIL, GMAIL, Role::Trash).map(|m| m.id), Some(900));
+    let list = app::list_mailboxes(&env.ctx).unwrap();
+    let gmail: Vec<&str> = list
+        .accounts
+        .iter()
+        .filter(|a| a.account == GMAIL)
+        .flat_map(|a| a.mailboxes.iter().map(|m| m.name.as_str()))
+        .collect();
+    assert!(gmail.contains(&"Vide") && gmail.contains(&"Perso"), "{gmail:?}");
+    assert!(!gmail.contains(&"Timbre essai") && !gmail.contains(&"Notes"), "{gmail:?}");
+}
+
+/// A message whose file Mail writes after the walk found it missing is
+/// indexed at the next reconcile, without a restart.
+#[test]
+fn a_message_whose_file_comes_late_is_indexed() {
+    let env = setup("latefile", true);
+    let (cfg, store) = (env.ctx.cfg.clone(), env.ctx.store.clone());
+    let mut conn = index::open(&cfg, &store, true).unwrap();
+    let mut indexer = Indexer::new(cfg.clone(), store.clone(), env.ctx.progress.clone());
+    let mail = rusqlite::Connection::open(store.db_path.clone()).unwrap();
+    let mut m = fixture::messages().remove(1);
+    m.id = 1700;
+    m.raw =
+        "From: Bob <bob@example.com>\r\nSubject: Okapi\r\nMessage-ID: <o1700@example.com>\r\n\r\nokapi sighting\r\n"
+            .into();
+    fixture::write_message(&store.version_dir, &mail, &m).unwrap();
+    let file = walkdir::WalkDir::new(store.version_dir.join(fixture::ACCOUNT))
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name() == "1700.emlx")
+        .unwrap()
+        .into_path();
+    let bytes = std::fs::read(&file).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    indexer.full_build(&mut conn, false).unwrap();
+    assert!(ids(&search(&env, q("okapi"))).is_empty());
+    std::fs::write(&file, bytes).unwrap();
+    indexer.reconcile_now(&mut conn).unwrap();
+    assert_eq!(ids(&search(&env, q("okapi"))), vec![1700]);
+    let left: i64 = conn.query_row("SELECT count(*) FROM unlocated", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0);
+}
+
+/// Words with nothing to search for are said to be left out, and alone
+/// find nothing rather than every message. `-subject:` leaves out what has
+/// the word in its subject only.
+#[test]
+fn queries_say_what_they_cannot_search() {
+    let env = setup("edgequeries", true);
+    for nothing in ["€", "@", "🎉", "- €"] {
+        let r = search(&env, q(nothing));
+        assert_eq!(r.total, 0, "{nothing}");
+        assert!(r.notice.as_deref().is_some_and(|n| n.contains("no letter or digit")), "{nothing}: {:?}", r.notice);
+    }
+    let r = search(&env, q("project €"));
+    assert!(!ids(&r).is_empty() && r.notice.is_some());
+    let unthreaded = |text: &str| ids(&search(&env, SearchParams { group_threads: Some(false), ..q(text) }));
+    // "moved" is in 102's text, not its subject.
+    assert!(unthreaded("project -subject:moved").contains(&102));
+    assert!(!unthreaded("project -subject:meeting").contains(&102));
+}
+
+#[test]
+fn ids_given_twice_are_acted_on_once() {
+    assert_eq!(crate::actions::unique_for_tests(&[3, 1, 3, 2, 1]), vec![3, 1, 2]);
 }

@@ -113,6 +113,8 @@ pub struct Parsed {
     pub not_to: Vec<String>,
     /// Words of the subject, all of them.
     pub subject: Vec<String>,
+    /// Words the subject must not hold (`-subject:devis`).
+    pub not_subject: Vec<String>,
     pub mailbox: Option<String>,
     pub after: Option<String>,
     pub before: Option<String>,
@@ -235,7 +237,7 @@ pub fn parse_query(q: &str) -> Parsed {
             ("from", _) => p.from.push(value),
             ("to" | "cc" | "bcc", _) if neg => p.not_to.push(value),
             ("to" | "cc" | "bcc", _) => p.to.push(value),
-            ("subject", _) if neg => p.text.push(format!("-\"{value}\"")),
+            ("subject", _) if neg => p.not_subject.push(value),
             ("subject", _) => p.subject.push(value),
             ("in" | "label", _) if !neg => p.mailbox = Some(value),
             ("in" | "label", _) => p.not_mailbox.push(value),
@@ -672,6 +674,12 @@ pub fn search(
             f.push(format!("NOT {recipient}"), [Value::Text(like(v)), Value::Text(like(v))]);
         }
     }
+    for v in &parsed.not_subject {
+        f.push(
+            format!("NOT (timbre_fold({} || COALESCE(s.subject,'')) LIKE ? ESCAPE '\\')", s.subject_prefix),
+            [Value::Text(like(v))],
+        );
+    }
     for v in &subject {
         if v.contains(':') {
             // "Re: devis": the prefix Mail keeps apart counts too.
@@ -696,12 +704,14 @@ pub fn search(
         }
         named_mailbox = true;
         f.sql.push(store.in_mailboxes(&store.with_submailboxes(&ids)));
-    } else if let Some(acct) = req.account.as_deref().filter(|a| !a.trim().is_empty()) {
-        let a = crate::store::name_key(acct);
+    } else if let Some(acct) = req.account.as_deref().filter(|a| !crate::store::account_key(a).is_empty()) {
+        // As a mailbox's account is matched: the account so named first, or
+        // by its id.
+        let accounts = store.accounts_named(acct);
         let ids: Vec<String> = store
             .mailboxes()
             .values()
-            .filter(|m| crate::store::name_key(&m.account).contains(&a))
+            .filter(|m| accounts.iter().any(|(id, n)| crate::store::same_account(m, id, n)))
             .map(|m| m.id.to_string())
             .collect();
         if ids.is_empty() {
@@ -741,6 +751,43 @@ pub fn search(
 
     let use_fts = fts.is_some() && progress.ready();
     let mut notes: Vec<String> = vec![];
+    // Words with no letter or digit ("€", "@", "🎉"): the index holds none,
+    // so they are left out, and said so. A search of such words alone finds
+    // nothing rather than every message.
+    let unsearchable: Vec<&str> = parsed
+        .text
+        .iter()
+        .map(|t| t.trim_start_matches('-'))
+        .filter(|t| *t != "OR" && *t != "|" && !t.chars().any(char::is_alphanumeric))
+        .collect();
+    if !unsearchable.is_empty() {
+        notes.push(format!(
+            "Left out of the search, having no letter or digit to look for: {}.",
+            unsearchable.join(" ")
+        ));
+        let nothing_else = query.positive.is_none()
+            && query.negative.is_none()
+            && [&from, &to, &subject, &parsed.not_from, &parsed.not_to, &parsed.not_subject, &parsed.not_mailbox]
+                .iter()
+                .all(|v| v.is_empty())
+            && mailbox.is_none()
+            && req.account.as_deref().is_none_or(|a| a.trim().is_empty())
+            && after.is_none()
+            && before.is_none()
+            && (unread, flagged, has_attachments) == (None, None, None);
+        if nothing_else {
+            return Ok(SearchResult {
+                total: 0,
+                total_is_lower_bound: false,
+                next_offset: None,
+                engine: if progress.ready() { "fulltext" } else { "metadata" }.to_string(),
+                notice: Some(notes.join(" ")),
+                took_ms: started.elapsed().as_millis() as u64,
+                results: vec![],
+                timbre_update: None,
+            });
+        }
+    }
     if !parsed.unknown.is_empty() {
         notes.push(format!(
             "Unknown operator(s) {}: searched as words. Known: from: to: subject: in: label: is:unread is:flagged \
@@ -814,7 +861,7 @@ pub fn search(
     let fts_expr = fts.clone().unwrap_or_default();
     let fts_clause = if use_fts { "fts MATCH ? AND " } else { "" };
     // Subjects and senders are joined only when a filter needs them.
-    let needs_meta = subject.iter().any(|v| v.contains(':'));
+    let needs_meta = subject.iter().any(|v| v.contains(':')) || !parsed.not_subject.is_empty();
     let mut joins = if !use_fts || needs_meta { Store::META_JOINS } else { "" }.to_string();
     if has_attachments.is_some() {
         joins = format!("{joins} {}", Store::DOCS_JOIN);

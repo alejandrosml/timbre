@@ -194,6 +194,23 @@ pub fn write_message(v10: &Path, conn: &Connection, m: &Msg) -> Result<()> {
     Ok(())
 }
 
+/// A folder for each mailbox of the database, where Mail keeps one for
+/// every mailbox it has.
+pub fn mail_folders(cfg: &Config) -> Result<()> {
+    let v10 = cfg.mail_root.join("V10");
+    let conn = Connection::open(v10.join("MailData").join("Envelope Index"))?;
+    let mut stmt = conn.prepare("SELECT ROWID, url FROM mailboxes")?;
+    let rows: Vec<(i64, String)> =
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    for (id, url) in rows {
+        let m = crate::store::parse_mailbox_url(id, &url, &std::collections::HashMap::new());
+        if let Some(dir) = crate::store::mailbox_folder(&v10, &m) {
+            std::fs::create_dir_all(dir)?;
+        }
+    }
+    Ok(())
+}
+
 /// Build the store under `dir` and return a configuration pointing at it.
 pub fn build(dir: &Path) -> Result<Config> {
     let _ = std::fs::remove_dir_all(dir);
@@ -239,5 +256,6 @@ pub fn build(dir: &Path) -> Result<Config> {
     cfg.send_allowlist = vec![];
     cfg.excluded_roles = vec!["junk".into(), "trash".into()];
     cfg.index_enabled = true;
+    mail_folders(&cfg)?;
     Ok(cfg)
 }

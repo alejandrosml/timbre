@@ -38,6 +38,7 @@ function readInput() {
 }
 const Mail = Application('Mail');
 const _mb = {};
+const _exact = {};
 function account(loc) {
   if (loc.local) return null;
   if (loc.account_id) { try { const a = Mail.accounts.byId(loc.account_id); a.name(); return a; } catch (e) {} }
@@ -48,15 +49,20 @@ function account(loc) {
   }
   throw new Error('Mail account not found: ' + (loc.account || loc.account_id));
 }
+// The mailbox at this path in an account (or On My Mac): by its whole
+// path, then level by level.
+function mailboxAt(container, path) {
+  try { const mb = container.mailboxes.byName(path.join('/')); mb.name(); return mb; } catch (e) { if (fatal(e)) throw e; }
+  try { let cur = container; for (const p of path) { cur = cur.mailboxes.byName(p); } cur.name(); return cur; } catch (e) { if (fatal(e)) throw e; }
+  return null;
+}
+// Where a message is read from: the mailbox at its path, or failing that
+// the one mailbox with its last name (a message id settles the rest).
 function mailbox(loc) {
   const key = JSON.stringify(loc);
   if (_mb[key]) return _mb[key];
   const container = account(loc) || Mail;
-  const at = (path) => {
-    try { const mb = container.mailboxes.byName(path.join('/')); mb.name(); return mb; } catch (e) { if (fatal(e)) throw e; }
-    try { let cur = container; for (const p of path) { cur = cur.mailboxes.byName(p); } cur.name(); return cur; } catch (e) { if (fatal(e)) throw e; }
-    return null;
-  };
+  const at = (path) => mailboxAt(container, path);
   // The path as Mail's database writes it, then with accents composed and
   // decomposed (Mail's scripting may write them the other way), each also
   // from Mail's path prefix on where an account keeps every mailbox inside
@@ -84,6 +90,45 @@ function mailbox(loc) {
   if (!found) throw new Error('Mailbox not found in Mail: ' + (loc.account ? loc.account + ' / ' : '') + loc.path.join('/'));
   _mb[key] = found;
   return found;
+}
+// Where mail goes, and whether a mailbox is there: the mailbox at exactly
+// this path, or null. The path as Mail's database writes it (accents either
+// way), from Mail's path prefix on when the account keeps every mailbox
+// inside INBOX (`prefixed` true; false: never; unknown: both ways). Never
+// another mailbox that only shares its last name, nor one whose name
+// differs in case alone: a server may hold both "Clients" and "clients".
+function exactMailbox(loc, prefixed) {
+  const key = JSON.stringify([loc, prefixed]);
+  if (_exact[key]) return _exact[key];
+  const container = account(loc) || Mail;
+  const inInbox = (p) => p.length > 1 && String(p[0]).toUpperCase() === 'INBOX';
+  const paths = [];
+  const seen = {};
+  for (const form of ['', 'NFC', 'NFD']) {
+    const p = loc.path.map((s) => (form ? String(s).normalize(form) : String(s)));
+    const ways = prefixed === true ? [inInbox(p) ? p.slice(1) : p] : prefixed === false || !inInbox(p) ? [p] : [p, p.slice(1)];
+    for (const w of ways) { const k = w.join('/'); if (w.length && !seen[k]) { seen[k] = true; paths.push(w); } }
+  }
+  for (const p of paths) {
+    const mb = mailboxAt(container, p);
+    if (mb && sameName(mb, p)) { _exact[key] = mb; return mb; }
+  }
+  return null;
+}
+// Whether Mail's mailbox found at `path` is the one asked for: not one whose
+// name differs in case alone (INBOX aside, which IMAP names in any case).
+function sameName(mb, path) {
+  let name;
+  try { name = String(mb.name()).normalize('NFC'); } catch (e) { if (fatal(e)) throw e; return false; }
+  const wanted = [String(path[path.length - 1]).normalize('NFC'), path.join('/').normalize('NFC')];
+  if (wanted.indexOf(name) >= 0) return true;
+  if (name.toUpperCase() === 'INBOX' && wanted[0].toUpperCase() === 'INBOX') return true;
+  return !wanted.some((w) => w.toLowerCase() === name.toLowerCase());
+}
+function exactOrThrow(loc, prefixed) {
+  const mb = exactMailbox(loc, prefixed);
+  if (!mb) throw new Error('Mailbox not found in Mail: ' + (loc.account ? loc.account + ' / ' : '') + loc.path.join('/'));
+  return mb;
 }
 // A message by id in the mailbox the user sees it in; for Gmail, where
 // Mail stores it (All Mail) if not found there. Returns [message, alt used].
@@ -187,7 +232,7 @@ function main(i) {
       if (viaAlt && JSON.stringify(it.alt) === JSON.stringify(it.dest)) throw new Error('already there');
       let mid = null;
       try { mid = m.messageId(); } catch (e) { if (fatal(e)) throw e; }
-      Mail.move(m, {to: mailbox(it.dest)});
+      Mail.move(m, {to: exactOrThrow(it.dest, it.dest_prefixed)});
       out.push({id: it.id, ok: true, message_id: mid});
     } catch (e) { if (fatal(e)) return stop(out, e); out.push({id: it.id, ok: false, error: errorText(e)}); }
   }
@@ -195,15 +240,16 @@ function main(i) {
 }
 "#;
 
-/// Whether Mail has a mailbox, trying `tries` times half a second apart:
-/// Mail lists a mailbox made on the server a moment later, and one made
-/// elsewhere (on the provider's website) before its database has it.
+/// Whether Mail has a mailbox at exactly this path, trying `tries` times
+/// half a second apart: Mail lists a mailbox made on the server a moment
+/// later, and one made elsewhere (on the provider's website) before its
+/// database has it.
 pub const FIND_MAILBOX: &str = r#"
 function main(i) {
   const tries = i.tries || 40;
   for (let k = 0; k < tries; k++) {
-    if (k > 0) delay(0.5);
-    try { mailbox(i.loc); return {found: true}; } catch (e) { if (fatal(e)) throw e; }
+    if (k > 0) { delay(0.5); for (const key in _exact) delete _exact[key]; }
+    if (exactMailbox(i.loc, i.prefixed)) return {found: true};
   }
   throw new Error('Mail does not list the mailbox');
 }
@@ -218,9 +264,8 @@ function main(i) {
   let found = false;
   for (let k = 0; k < tries; k++) {
     if (k > 0) delay(0.5);
-    for (const key in _mb) delete _mb[key];
-    found = true;
-    try { mailbox(i.loc); } catch (e) { if (fatal(e)) throw e; found = false; }
+    for (const key in _exact) delete _exact[key];
+    found = exactMailbox(i.loc, i.prefixed) !== null;
     if (found === !!i.present) break;
   }
   return {found: found};
@@ -426,6 +471,7 @@ function main(i) {
   const out = [];
   for (const it of i.items) {
     try {
+      if (!it.message_id) throw new Error('no Message-ID to find it by');
       const src = mailbox(it.now_in);
       let hits = src.messages.whose({messageId: it.message_id})();
       if (hits.length === 0) hits = src.messages.whose({messageId: '<' + it.message_id + '>'})();
@@ -433,7 +479,7 @@ function main(i) {
       // Copies with the same Message-ID: the one moved last has the highest id.
       let pick = hits[0];
       for (const h of hits) { try { if (h.id() > pick.id()) pick = h; } catch (e) {} }
-      Mail.move(pick, {to: mailbox(it.back_to)});
+      Mail.move(pick, {to: exactOrThrow(it.back_to, it.back_prefixed)});
       out.push({message_id: it.message_id, ok: true});
     } catch (e) { if (fatal(e)) return stop(out, e); out.push({message_id: it.message_id, ok: false, error: errorText(e)}); }
   }
@@ -472,6 +518,12 @@ function main(i) {
 
 /// How the errors begin when Mail may have acted without saying so.
 const NO_ANSWER: &str = "Mail did not answer";
+
+/// Whether Mail failed to answer in time (busy, or slow to reach a server):
+/// what was asked may still be under way, unlike a refusal.
+pub fn no_answer(e: &anyhow::Error) -> bool {
+    e.to_string().starts_with(NO_ANSWER)
+}
 
 const NOT_ALLOWED: &str = "macOS has not allowed Timbre to act in Mail (Automation). Call open_permission_settings \
 with pane \"automation\" and ask the user to switch on Mail under Timbre, then try again.";
@@ -712,6 +764,15 @@ function list(kids) {
   return f;
 }
 function box(label, tag, kids) { return {label, tag, name: () => label, mailboxes: list(kids || [])}; }
+// Mail's scripting may find a name in any case.
+function anyCase(label, tag, kids) {
+  const b = box(label, tag, kids);
+  const f = () => kids;
+  f.byName = (n) => kids.find((k) => k.label.toLowerCase() === n.toLowerCase()) || {name() { throw new Error('no ' + n); }, mailboxes: list([])};
+  f.whose = (q) => () => kids.filter((k) => k.label === q.name);
+  b.mailboxes = f;
+  return b;
+}
 const ACCOUNTS = {
   // La Poste as Mail names it: from the prefix INBOX on, folders inside folders.
   LP: box('Laposte', 'lp', [box('INBOX', 'lp-inbox'), box('OUTBOX', 'lp-sent'), box('Important', 'lp-important'),
@@ -721,6 +782,10 @@ const ACCOUNTS = {
   GM: box('Bob', 'gm', [box('INBOX', 'gm-inbox'), box('[Gmail]', 'gm-gmail', [box('Messages envoyés', 'gm-sent')])]),
   // iCloud: a folder inside the inbox, and another of the same name at the top.
   IC: box('iCloud', 'ic', [box('INBOX', 'ic-inbox', [box('Clients', 'ic-inbox-clients')]), box('Clients', 'ic-clients')]),
+  // iCloud with "Clients" at the top only.
+  IT: box('iCloud 2', 'it', [box('INBOX', 'it-inbox'), box('Clients', 'it-clients')]),
+  // A server holding "Clients", found by Mail in any case.
+  CI: anyCase('Fastmail', 'ci', [box('INBOX', 'ci-inbox'), box('Clients', 'ci-clients')]),
 };
 const accounts = () => Object.values(ACCOUNTS);
 accounts.byId = (id) => ACCOUNTS[id] || {name() { throw new Error('no account ' + id); }};
@@ -769,6 +834,62 @@ console.log(JSON.stringify(cases.map(([id, path]) => {
                 // Only a name no other mailbox has, as before.
                 "lp-important",
                 "error: Mailbox not found in Mail: INBOX/Nulle part",
+            ]
+        );
+    }
+
+    /// Where mail goes, and whether a mailbox exists, is found at exactly
+    /// its path: never a mailbox elsewhere with the same last name, nor one
+    /// whose name differs in case, nor one at the top for one inside INBOX
+    /// in an account that keeps its mailboxes at the top.
+    #[test]
+    fn mailboxes_mail_goes_to_are_found_exactly() {
+        let cases = r#"
+const cases = [
+  ['LP', ['INBOX', 'Archives', '2009'], true],
+  ['LP', ['INBOX', 'Archives', 'Passé'.normalize('NFD')], true],
+  ['LP', ['INBOX'], true],
+  ['LP', ['INBOX', 'Ailleurs', 'Important'], true],
+  ['LP', ['INBOX', 'Nouveau', 'Archives'], true],
+  ['LP', ['INBOX', 'Archives', '2009'], null],
+  ['LF', ['INBOX', 'Archives', '2009'], true],
+  ['GM', ['[Gmail]', 'Messages envoyés'], false],
+  ['IC', ['INBOX', 'Clients'], false],
+  ['IC', ['Clients'], false],
+  ['IT', ['INBOX', 'Clients'], false],
+  ['IT', ['INBOX', 'Clients'], null],
+  ['CI', ['Clients'], false],
+  ['CI', ['clients'], false],
+  ['CI', ['inbox'], false],
+];
+console.log(JSON.stringify(cases.map(([id, path, prefixed]) => {
+  const mb = exactMailbox({account_id: id, account: '', path, local: false}, prefixed === null ? undefined : prefixed);
+  return mb ? mb.tag : null;
+})));
+"#;
+        let Some(out) = node("exact", &[], &format!("{FAKE_MAIL}\n{PRELUDE}\n{cases}")) else { return };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let found: Vec<Option<String>> = serde_json::from_slice(&out.stdout).unwrap();
+        let tag = |t: &str| Some(t.to_string());
+        assert_eq!(
+            found,
+            [
+                tag("lp-2009"),
+                tag("lp-passe"),
+                tag("lp-inbox"),
+                None,
+                None,
+                tag("lp-2009"),
+                tag("lf-2009"),
+                tag("gm-sent"),
+                tag("ic-inbox-clients"),
+                tag("ic-clients"),
+                None,
+                // Unknown layout: from the prefix on too, as for La Poste.
+                tag("it-clients"),
+                tag("ci-clients"),
+                None,
+                tag("ci-inbox"),
             ]
         );
     }

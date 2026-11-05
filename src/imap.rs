@@ -14,6 +14,8 @@ use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// The same, for each of several addresses of a server.
+const CONNECT_EACH: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest answer accepted from a server: a list of mailboxes is a few
 /// kilobytes, so anything near this is not a mail server answering.
@@ -56,6 +58,10 @@ impl Server {
 pub enum Error {
     /// The server turned the user name or the password down.
     Auth(String),
+    /// The server would not sign in, with a message for the user
+    /// (`[ALERT]`): Gmail asking for an app password, an account to unlock
+    /// on the provider's website. The password may be right.
+    Alert(String),
     /// The server could not be reached, or the connection failed: name not
     /// found, timeout, certificate not trusted.
     Network(String),
@@ -69,10 +75,38 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Auth(t) => write!(f, "the server did not accept the password ({t})"),
+            Error::Alert(t) => write!(f, "the server says: {}", alert_text(t)),
             Error::Network(t) => write!(f, "{t}"),
             Error::Refused(t) => write!(f, "the server refused: {t}"),
             Error::Protocol(t) => write!(f, "the server's answer was not understood ({t})"),
         }
+    }
+}
+
+/// The server's message without its response code.
+pub(crate) fn alert_text(t: &str) -> &str {
+    let t = t.trim();
+    match t.strip_prefix('[').and_then(|r| r.split_once(']')) {
+        Some((_, rest)) if !rest.trim().is_empty() => rest.trim(),
+        _ => t,
+    }
+}
+
+/// What a refused sign-in means, from the server's answer: the password
+/// turned down (`[AUTHENTICATIONFAILED]`, or a NO that says no more), a
+/// message for the user (`[ALERT]`), or the server unable or unwilling to
+/// sign anyone in now (`[UNAVAILABLE]`, `[EXPIRED]`, `[CONTACTADMIN]`, a
+/// BAD…), when the password may well be right.
+fn sign_in_refused(status: Status, text: String) -> Error {
+    let t = text.trim_start();
+    let code = t
+        .strip_prefix('[')
+        .and_then(|r| r.split(|c: char| c == ']' || c.is_whitespace()).next())
+        .map(str::to_ascii_uppercase);
+    match (status, code.as_deref()) {
+        (Status::No, None | Some("AUTHENTICATIONFAILED" | "AUTHORIZATIONFAILED")) => Error::Auth(text),
+        (Status::No, Some("ALERT")) => Error::Alert(text),
+        _ => Error::Refused(text),
     }
 }
 
@@ -301,12 +335,6 @@ pub fn open(server: &Server, password: &str) -> Result<Session, Error> {
     Ok(s)
 }
 
-/// Whether the server accepts this password.
-pub fn check(server: &Server, password: &str) -> Result<(), Error> {
-    open(server, password)?.logout();
-    Ok(())
-}
-
 pub fn connect(server: &Server) -> Result<Session, Error> {
     let tcp = tcp(&server.host, server.port)?;
     match server.security {
@@ -316,11 +344,17 @@ pub fn connect(server: &Server) -> Result<Session, Error> {
 }
 
 fn tcp(host: &str, port: u16) -> Result<TcpStream, Error> {
-    let addrs =
-        (host, port).to_socket_addrs().map_err(|e| Error::Network(format!("{host} could not be found ({e})")))?;
+    let addrs: Vec<std::net::SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| Error::Network(format!("{host} could not be found ({e})")))?
+        .take(4)
+        .collect();
+    // Several addresses (IPv6 and IPv4): less time for each, so a network
+    // where one kind does not go through costs seconds, not minutes.
+    let each = if addrs.len() > 1 { CONNECT_EACH } else { CONNECT_TIMEOUT };
     let mut last = None;
     for a in addrs {
-        match TcpStream::connect_timeout(&a, CONNECT_TIMEOUT) {
+        match TcpStream::connect_timeout(&a, each) {
             Ok(s) => {
                 s.set_read_timeout(Some(IO_TIMEOUT)).map_err(net)?;
                 s.set_write_timeout(Some(IO_TIMEOUT)).map_err(net)?;
@@ -452,8 +486,8 @@ impl Session {
         let mut total = 0usize;
         loop {
             let mut line = vec![];
-            let limit = (MAX_ANSWER - total + 2) as u64;
-            let n = (&mut self.io).take(limit).read_until(b'\n', &mut line).map_err(net)?;
+            let room = MAX_ANSWER.checked_sub(total).ok_or_else(|| Error::Protocol("answer too long".into()))?;
+            let n = (&mut self.io).take(room as u64 + 2).read_until(b'\n', &mut line).map_err(net)?;
             if n == 0 {
                 return Err(Error::Network("the server closed the connection".into()));
             }
@@ -464,6 +498,9 @@ impl Session {
                 line.pop();
             }
             total += line.len();
+            if total > MAX_ANSWER {
+                return Err(Error::Protocol("answer too long".into()));
+            }
             if let Some((at, len)) = literal_at_end(&line) {
                 if len > MAX_ANSWER - total {
                     return Err(Error::Protocol("answer too long".into()));
@@ -597,7 +634,7 @@ impl Session {
                 }
             }
         } else if self.has("LOGINDISABLED") {
-            return Err(Error::Auth("the server accepts no password here".into()));
+            return Err(Error::Refused("the server takes no password over this connection".into()));
         } else {
             self.command(&[Arg::Atom("LOGIN"), Arg::Str(user.as_bytes()), Arg::Str(password.as_bytes())])?.1
         };
@@ -607,11 +644,7 @@ impl Session {
                 self.capability()?;
                 Ok(())
             }
-            // The server is the one in trouble: the password may well be right.
-            _ if ["[UNAVAILABLE]", "[SERVERBUG]", "[INUSE]", "[LIMIT]"].iter().any(|c| done.text.contains(c)) => {
-                Err(Error::Refused(done.text))
-            }
-            _ => Err(Error::Auth(done.text)),
+            status => Err(sign_in_refused(status, done.text)),
         }
     }
 
@@ -633,13 +666,14 @@ impl Session {
         Ok(answers.iter().find_map(|r| parse_namespace(&tokenize(r))))
     }
 
-    /// How many messages a mailbox holds, by the server's count.
+    /// How many messages a mailbox holds, by the server's count: from the
+    /// answer about that very mailbox (a server may tell of others too).
     pub fn messages(&mut self, raw: &[u8]) -> Result<u64, Error> {
         let (answers, done) = self.command(&[Arg::Atom("STATUS"), Arg::Str(raw), Arg::Atom("(MESSAGES)")])?;
         done.ok()?;
         answers
             .iter()
-            .find_map(|r| parse_status(&tokenize(r)))
+            .find_map(|r| parse_status(&tokenize(r), raw))
             .ok_or_else(|| Error::Protocol("no message count in the server's answer".into()))
     }
 
@@ -693,9 +727,14 @@ fn parse_list(toks: &[Tok]) -> Option<Entry> {
     Some(Entry { name: decode_name(&raw), raw, delimiter, attrs })
 }
 
-/// `* STATUS "Archives" (MESSAGES 0)`
-fn parse_status(toks: &[Tok]) -> Option<u64> {
+/// `* STATUS "Archives" (MESSAGES 0)`, about the mailbox `raw` (INBOX in
+/// any case).
+fn parse_status(toks: &[Tok], raw: &[u8]) -> Option<u64> {
     if !(toks.first()?.is("*") && toks.get(1)?.is("STATUS")) {
+        return None;
+    }
+    let name = toks.get(2)?.bytes()?;
+    if !(name == raw || (name.eq_ignore_ascii_case(b"INBOX") && raw.eq_ignore_ascii_case(b"INBOX"))) {
         return None;
     }
     let pos = toks.iter().position(|t| t.is("MESSAGES"))?;
@@ -957,9 +996,13 @@ mod tests {
         assert_eq!(parse_list(&tokenize(&parts)).unwrap().name, "Odd \"name\"");
         assert_eq!(parse_list(&tokenize(&[Part::Text(b"* LSUB () \"/\" x".to_vec())])), None);
 
-        let status = |s: &str| parse_status(&tokenize(&[Part::Text(s.as_bytes().to_vec())]));
-        assert_eq!(status(r#"* STATUS "INBOX/Archives" (MESSAGES 0)"#), Some(0));
-        assert_eq!(status(r#"* STATUS blurdybloop (MESSAGES 231 UIDNEXT 44292)"#), Some(231));
+        let status = |s: &str, of: &str| parse_status(&tokenize(&[Part::Text(s.as_bytes().to_vec())]), of.as_bytes());
+        assert_eq!(status(r#"* STATUS "INBOX/Archives" (MESSAGES 0)"#, "INBOX/Archives"), Some(0));
+        assert_eq!(status(r#"* STATUS blurdybloop (MESSAGES 231 UIDNEXT 44292)"#, "blurdybloop"), Some(231));
+        assert_eq!(status(r#"* STATUS inbox (MESSAGES 3)"#, "INBOX"), Some(3));
+        // About another mailbox: not this one's count.
+        assert_eq!(status(r#"* STATUS "Other" (MESSAGES 0)"#, "Target"), None);
+        assert_eq!(status(r#"* STATUS "target" (MESSAGES 0)"#, "Target"), None);
         let ns = |s: &str| parse_namespace(&tokenize(&[Part::Text(s.as_bytes().to_vec())]));
         assert_eq!(ns(r#"* NAMESPACE (("INBOX." ".")) NIL NIL"#), Some(("INBOX.".into(), Some('.'))));
         assert_eq!(ns(r##"* NAMESPACE (("" "/")) NIL (("#shared/" "/"))"##), Some((String::new(), Some('/'))));
@@ -1018,11 +1061,41 @@ mod tests {
 
     #[test]
     fn a_wrong_password_is_told_apart_from_a_server_in_trouble() {
-        let (mut s, _server) =
-            fake(vec![("AUTHENTICATE PLAIN", "+\r\n"), ("", "$T NO [AUTHENTICATIONFAILED] Invalid credentials\r\n")]);
-        assert!(matches!(s.login("u", "p"), Err(Error::Auth(t)) if t.contains("Invalid")));
-        let (mut s, _server) = fake(vec![("AUTHENTICATE PLAIN", "+\r\n"), ("", "$T NO [UNAVAILABLE] try later\r\n")]);
-        assert!(matches!(s.login("u", "p"), Err(Error::Refused(_))));
+        let login = |answer: &'static str| {
+            let (mut s, _server) = fake(vec![("AUTHENTICATE PLAIN", "+\r\n"), ("", answer)]);
+            s.login("u", "p").unwrap_err()
+        };
+        assert!(
+            matches!(login("$T NO [AUTHENTICATIONFAILED] Invalid credentials\r\n"), Error::Auth(t) if t.contains("Invalid"))
+        );
+        assert!(matches!(login("$T NO Login failed.\r\n"), Error::Auth(_)));
+        // A message for the user: the password may be right; it is told.
+        let alert =
+            login("$T NO [ALERT] Application-specific password required: https://support.google.com/x (Failure)\r\n");
+        assert!(matches!(alert, Error::Alert(_)), "{alert:?}");
+        assert!(alert.to_string().starts_with("the server says: Application-specific password required"), "{alert}");
+        // The server unable or unwilling now: never taken for a wrong password.
+        for answer in [
+            "$T NO [UNAVAILABLE] try later\r\n",
+            "$T NO [CONTACTADMIN] account locked\r\n",
+            "$T NO [EXPIRED] password expired\r\n",
+            "$T NO [PRIVACYREQUIRED] use TLS\r\n",
+            "$T BAD invalid SASL response\r\n",
+        ] {
+            assert!(matches!(login(answer), Error::Refused(_)), "{answer}");
+        }
+    }
+
+    /// An answer past the size limit ending with a bare line feed and a
+    /// literal: refused, never a wrapped-around limit.
+    #[test]
+    fn an_endless_answer_is_refused() {
+        let mut huge = vec![b'x'; MAX_ANSWER + 1];
+        huge.extend_from_slice(b"{5}\n");
+        let answer: &'static str = Box::leak(String::from_utf8(huge).unwrap().into_boxed_str());
+        let (mut s, _server) = fake(vec![("NOOP", answer)]);
+        let e = s.command(&[Arg::Atom("NOOP")]).unwrap_err();
+        assert!(matches!(e, Error::Protocol(_)), "{e:?}");
     }
 
     #[test]

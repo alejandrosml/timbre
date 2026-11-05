@@ -5,8 +5,9 @@
 //! two calls: `prepare_send` shows exactly what will go out, `confirm_send`
 //! sends that and only that.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
+use std::sync::Arc;
 use std::time::Duration;
 
 use schemars::JsonSchema;
@@ -46,17 +47,38 @@ fn undo_path(cfg: &Config) -> std::path::PathBuf {
 }
 
 pub fn load_undo(cfg: &Config) -> Vec<UndoEntry> {
-    std::fs::read(undo_path(cfg)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    read_undo(cfg).unwrap_or_default()
+}
+
+/// The journal on disk; None when there is none, or it cannot be read.
+fn read_undo(cfg: &Config) -> Option<Vec<UndoEntry>> {
+    std::fs::read(undo_path(cfg)).ok().and_then(|b| serde_json::from_slice(&b).ok())
 }
 
 fn save_undo(cfg: &Config, entries: &[UndoEntry]) {
     let _ = std::fs::create_dir_all(&cfg.data_dir);
     if let Ok(b) = serde_json::to_vec_pretty(entries) {
-        let tmp = undo_path(cfg).with_extension("json.tmp");
+        // A file of this process's own: two Timbres never write the same one.
+        let tmp = cfg.data_dir.join(format!("undo.json.{}.tmp", std::process::id()));
         if std::fs::write(&tmp, b).is_ok() {
             let _ = std::fs::rename(tmp, undo_path(cfg));
         }
     }
+}
+
+/// Another Timbre (a second Claude window) may keep the journal too: it is
+/// read again under a lock both take, so neither loses the other's moves.
+/// The lock goes with the file handle.
+fn lock_journal(cfg: &Config) -> Option<std::fs::File> {
+    let _ = std::fs::create_dir_all(&cfg.data_dir);
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(cfg.data_dir.join("undo.lock"))
+        .ok()?;
+    f.lock().ok()?;
+    Some(f)
 }
 
 pub struct PendingSend {
@@ -128,9 +150,27 @@ fn timeout_for(n: usize) -> Duration {
     Duration::from_secs((15 + 2 * n as u64).min(180))
 }
 
+/// Database and file work, off the async threads: a long search holding
+/// the reader must not stall the server's few threads.
+async fn blocking<T: Send + 'static>(ctx: &Arc<Ctx>, f: impl FnOnce(&Ctx) -> T + Send + 'static) -> Result<T, String> {
+    let ctx = ctx.clone();
+    tokio::task::spawn_blocking(move || f(&ctx)).await.map_err(|e| format!("internal error: {e}"))
+}
+
+/// Each id once, in the order given: an id given twice is acted on once.
+fn unique(ids: &[i64]) -> Vec<i64> {
+    let mut seen = HashSet::new();
+    ids.iter().copied().filter(|id| seen.insert(*id)).collect()
+}
+
+#[cfg(test)]
+pub fn unique_for_tests(ids: &[i64]) -> Vec<i64> {
+    unique(ids)
+}
+
 // ---------------------------------------------------------------- drafts
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DraftParams {
     /// "new", "reply", "reply_all" or "forward".
     pub mode: String,
@@ -245,7 +285,15 @@ fn reply_body(ctx: &Ctx, id: i64, body: &str) -> String {
     out
 }
 
-async fn compose(ctx: &Ctx, p: &DraftParams) -> Result<serde_json::Value, String> {
+async fn compose(ctx: &Arc<Ctx>, p: &DraftParams) -> Result<serde_json::Value, String> {
+    let p = p.clone();
+    let (script, input) = blocking(ctx, move |ctx| draft_input(ctx, &p)).await??;
+    mailapp::run(script, &input, Duration::from_secs(40)).await.map_err(|e| e.to_string())
+}
+
+/// The script and its input for a draft: the message replied to or
+/// forwarded is read here, off the async threads.
+fn draft_input(ctx: &Ctx, p: &DraftParams) -> Result<(&'static str, serde_json::Value), String> {
     let to = valid_addresses(&p.to)?;
     let cc = valid_addresses(&p.cc)?;
     let bcc = valid_addresses(&p.bcc)?;
@@ -290,7 +338,7 @@ async fn compose(ctx: &Ctx, p: &DraftParams) -> Result<serde_json::Value, String
         }
         other => return Err(format!("Unknown mode '{other}': use new, reply, reply_all or forward.")),
     };
-    mailapp::run(script, &input, Duration::from_secs(40)).await.map_err(|e| e.to_string())
+    Ok((script, input))
 }
 
 fn strings(v: &serde_json::Value, key: &str) -> Vec<String> {
@@ -300,7 +348,7 @@ fn strings(v: &serde_json::Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub async fn create_draft(ctx: &Ctx, p: &DraftParams) -> Result<DraftResult, String> {
+pub async fn create_draft(ctx: &Arc<Ctx>, p: &DraftParams) -> Result<DraftResult, String> {
     let r = compose(ctx, p).await?;
     let mut note = "The draft is open in Mail for the user to review. Nothing was sent.".to_string();
     let text_left_out = p.mode.trim().eq_ignore_ascii_case("forward")
@@ -377,8 +425,9 @@ const CHUNK: usize = 25;
 const MAKE_TIMEOUT: Duration = Duration::from_secs(90);
 const FIND_TIMEOUT: Duration = Duration::from_secs(40);
 
-pub async fn mark(ctx: &Ctx, p: &MarkParams) -> Result<BatchResult, String> {
-    if p.ids.is_empty() || p.ids.len() > 500 {
+pub async fn mark(ctx: &Arc<Ctx>, p: &MarkParams) -> Result<BatchResult, String> {
+    let ids = unique(&p.ids);
+    if ids.is_empty() || ids.len() > 500 {
         return Err("Give between 1 and 500 ids.".into());
     }
     let action = p.action.trim().to_lowercase();
@@ -389,14 +438,17 @@ pub async fn mark(ctx: &Ctx, p: &MarkParams) -> Result<BatchResult, String> {
         Some(c) => Some(color_index(c).ok_or_else(|| format!("unknown colour '{c}'"))?),
         None => None,
     };
-    let mut items = vec![];
-    let mut failed = vec![];
-    for id in &p.ids {
-        match source_of(ctx, *id) {
-            Ok(src) => items.push((*id, src.json(*id))),
-            Err(e) => failed.push(Failure::of(*id, e)),
+    let (items, mut failed) = blocking(ctx, move |ctx| {
+        let (mut items, mut failed) = (vec![], vec![]);
+        for id in ids {
+            match source_of(ctx, id) {
+                Ok(src) => items.push((id, src.json(id))),
+                Err(e) => failed.push(Failure::of(id, e)),
+            }
         }
-    }
+        (items, failed)
+    })
+    .await?;
     let mut done = 0;
     let mut stopped: Option<String> = None;
     let mut chunks = items.chunks(CHUNK);
@@ -534,8 +586,9 @@ const GMAIL_ELSEWHERE: &str = "Gmail may keep its own copy of messages moved to 
 const GMAIL_ALL_MAIL: &str = "Gmail keeps every message in All Mail, so Timbre cannot tell whether this one is \
 still where it was moved: it is left where it is.";
 
-fn thrown(role: Role) -> bool {
-    matches!(role, Role::Trash | Role::Junk)
+/// Gmail's own trash or spam, never a label of the user's named so.
+fn thrown(m: &Mailbox) -> bool {
+    crate::store::gmail_bin(m)
 }
 
 /// Whether Mail can make this move of a Gmail message, from the mailbox it
@@ -548,7 +601,7 @@ pub(crate) fn gmail_move(store: &Store, from: &Mailbox, to: &Mailbox) -> Result<
     if !crate::store::same_account(to, &from.account_id, &from.account) {
         return Ok(Some(GMAIL_ELSEWHERE));
     }
-    match (thrown(from.role), thrown(to.role), to.role) {
+    match (thrown(from), thrown(to), to.role) {
         (false, true, _) => Ok(Some(GMAIL_TRASHED)),
         (true, false, Role::Inbox) => Ok(Some(GMAIL_RESCUED)),
         (true, ..) => Err(GMAIL_DELETES.into()),
@@ -567,12 +620,17 @@ pub(crate) fn gmail_undo(store: &Store, now_in: &Loc, back_to: &Loc) -> Result<(
     if !same {
         return Ok((back_to.clone(), Some(GMAIL_ELSEWHERE)));
     }
-    let role = |l: &Loc| {
-        store.mailbox_at(&l.account_id, &l.account, &l.path).map_or_else(|| Role::detect_scored(&l.path).0, |m| m.role)
+    // The role of each place, and whether it is Gmail's own trash or spam.
+    let place = |l: &Loc| {
+        let (role, strength) = store
+            .mailbox_at(&l.account_id, &l.account, &l.path)
+            .map_or_else(|| Role::detect_scored(&l.path), |m| (m.role, m.role_strength));
+        let system = l.path.first().is_some_and(|p| p.trim_start().starts_with('['));
+        (role, strength == 2 && system && matches!(role, Role::Junk | Role::Trash))
     };
-    let (from, to) = (role(now_in), role(back_to));
-    if thrown(from) {
-        if thrown(to) {
+    let ((from, from_bin), (_, to_bin)) = (place(now_in), place(back_to));
+    if from_bin {
+        if to_bin {
             return Err(GMAIL_DELETES.into());
         }
         let inbox = store
@@ -583,60 +641,84 @@ pub(crate) fn gmail_undo(store: &Store, now_in: &Loc, back_to: &Loc) -> Result<(
     if from == Role::Archive {
         return Err(GMAIL_ALL_MAIL.into());
     }
-    if thrown(to) {
+    if to_bin {
         return Ok((back_to.clone(), None));
     }
     Err(GMAIL_STAYS.into())
 }
 
-pub async fn move_mail(ctx: &Ctx, p: &MoveParams) -> Result<BatchResult, String> {
-    if p.ids.is_empty() || p.ids.len() > 200 {
-        return Err("Give between 1 and 200 ids.".into());
-    }
-    let mut items = vec![];
-    let mut failed = vec![];
-    let mut notes: Vec<&str> = vec![];
-    let mut make: Vec<(Loc, String)> = vec![];
-    for id in &p.ids {
-        let r = source_of(ctx, *id)
-            .and_then(|src| destination(ctx, &src.shown, &p.to, p.account.as_deref()).map(|d| (src, d)));
+/// The moves to ask Mail for, worked out from Timbre's copy of Mail's
+/// database, the moves refused and why, notes to pass on, and archives to
+/// make first (with where Mail shows them).
+struct Plan {
+    items: Vec<Planned>,
+    failed: Vec<Failure>,
+    notes: Vec<&'static str>,
+    make: Vec<(Loc, String, Option<bool>)>,
+}
+
+fn plan_moves(ctx: &Ctx, ids: &[i64], to: &str, account: Option<&str>) -> Plan {
+    let mut plan = Plan { items: vec![], failed: vec![], notes: vec![], make: vec![] };
+    for &id in ids {
+        let r = source_of(ctx, id).and_then(|src| destination(ctx, &src.shown, to, account).map(|d| (src, d)));
         match r {
-            Ok((src, dest)) if dest.mailbox.id == src.shown.id => failed.push(Failure::of(*id, "already there")),
+            Ok((src, dest)) if dest.mailbox.id == src.shown.id => plan.failed.push(Failure::of(id, "already there")),
             Ok((src, dest)) => match gmail_move(&ctx.store, &src.shown, &dest.mailbox) {
-                Err(why) => failed.push(Failure::of(*id, why)),
+                Err(why) => plan.failed.push(Failure::of(id, why)),
                 Ok(note) => {
                     if let Some(n) = note
-                        && !notes.contains(&n)
+                        && !plan.notes.contains(&n)
                     {
-                        notes.push(n);
+                        plan.notes.push(n);
                     }
                     let to = Loc::from(&dest.mailbox);
-                    if dest.create && !make.iter().any(|(l, _)| *l == to) {
-                        make.push((to.clone(), dest.mailbox.name.clone()));
+                    let prefixed = crate::mailboxes::prefixed(&ctx.store, &to);
+                    if dest.create && !plan.make.iter().any(|(l, ..)| *l == to) {
+                        plan.make.push((to.clone(), dest.mailbox.name.clone(), prefixed));
                     }
-                    let mut v = src.json(*id);
+                    let mut v = src.json(id);
                     v["dest"] = json!(to);
-                    items.push((*id, v, Loc::from(&src.shown), to));
+                    v["dest_prefixed"] = json!(prefixed);
+                    plan.items.push((id, v, Loc::from(&src.shown), to));
                 }
             },
-            Err(e) => failed.push(Failure::of(*id, e)),
+            Err(e) => plan.failed.push(Failure::of(id, e)),
         }
     }
+    plan
+}
+
+pub async fn move_mail(ctx: &Arc<Ctx>, p: &MoveParams) -> Result<BatchResult, String> {
+    let ids = unique(&p.ids);
+    if ids.is_empty() || ids.len() > 200 {
+        return Err("Give between 1 and 200 ids.".into());
+    }
+    let (to_spec, account) = (p.to.clone(), p.account.clone());
+    let Plan { mut items, mut failed, mut notes, make } =
+        blocking(ctx, move |ctx| plan_moves(ctx, &ids, &to_spec, account.as_deref())).await?;
     // An archive to make first, in its own call: Mail asks the server, which
     // can take a while, and nothing is moved unless it is there.
-    for (loc, name) in make {
+    for (loc, name, prefixed) in make {
+        let find = |tries: u32| json!({"loc": loc, "prefixed": prefixed, "tries": tries});
         // Mail may have it already (made on the provider's website) before
         // its database, which Timbre reads, does.
-        let has = mailapp::run(mailapp::FIND_MAILBOX, &json!({"loc": loc, "tries": 1}), FIND_TIMEOUT).await.is_ok();
+        let has = mailapp::run(mailapp::FIND_MAILBOX, &find(1), FIND_TIMEOUT).await.is_ok();
         let made = if has {
             Ok(())
         } else {
             match mailapp::make_mailbox(&loc.account_id, &name, MAKE_TIMEOUT).await {
-                Ok(()) => mailapp::run(mailapp::FIND_MAILBOX, &json!({"loc": loc}), FIND_TIMEOUT).await.map(|_| ()),
+                Ok(()) => mailapp::run(mailapp::FIND_MAILBOX, &find(40), FIND_TIMEOUT).await.map(|_| ()),
                 // Mail refuses some accounts (La Poste): made on the server
                 // instead, when Timbre has the password already.
-                Err(e) => match crate::mailboxes::make_if_password_known(ctx, &loc, &name).await {
-                    Ok(()) => mailapp::run(mailapp::FIND_MAILBOX, &json!({"loc": loc}), FIND_TIMEOUT).await.map(|_| ()),
+                Err(e) if !mailapp::no_answer(&e) => {
+                    match crate::mailboxes::make_if_password_known(ctx, &loc, &name).await {
+                        Ok(()) => mailapp::run(mailapp::FIND_MAILBOX, &find(40), FIND_TIMEOUT).await.map(|_| ()),
+                        Err(_) => Err(e),
+                    }
+                }
+                // Mail did not answer in time: it may still be making it.
+                Err(e) => match mailapp::run(mailapp::FIND_MAILBOX, &find(20), FIND_TIMEOUT).await {
+                    Ok(_) => Ok(()),
                     Err(_) => Err(e),
                 },
             }
@@ -665,7 +747,10 @@ pub async fn move_mail(ctx: &Ctx, p: &MoveParams) -> Result<BatchResult, String>
     }
     // The Message-IDs Timbre read, so each batch is journaled before Mail is
     // asked: if Mail stops half-way, what it moved can still be undone.
-    let known = message_ids(ctx, &items.iter().map(|(id, ..)| *id).collect::<Vec<_>>());
+    let known = {
+        let ids: Vec<i64> = items.iter().map(|(id, ..)| *id).collect();
+        blocking(ctx, move |ctx| message_ids(ctx, &ids)).await?
+    };
     let token = token();
     journal_edit(ctx, |journal| {
         journal.push(UndoEntry {
@@ -678,7 +763,7 @@ pub async fn move_mail(ctx: &Ctx, p: &MoveParams) -> Result<BatchResult, String>
         let excess = journal.len().saturating_sub(50);
         journal.drain(..excess);
     });
-    let mut done = 0;
+    let (mut done, mut unjournaled) = (0, 0);
     let mut stopped: Option<String> = None;
     let mut chunks = items.chunks(CHUNK);
     for chunk in chunks.by_ref() {
@@ -702,8 +787,9 @@ pub async fn move_mail(ctx: &Ctx, p: &MoveParams) -> Result<BatchResult, String>
         });
         let batch: Vec<_> = chunk.iter().map(|(_, v, _, _)| v.clone()).collect();
         let (tried, stop) = mailapp::run_batch(mailapp::MOVE, &json!({"items": batch}), timeout_for(batch.len())).await;
-        let (n, keep, mut f) = settle(chunk, &tried, stop.as_ref(), &known);
+        let (n, keep, mut f, u) = settle(chunk, &tried, stop.as_ref(), &known);
         done += n;
+        unjournaled += u;
         failed.append(&mut f);
         // This batch's planned moves give way to what Mail said of them;
         // earlier batches' stay as they are.
@@ -745,6 +831,11 @@ pub async fn move_mail(ctx: &Ctx, p: &MoveParams) -> Result<BatchResult, String>
     if undo_token.is_some() {
         notes.push("To move them back, call undo_move with this undo_token.");
     }
+    if unjournaled > 0 {
+        notes.push(
+            "Some moved messages have no Message-ID, which undo_move needs to find them: those stay where they are.",
+        );
+    }
     let note = (!notes.is_empty()).then(|| notes.join(" "));
     Ok(BatchResult { done, failed, undo_token, note })
 }
@@ -759,12 +850,12 @@ fn settle(
     tried: &[serde_json::Value],
     stop: Option<&mailapp::Stop>,
     known: &HashMap<i64, String>,
-) -> (usize, Vec<UndoItem>, Vec<Failure>) {
-    let (mut done, mut keep, mut failed) = (0, vec![], vec![]);
+) -> (usize, Vec<UndoItem>, Vec<Failure>, usize) {
+    let (mut done, mut keep, mut failed, mut unjournaled) = (0, vec![], vec![], 0);
     for (pos, (id, _, from, to)) in chunk.iter().enumerate() {
         let reported = tried.iter().find(|t| t.get("id").and_then(|v| v.as_i64()) == Some(*id));
         let item = |mid: &str| UndoItem {
-            message_id: mid.trim_matches(['<', '>']).to_string(),
+            message_id: mid.trim().trim_matches(['<', '>']).trim().to_string(),
             now_in: to.clone(),
             back_to: from.clone(),
             done: false,
@@ -772,8 +863,17 @@ fn settle(
         match reported {
             Some(t) if t.get("ok").and_then(|v| v.as_bool()) == Some(true) => {
                 done += 1;
-                let mid = t.get("message_id").and_then(|v| v.as_str()).or(known.get(id).map(String::as_str));
-                keep.extend(mid.map(item));
+                // A message without a Message-ID cannot be found again: its
+                // move is not journaled (undo would take another one).
+                let mid = t
+                    .get("message_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|m| !m.trim().trim_matches(['<', '>']).trim().is_empty())
+                    .or(known.get(id).map(String::as_str));
+                match mid {
+                    Some(mid) => keep.push(item(mid)),
+                    None => unjournaled += 1,
+                }
             }
             Some(t) => failed.push(Failure::of(*id, t.get("error").and_then(|v| v.as_str()).unwrap_or("failed"))),
             None => {
@@ -792,14 +892,27 @@ fn settle(
             }
         }
     }
-    (done, keep, failed)
+    (done, keep, failed, unjournaled)
 }
 
 /// Change the undo journal and save it.
 fn journal_edit(ctx: &Ctx, change: impl FnOnce(&mut Vec<UndoEntry>)) {
+    with_journal(ctx, true, change);
+}
+
+/// The undo journal as it is on disk (another Timbre may have changed it),
+/// read, and changed and saved when `save`, under the lock both take.
+fn with_journal<T>(ctx: &Ctx, save: bool, f: impl FnOnce(&mut Vec<UndoEntry>) -> T) -> T {
     let mut journal = ctx.undo.lock().unwrap_or_else(|e| e.into_inner());
-    change(&mut journal);
-    save_undo(&ctx.cfg, &journal);
+    let _lock = lock_journal(&ctx.cfg);
+    if let Some(on_disk) = read_undo(&ctx.cfg) {
+        *journal = on_disk;
+    }
+    let out = f(&mut journal);
+    if save {
+        save_undo(&ctx.cfg, &journal);
+    }
+    out
 }
 
 /// The Message-IDs Timbre read in these messages (without angle brackets).
@@ -814,7 +927,12 @@ fn message_ids(ctx: &Ctx, ids: &[i64]) -> HashMap<i64, String> {
         return HashMap::new();
     };
     stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-        .map(|rows| rows.flatten().map(|(id, m)| (id, m.trim_matches(['<', '>']).to_string())).collect())
+        .map(|rows| {
+            rows.flatten()
+                .map(|(id, m)| (id, m.trim().trim_matches(['<', '>']).trim().to_string()))
+                .filter(|(_, m)| !m.is_empty())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -825,16 +943,16 @@ pub struct UndoParams {
 }
 
 pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
-    let entry = {
-        let journal = ctx.undo.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = with_journal(ctx, false, |journal| {
         let found = match &p.token {
             Some(t) => journal.iter().rev().find(|e| &e.token == t),
             // Without a token, only the latest move: never an older one the
             // user has forgotten about.
             None => journal.last(),
         };
-        found.cloned().ok_or("Nothing to undo with that token.")?
-    };
+        found.cloned()
+    })
+    .ok_or("Nothing to undo with that token.")?;
     if entry.undone {
         return Err(if p.token.is_some() {
             "This move was already undone.".into()
@@ -849,6 +967,10 @@ pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
     // Where each goes back, the way Mail can take it (Gmail).
     let mut routed = vec![];
     for i in &todo {
+        if i.message_id.trim().is_empty() {
+            failed.push(Failure { id: None, message_id: None, error: "no Message-ID to find it by".into() });
+            continue;
+        }
         match gmail_undo(&ctx.store, &i.now_in, &i.back_to) {
             Ok((to, note)) => {
                 if let Some(n) = note
@@ -856,7 +978,10 @@ pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
                 {
                     notes.push(n);
                 }
-                routed.push(json!({"message_id": i.message_id, "now_in": i.now_in, "back_to": to}));
+                let prefixed = crate::mailboxes::prefixed(&ctx.store, &to);
+                routed.push(
+                    json!({"message_id": i.message_id, "now_in": i.now_in, "back_to": to, "back_prefixed": prefixed}),
+                );
             }
             Err(why) => failed.push(Failure { id: None, message_id: Some(i.message_id.clone()), error: why }),
         }
@@ -881,8 +1006,7 @@ pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
             break;
         }
     }
-    let complete = {
-        let mut journal = ctx.undo.lock().unwrap_or_else(|e| e.into_inner());
+    let complete = with_journal(ctx, true, |journal| {
         let mut complete = false;
         if let Some(e) = journal.iter_mut().find(|e| e.token == entry.token) {
             for mid in &back {
@@ -893,9 +1017,8 @@ pub async fn undo(ctx: &Ctx, p: &UndoParams) -> Result<BatchResult, String> {
             e.undone = e.items.iter().all(|i| i.done);
             complete = e.undone;
         }
-        save_undo(&ctx.cfg, &journal);
         complete
-    };
+    });
     // Those Mail cannot move back stay as they are: trying again changes nothing.
     let refused = todo.len() - routed.len();
     let retry = !complete && back.len() + refused < todo.len();
@@ -940,7 +1063,7 @@ pub struct PreparedSend {
 
 const SEND_TTL: i64 = 15 * 60;
 
-pub async fn prepare_send(ctx: &Ctx, p: &DraftParams) -> Result<PreparedSend, String> {
+pub async fn prepare_send(ctx: &Arc<Ctx>, p: &DraftParams) -> Result<PreparedSend, String> {
     let r = compose(ctx, p).await?;
     let (to, cc, bcc) = (strings(&r, "to"), strings(&r, "cc"), strings(&r, "bcc"));
     let all: Vec<String> = to.iter().chain(&cc).chain(&bcc).map(|a| a.to_lowercase()).collect();
@@ -1095,28 +1218,34 @@ mod tests {
         // All moved: Mail's own Message-IDs are kept.
         let tried: Vec<_> =
             (1..=4).map(|id| json!({"id": id, "ok": true, "message_id": format!("<M{id}@x>")})).collect();
-        let (done, keep, failed) = settle(&chunk, &tried, None, &known);
+        let (done, keep, failed, _) = settle(&chunk, &tried, None, &known);
         assert_eq!(
             (done, ids(&keep), failed.len()),
             (4, vec!["M1@x".into(), "M2@x".into(), "M3@x".into(), "M4@x".into()], 0)
         );
+        // No Message-ID anywhere: moved, never journaled under an empty one
+        // (undo would take any message without one), and said so.
+        let bare: Vec<Planned> = vec![(9, json!({}), loc("INBOX"), loc("Archive"))];
+        let tried = [json!({"id": 9, "ok": true, "message_id": " <> "})];
+        let (done, keep, _, unjournaled) = settle(&bare, &tried, None, &HashMap::new());
+        assert_eq!((done, keep.len(), unjournaled), (1, 0, 1));
         // Mail busy at the third: the first two moved, the third may have.
         let busy =
             mailapp::Stop { text: "Mail did not answer in time.".into(), maybe_applied: true, unreported: false };
         let tried =
             vec![json!({"id": 1, "ok": true, "message_id": "m1@x"}), json!({"id": 2, "ok": false, "error": "gone"})];
-        let (done, keep, failed) = settle(&chunk, &tried, Some(&busy), &known);
+        let (done, keep, failed, _) = settle(&chunk, &tried, Some(&busy), &known);
         assert_eq!((done, ids(&keep)), (1, vec!["m1@x".to_string(), "m3@x".to_string()]));
         assert_eq!(failed.len(), 3);
         assert!(failed[1].error.contains("may have been moved"));
         // No answer at all: any of them may have moved.
         let silent =
             mailapp::Stop { text: "Mail did not answer within 23s.".into(), maybe_applied: true, unreported: true };
-        let (done, keep, _) = settle(&chunk, &[], Some(&silent), &known);
+        let (done, keep, _, _) = settle(&chunk, &[], Some(&silent), &known);
         assert_eq!((done, keep.len()), (0, 4));
         // Permission refused: nothing moved, nothing to undo.
         let refused = mailapp::Stop { text: "not allowed".into(), maybe_applied: false, unreported: false };
-        let (done, keep, failed) = settle(&chunk, &[], Some(&refused), &known);
+        let (done, keep, failed, _) = settle(&chunk, &[], Some(&refused), &known);
         assert_eq!((done, keep.len(), failed.len()), (0, 0, 4));
     }
 

@@ -7,12 +7,13 @@
 //! across macOS releases, so column usage is decided by introspection with
 //! documented fallbacks on the `flags` bitfield.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 use serde::Serialize;
 use unicode_normalization::UnicodeNormalization;
@@ -350,6 +351,9 @@ pub struct Schema {
     pub labels: Option<String>,
 }
 
+/// How often Timbre looks again for rows of mailboxes Mail no longer has.
+const LEFTOVERS_EVERY: Duration = Duration::from_secs(60);
+
 pub struct Store {
     pub version_dir: PathBuf,
     pub db_path: PathBuf,
@@ -360,8 +364,56 @@ pub struct Store {
     /// The user's addresses known from the account settings (lower case).
     pub account_addresses: Vec<String>,
     mailboxes: RwLock<Arc<HashMap<i64, Mailbox>>>,
+    /// Rows Mail's database keeps for mailboxes Mail no longer has, and when
+    /// they were last looked for.
+    leftovers: RwLock<(Option<Instant>, Arc<HashSet<i64>>)>,
     /// When a mailbox nobody knew made the list be read again.
     reread: Mutex<Option<Instant>>,
+}
+
+/// Text from Mail's database, whatever it holds: a subject or a name that
+/// is not valid UTF-8 is read with replacement characters, never an error
+/// that would fail the whole search or listing it is part of.
+pub fn lossy(v: ValueRef<'_>) -> Option<String> {
+    match v {
+        ValueRef::Text(b) | ValueRef::Blob(b) => Some(String::from_utf8_lossy(b).into_owned()),
+        ValueRef::Integer(n) => Some(n.to_string()),
+        ValueRef::Real(f) => Some(f.to_string()),
+        ValueRef::Null => None,
+    }
+}
+
+/// [`lossy`] for a column of a row, empty when NULL.
+pub fn text_at(row: &Row<'_>, at: usize) -> rusqlite::Result<String> {
+    Ok(lossy(row.get_ref(at)?).unwrap_or_default())
+}
+
+/// Where Mail keeps a mailbox's folder on the Mac: under its account's
+/// folder (or "Mailboxes" for On My Mac), one `.mbox` per level. None for a
+/// name that cannot be a folder's.
+pub fn mailbox_folder(version_dir: &Path, m: &Mailbox) -> Option<PathBuf> {
+    if m.path.is_empty() || m.path.iter().any(|p| p.is_empty() || p == "." || p == ".." || p.contains(['\0', '/'])) {
+        return None;
+    }
+    let mut dir = if m.local {
+        version_dir.join("Mailboxes")
+    } else if !m.account_id.is_empty() {
+        version_dir.join(&m.account_id)
+    } else {
+        return None;
+    };
+    for part in &m.path {
+        dir.push(format!("{part}.mbox"));
+    }
+    Some(dir)
+}
+
+/// Gmail's own trash or spam ("[Gmail]/Corbeille", "[Gmail]/Spam"): never
+/// a label of the user's that merely holds the word ("Spam reports").
+pub fn gmail_bin(m: &Mailbox) -> bool {
+    m.role_strength == 2
+        && matches!(m.role, Role::Junk | Role::Trash)
+        && m.path.first().is_some_and(|p| p.trim_start().starts_with('['))
 }
 
 /// One message's metadata, straight from the Envelope Index.
@@ -670,7 +722,13 @@ impl Store {
         let open_mode = attach(&conn, &db_path)?;
         let schema = detect_schema(&conn)?;
         let max_date: Option<f64> = conn.query_row("SELECT MAX(date_received) FROM mail.messages", [], |r| r.get(0))?;
-        let epoch_offset = if max_date.unwrap_or(0.0) > 1.0e9 { 0 } else { MAC_EPOCH_OFFSET };
+        // Mail writes Unix times; the 2001 epoch only for dates that cannot
+        // be Unix ones. No message yet (a new Mac, Mail rebuilding its
+        // database): Unix, as every Mail of these years writes.
+        let epoch_offset = match max_date {
+            Some(d) if d > 0.0 && d < 1.0e9 => MAC_EPOCH_OFFSET,
+            _ => 0,
+        };
         let accounts = load_accounts(&cfg.accounts_db);
         let account_addresses = load_account_addresses(&cfg.accounts_db);
         let store = Store {
@@ -682,6 +740,7 @@ impl Store {
             accounts,
             account_addresses,
             mailboxes: RwLock::new(Arc::new(HashMap::new())),
+            leftovers: RwLock::new((None, Arc::new(HashSet::new()))),
             reread: Mutex::new(None),
         };
         store.reload_mailboxes(&conn)?;
@@ -690,14 +749,74 @@ impl Store {
 
     pub fn reload_mailboxes(&self, conn: &Connection) -> Result<()> {
         let mut stmt = conn.prepare("SELECT ROWID, url FROM mail.mailboxes")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, lossy(r.get_ref(1)?))))?;
         let mut map = HashMap::new();
         for (id, url) in rows.flatten() {
             map.insert(id, parse_mailbox_url(id, url.as_deref().unwrap_or(""), &self.accounts));
         }
         tell_accounts_apart(&mut map, &self.accounts);
-        *self.mailboxes.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(map);
+        let changed = {
+            let old = self.mailboxes();
+            old.len() != map.len() || map.iter().any(|(id, m)| old.get(id).is_none_or(|o| o.url != m.url))
+        };
+        let map = Arc::new(map);
+        *self.mailboxes.write().unwrap_or_else(|e| e.into_inner()) = map.clone();
+        self.refresh_leftovers(conn, &map, changed);
         Ok(())
+    }
+
+    /// Look again for leftover rows (see [`Store::leftovers`]) when the
+    /// list changed, or a while after the last look: Mail deletes a
+    /// mailbox's folder without touching its row.
+    fn refresh_leftovers(&self, conn: &Connection, map: &HashMap<i64, Mailbox>, now: bool) {
+        let stale =
+            self.leftovers.read().unwrap_or_else(|e| e.into_inner()).0.is_none_or(|t| t.elapsed() > LEFTOVERS_EVERY);
+        if now || stale {
+            let found = Arc::new(self.find_leftovers(conn, map));
+            *self.leftovers.write().unwrap_or_else(|e| e.into_inner()) = (Some(Instant::now()), found);
+        }
+    }
+
+    /// Look for leftover rows now, as list_mailboxes does before showing
+    /// the user's mailboxes.
+    pub fn refresh_leftovers_now(&self, conn: &Connection) {
+        let map = self.mailboxes();
+        self.refresh_leftovers(conn, &map, true);
+    }
+
+    /// Mailboxes whose rows Mail's database keeps though Mail no longer has
+    /// them (deleted, in Mail or elsewhere): Mail keeps a folder on the Mac
+    /// for each mailbox it has ("…/<account>/INBOX.mbox/Archives.mbox"), and
+    /// these have none. Only in an account where the folders of others are
+    /// where they should be, and only empty ones: no message is in it, no
+    /// Gmail label points to it.
+    pub fn leftovers(&self) -> Arc<HashSet<i64>> {
+        self.leftovers.read().unwrap_or_else(|e| e.into_inner()).1.clone()
+    }
+
+    fn find_leftovers(&self, conn: &Connection, map: &HashMap<i64, Mailbox>) -> HashSet<i64> {
+        let mut present: HashSet<(bool, &str)> = HashSet::new();
+        let mut missing: Vec<&Mailbox> = vec![];
+        for m in map.values() {
+            let Some(folder) = mailbox_folder(&self.version_dir, m) else { continue };
+            if folder.is_dir() {
+                present.insert((m.local, m.account_id.as_str()));
+            } else if !(m.path.len() == 1 && m.path[0].eq_ignore_ascii_case("INBOX")) {
+                missing.push(m);
+            }
+        }
+        let holds = |sql: &str, id: i64| -> bool {
+            // Unsure means it holds something: never left out.
+            conn.prepare_cached(sql).and_then(|mut s| s.exists([id])).unwrap_or(true)
+        };
+        let label_sql = self.schema.labels.as_ref().map(|_| "SELECT 1 FROM mail.labels WHERE mailbox_id = ?1");
+        missing
+            .into_iter()
+            .filter(|m| present.contains(&(m.local, m.account_id.as_str())))
+            .filter(|m| !holds("SELECT 1 FROM mail.messages WHERE mailbox = ?1", m.id))
+            .filter(|m| label_sql.is_none_or(|sql| !holds(sql, m.id)))
+            .map(|m| m.id)
+            .collect()
     }
 
     pub fn mailboxes(&self) -> Arc<HashMap<i64, Mailbox>> {
@@ -782,13 +901,13 @@ impl Store {
     /// Read a [`Meta`] from the columns produced by [`Store::meta_columns`],
     /// starting at `at`.
     pub fn row_meta(&self, row: &Row<'_>, at: usize) -> rusqlite::Result<Meta> {
-        let name: String = row.get(at + 2)?;
-        let addr: String = row.get(at + 3)?;
+        let name = text_at(row, at + 2)?;
+        let addr = text_at(row, at + 3)?;
         let date: f64 = row.get::<_, Option<f64>>(at + 4)?.unwrap_or(0.0);
         let sent: f64 = row.get::<_, Option<f64>>(at + 5)?.unwrap_or(0.0);
         Ok(Meta {
             id: row.get(at)?,
-            subject: crate::mime::one_line(&row.get::<_, String>(at + 1)?),
+            subject: crate::mime::one_line(&text_at(row, at + 1)?),
             from: fmt_addr(Some(&name), Some(&addr)),
             from_addr: addr,
             date: self.to_unix(date as i64),
@@ -843,9 +962,7 @@ impl Store {
         let mut stmt = conn.prepare(&sql)?;
         let mut to = vec![];
         let mut cc = vec![];
-        for row in
-            stmt.query_map([id], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
-        {
+        for row in stmt.query_map([id], |r| Ok((r.get::<_, Option<i64>>(0)?, text_at(r, 1)?, text_at(r, 2)?)))? {
             let (t, name, addr) = row?;
             if addr.is_empty() {
                 continue;
@@ -971,8 +1088,15 @@ impl Store {
         };
         let mailboxes = self.mailboxes();
         // In the trash or junk, a message is there whatever labels it keeps
-        // (Gmail leaves the user's labels on what is thrown away).
-        let thrown = |mb: &i64| mailboxes.get(mb).is_some_and(|m| matches!(m.role, Role::Junk | Role::Trash));
+        // (Gmail leaves the user's labels on what is thrown away). Gmail's
+        // own: a label of the user's named "Spam reports" is no junk.
+        let thrown = |mb: &i64| {
+            mailboxes.get(mb).is_some_and(|m| {
+                m.role_strength == 2
+                    && matches!(m.role, Role::Junk | Role::Trash)
+                    && (gmail_bin(m) || !self.is_gmail(&m.account_id, &m.account))
+            })
+        };
         if thrown(&stored) {
             return stored;
         }
@@ -992,6 +1116,28 @@ impl Store {
             None => 6,
         };
         labels.into_iter().chain([stored]).min_by_key(|&mb| (rank(mb), mb != stored)).unwrap_or(stored)
+    }
+
+    /// How many messages are in one mailbox, Gmail labels included.
+    pub fn messages_in(&self, conn: &Connection, id: i64) -> Result<i64> {
+        let live = &self.schema.not_deleted;
+        let stored: i64 = conn.query_row(
+            &format!("SELECT count(*) FROM mail.messages m WHERE m.mailbox = ?1 AND {live}"),
+            [id],
+            |r| r.get(0),
+        )?;
+        let labelled: i64 = match &self.schema.labels {
+            Some(col) => conn.query_row(
+                &format!(
+                    "SELECT count(*) FROM mail.labels l JOIN mail.messages m ON {col} = l.message_id \
+                     WHERE l.mailbox_id = ?1 AND m.mailbox != ?1 AND {live}"
+                ),
+                [id],
+                |r| r.get(0),
+            )?,
+            None => 0,
+        };
+        Ok(stored + labelled)
     }
 
     /// (total, unread) per mailbox id, Gmail labels included.
@@ -1020,18 +1166,17 @@ impl Store {
 
     /// Resolve a mailbox name, path or role alias to mailbox ids.
     /// Matching is case-insensitive on the full path or the leaf name.
+    /// Rows Mail keeps for mailboxes it no longer has are left out.
     pub fn resolve_mailboxes(&self, spec: &str, account: Option<&str>) -> Vec<i64> {
         let role = Role::from_alias(spec);
         let want = name_key(spec);
-        let acct = account.map(|a| (account_key(a), a.trim())).filter(|(k, _)| !k.is_empty());
+        let accounts = account.filter(|a| !account_key(a).is_empty()).map(|a| self.accounts_named(a));
+        let leftovers = self.leftovers();
         let mut out: Vec<i64> = self
             .mailboxes()
             .values()
-            .filter(|m| {
-                acct.as_ref().is_none_or(|(key, raw)| {
-                    account_key(&m.account).contains(key.as_str()) || m.account_id.eq_ignore_ascii_case(raw)
-                })
-            })
+            .filter(|m| !leftovers.contains(&m.id))
+            .filter(|m| accounts.as_ref().is_none_or(|a| a.iter().any(|(id, n)| same_account(m, id, n))))
             .filter(|m| {
                 role.is_some_and(|r| m.role == r)
                     || name_key(&m.display_path()) == want
@@ -1042,6 +1187,30 @@ impl Store {
             .collect();
         out.sort_unstable();
         out
+    }
+
+    /// The accounts (id, name) a name the user gave means: the account so
+    /// named (case, spaces and accents aside) or with that id; failing
+    /// that, those whose name holds it. "Gmail" is the account "Gmail", not
+    /// also "Gmail Pro"; "poste" is "La Poste" when none is named so.
+    pub fn accounts_named(&self, raw: &str) -> Vec<(String, String)> {
+        let key = account_key(raw);
+        if key.is_empty() {
+            return vec![];
+        }
+        let mut all: Vec<(String, String)> =
+            self.mailboxes().values().map(|m| (m.account_id.clone(), m.account.clone())).collect();
+        all.sort_unstable();
+        all.dedup();
+        let exact: Vec<(String, String)> = all
+            .iter()
+            .filter(|(id, n)| account_key(n) == key || (!id.is_empty() && id.eq_ignore_ascii_case(raw.trim())))
+            .cloned()
+            .collect();
+        if !exact.is_empty() {
+            return exact;
+        }
+        all.into_iter().filter(|(_, n)| account_key(n).contains(&key)).collect()
     }
 
     /// These mailboxes and the mailboxes inside them, for searches: a folder
@@ -1085,20 +1254,22 @@ impl Store {
         self.mailboxes().values().filter(|m| roles.iter().any(|r| r == m.role.as_str())).map(|m| m.id).collect()
     }
 
-    /// Accounts' mailbox with a given role (first match), e.g. Trash of an account.
-    /// The account's mailbox for a role: its usual name first, then the
-    /// shallowest, then the oldest — the same answer every time.
+    /// The account's mailbox for a role, named as Mail or the provider names
+    /// it ("Archive", "[Gmail]/Corbeille"): never a folder of the user's
+    /// that merely holds the word ("Archives clients 2019"). Gmail's own
+    /// first, then the shallowest, then one that holds mail (Mail's
+    /// database may keep a row for a mailbox it deleted), then the newest
+    /// row — the same answer every time.
     pub fn role_mailbox_for_account(&self, account_id: &str, account: &str, role: Role) -> Option<Mailbox> {
-        let mut candidates: Vec<Mailbox> = self
-            .mailboxes()
+        let mailboxes = self.mailboxes();
+        let mut candidates: Vec<&Mailbox> = mailboxes
             .values()
-            .filter(|m| m.role == role && same_account(m, account_id, account))
-            .cloned()
+            .filter(|m| m.role == role && m.role_strength == 2 && same_account(m, account_id, account))
             .collect();
-        // Gmail's own mailboxes ("[Gmail]/…") before labels of the same name.
         let system = |m: &Mailbox| m.path.first().is_some_and(|p| p.starts_with('['));
-        candidates.sort_by_key(|m| (std::cmp::Reverse(m.role_strength), !system(m), m.path.len(), m.id));
-        candidates.into_iter().next()
+        let leftovers = self.leftovers();
+        candidates.sort_by_key(|m| (!system(m), m.path.len(), leftovers.contains(&m.id), std::cmp::Reverse(m.id)));
+        candidates.first().map(|m| (*m).clone())
     }
 
     /// Live message ids (not deleted) with their mailbox.
