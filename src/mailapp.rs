@@ -209,6 +209,24 @@ function main(i) {
 }
 "#;
 
+/// Whether Mail shows a mailbox, waiting up to `tries` half seconds for it
+/// to show it (`present`) or to stop showing it: Mail's own list, which is
+/// what the user sees (its database may keep a mailbox it no longer shows).
+pub const MAILBOX_SHOWN: &str = r#"
+function main(i) {
+  const tries = i.tries || 1;
+  let found = false;
+  for (let k = 0; k < tries; k++) {
+    if (k > 0) delay(0.5);
+    for (const key in _mb) delete _mb[key];
+    found = true;
+    try { mailbox(i.loc); } catch (e) { if (fatal(e)) throw e; found = false; }
+    if (found === !!i.present) break;
+  }
+  return {found: found};
+}
+"#;
+
 /// Make a mailbox at the top of an account, as Mail's own New Mailbox does:
 /// the `make` told to the account itself, the form that reaches IMAP
 /// servers. Mail names an IMAP account's mailboxes from its path prefix, so
@@ -674,6 +692,7 @@ mod tests {
             ("SELECTION", SELECTION),
             ("SEND_OUTGOING", SEND_OUTGOING),
             ("ACCOUNT_SERVER", ACCOUNT_SERVER),
+            ("MAILBOX_SHOWN", MAILBOX_SHOWN),
         ] {
             let Some(out) = node("parse", &["--check"], &format!("{PRELUDE}\n{script}")) else { return };
             assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));

@@ -324,7 +324,7 @@ impl Timbre {
 
     #[tool(
         name = "create_mailbox",
-        description = "Make a mailbox (a folder, or a Gmail label) in an account, on its mail server; Mail then shows it. Mail lets no app do this, so Timbre does it on the server itself: the first time in an account, a window on the Mac asks the user for that account's password, once (kept in the keychain; you never see it). Give the path as Mail shows it: \"Projects/2026\" makes 2026 inside Projects.",
+        description = "Make a mailbox (a folder, or a Gmail label) in an account, on its mail server too. Mail makes it when it will; otherwise Timbre does it on the server itself, and the first time in that account a window on the Mac asks the user for the account's password, once (kept in the keychain; you never see it). Give the path as Mail shows it: \"Projects/2026\" makes 2026 inside Projects.",
         annotations(
             title = "Make a mailbox",
             read_only_hint = false,
@@ -342,7 +342,7 @@ impl Timbre {
 
     #[tool(
         name = "delete_mailbox",
-        description = "Delete an empty mailbox (a folder, or a Gmail label) on its mail server, without Mail's confirmation; Mail then drops it. Mail lets no app do this, so Timbre does it on the server itself: the first time in an account, a window on the Mac asks the user for that account's password, once (kept in the keychain; you never see it). Only a mailbox the server says is empty is deleted: move its messages out first with move_mail, which can be undone. Never an account's inbox, sent mail, drafts, trash or junk, nor the provider's own folders.",
+        description = "Delete an empty mailbox (a folder, or a Gmail label) on its mail server, without Mail's confirmation. Mail lets no app do this, so Timbre does it on the server itself: the first time in an account, a window on the Mac asks the user for the account's password, once (kept in the keychain; you never see it). Only a mailbox the server says is empty is deleted: move its messages out first with move_mail, which can be undone. Never an account's inbox, sent mail, drafts, trash or junk, nor the provider's own folders.",
         annotations(
             title = "Delete an empty mailbox",
             read_only_hint = false,

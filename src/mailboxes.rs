@@ -1,11 +1,13 @@
-//! Making and deleting mailboxes, on the mail server itself.
+//! Making and deleting mailboxes.
 //!
-//! Mail lets no script make or delete a mailbox: its scripting answers
-//! "AppleEvent handler failed" (-10000) for every account on current macOS.
-//! Its database is no way round either: it is Mail's copy of what the
+//! Mail makes a mailbox when a script asks it to, at least at some
+//! providers: Timbre asks Mail first, which needs no password and shows
+//! the mailbox at once. Mail deletes none: its scripting answers
+//! "AppleEvent handler failed" (-10000) for every account on current
+//! macOS. Its database is no way round: it is Mail's copy of what the
 //! server holds, and Mail would bring the mailbox back at its next check.
-//! So Timbre does what Mail's own Mailbox menu does, on the server (IMAP),
-//! then has Mail synchronize.
+//! So Timbre deletes, and makes what Mail would not, on the server (IMAP),
+//! as Mail's own Mailbox menu does, then has Mail synchronize.
 //!
 //! That takes the account's password, which Mail keeps where no other app
 //! may read it. The first time the user makes or deletes a mailbox in an
@@ -671,24 +673,13 @@ async fn on_server<T: Send + 'static>(
     .await?
 }
 
-/// Ask Mail to synchronize the account, and wait a little for its database
-/// to show `done`.
-async fn mail_catches_up(ctx: &Ctx, loc: &Loc, done: impl Fn(&Store) -> bool) -> bool {
-    ask_mail_to_sync(loc);
-    let until = Instant::now() + MAIL_CATCHES_UP;
-    loop {
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        {
-            let conn = ctx.db();
-            let _ = ctx.store.reload_mailboxes(&conn);
-        }
-        if done(&ctx.store) {
-            return true;
-        }
-        if Instant::now() >= until {
-            return false;
-        }
-    }
+/// Whether Mail shows the mailbox at `loc`, waiting up to `wait` for it to
+/// show it (`present`) or to stop showing it; none if Mail cannot be asked.
+async fn mail_shows(loc: &Loc, present: bool, wait: Duration) -> Option<bool> {
+    let tries = u64::try_from(wait.as_millis() / 500).unwrap_or(1).max(1);
+    let input = json!({ "loc": loc, "present": present, "tries": tries });
+    let v = mailapp::run(mailapp::MAILBOX_SHOWN, &input, wait + Duration::from_secs(20)).await.ok()?;
+    v.get("found").and_then(serde_json::Value::as_bool)
 }
 
 /// Ask Mail to synchronize the account, without waiting: Mail may take its
@@ -771,18 +762,29 @@ pub async fn delete_mailbox(ctx: &Ctx, p: &DeleteMailboxParams) -> Result<Mailbo
     }
     let loc = Loc::from(&mb);
     let acct = account(&loc).await?;
+    // Mail's database keeps some mailboxes Mail has deleted: one Mail no
+    // longer shows never opens a password window.
+    if mail_shows(&loc, true, Duration::ZERO).await == Some(false) && password_at_hand(&acct).await.is_none() {
+        return Err(format!(
+            "Mail does not show {what} any more (deleted already, or not caught up yet). Nothing was done."
+        ));
+    }
     let password = password(&acct).await?;
     let (path, label) = (mb.path.clone(), what.clone());
     on_server(&acct, password, move |s| delete_in(s, &path, &label)).await?;
-    let id = mb.id;
-    let gone = mail_catches_up(ctx, &loc, |store| store.mailbox(id).is_none()).await;
+    ask_mail_to_sync(&loc);
+    let gone = mail_shows(&loc, false, MAIL_CATCHES_UP).await == Some(false);
+    {
+        let conn = ctx.db();
+        let _ = ctx.store.reload_mailboxes(&conn);
+    }
     let gmail = ctx.store.is_gmail(&mb.account_id, &mb.account) || acct.provider == Provider::Google;
     let note = match (gone, gmail) {
         (true, true) => "Deleted: Gmail removed the label (no message had it), and Mail no longer shows it.",
         (true, false) => "Deleted on the server; Mail no longer shows it.",
         (false, _) => {
-            "Deleted on the server. Mail still shows it until its next check of the account (Mailbox > Synchronize \
-             does it now)."
+            "Deleted on the server. Mail still shows it until it reads the account's list of mailboxes again, \
+             which it does on its own (at the latest when it is next opened)."
         }
     };
     Ok(MailboxDone { mailbox: shown(&mb.path), account: mb.account, on_server: mb.path.join("/"), note: note.into() })
@@ -837,28 +839,58 @@ pub async fn create_mailbox(ctx: &Ctx, p: &CreateMailboxParams) -> Result<Mailbo
 /// Make a mailbox in an account, on the server, and wait for Mail to show
 /// it.
 async fn make(ctx: &Ctx, loc: &Loc, wanted: &[String]) -> Result<MailboxDone, String> {
-    let acct = account(loc).await?;
-    let password = password(&acct).await?;
-    let what = format!("'{}' ({})", wanted.join("/"), loc.account);
-    let (wanted, prefix) = (wanted.to_vec(), mail_prefix(&ctx.store, loc));
-    let (path, existed) = on_server(&acct, password, move |s| create_in(s, &wanted, &what, prefix)).await?;
-    let (id, name, p) = (loc.account_id.clone(), loc.account.clone(), path.clone());
-    let listed = ctx.store.mailbox_at(&id, &name, &path).is_some()
-        || mail_catches_up(ctx, loc, move |store| store.mailbox_at(&id, &name, &p).is_some()).await;
-    let note = match (existed, listed) {
-        (true, true) => "It exists already.",
-        (true, false) => "It exists already on the server; Mail shows it at its next check of the account.",
-        (false, true) => "Made on the server; Mail shows it.",
-        (false, false) => {
-            "Made on the server. Mail shows it at its next check of the account (Mailbox > Synchronize does it now)."
-        }
-    };
-    Ok(MailboxDone {
-        mailbox: shown(&path),
+    let prefix = mail_prefix(&ctx.store, loc);
+    // Where Mail will show it: from the account's prefix on.
+    let path: Vec<String> = prefix.clone().unwrap_or_default().into_iter().chain(wanted.iter().cloned()).collect();
+    let at = Loc { path: path.clone(), ..loc.clone() };
+    let done = |path: &[String], note: &str| MailboxDone {
+        mailbox: shown(path),
         account: loc.account.clone(),
         on_server: path.join("/"),
         note: note.into(),
-    })
+    };
+    if mail_shows(&at, true, Duration::ZERO).await == Some(true) {
+        return Ok(done(&path, "It exists already."));
+    }
+    // Mail first: no password, and it shows the mailbox at once.
+    match mailapp::make_mailbox(&loc.account_id, &wanted.join("/"), Duration::from_secs(25)).await {
+        Ok(()) => {
+            let shown_now = mail_shows(&at, true, MAIL_CATCHES_UP).await == Some(true);
+            if shown_now {
+                let conn = ctx.db();
+                let _ = ctx.store.reload_mailboxes(&conn);
+            }
+            // Made, Mail says: never made a second time on the server.
+            let note =
+                if shown_now { "Made by Mail, on the server too." } else { "Mail made it; it shows it in a moment." };
+            return Ok(done(&path, note));
+        }
+        Err(e) => tracing::info!("Mail would not make the mailbox, so the server is asked: {e:#}"),
+    }
+    let acct = account(loc).await?;
+    let password = password(&acct).await?;
+    let what = format!("'{}' ({})", wanted.join("/"), loc.account);
+    let wanted = wanted.to_vec();
+    let (path, existed) = on_server(&acct, password, move |s| create_in(s, &wanted, &what, prefix)).await?;
+    ask_mail_to_sync(loc);
+    let listed = mail_shows(&Loc { path: path.clone(), ..loc.clone() }, true, MAIL_CATCHES_UP).await == Some(true);
+    if listed {
+        let conn = ctx.db();
+        let _ = ctx.store.reload_mailboxes(&conn);
+    }
+    let note = match (existed, listed) {
+        (true, true) => "It exists already.",
+        (false, true) => "Made on the server; Mail shows it.",
+        (true, false) => {
+            "It exists already on the server. Mail shows it once it reads the account's list of mailboxes again, \
+             which it does on its own (at the latest when it is next opened)."
+        }
+        (false, false) => {
+            "Made on the server. Mail shows it once it reads the account's list of mailboxes again, which it does \
+             on its own (at the latest when it is next opened)."
+        }
+    };
+    Ok(done(&path, note))
 }
 
 /// The password for this account's server if Timbre has it at hand, with
@@ -886,8 +918,8 @@ pub async fn make_if_password_known(ctx: &Ctx, loc: &Loc, name: &str) -> Result<
     let (wanted, prefix) = (vec![name.to_string()], mail_prefix(&ctx.store, loc));
     let what = format!("'{name}' ({})", loc.account);
     let (path, _) = on_server(&acct, password, move |s| create_in(s, &wanted, &what, prefix)).await?;
-    let (id, account) = (loc.account_id.clone(), loc.account.clone());
-    mail_catches_up(ctx, loc, move |store| store.mailbox_at(&id, &account, &path).is_some()).await;
+    ask_mail_to_sync(loc);
+    mail_shows(&Loc { path, ..loc.clone() }, true, MAIL_CATCHES_UP).await;
     Ok(())
 }
 
