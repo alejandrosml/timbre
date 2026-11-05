@@ -136,6 +136,10 @@ pub fn percent_decode(s: &str) -> String {
 /// Clip a string to at most `max` characters on a char boundary.
 /// Returns the clipped text and whether anything was cut.
 pub fn clip(s: &str, max: usize) -> (String, bool) {
+    // No more bytes than allowed characters: nothing to count.
+    if s.len() <= max {
+        return (s.to_string(), false);
+    }
     match s.char_indices().nth(max) {
         Some((idx, _)) => (s[..idx].to_string(), true),
         None => (s.to_string(), false),
@@ -184,19 +188,26 @@ pub fn tidy_whitespace(s: &str) -> String {
     let mut blank_run = 0;
     let mut collapsed = String::new();
     for line in s.lines() {
-        collapsed.clear();
-        let mut prev_space = false;
-        for c in line.chars() {
-            let space = c == ' ' || c == '\t' || c == '\u{00A0}';
-            if space {
-                if !prev_space {
-                    collapsed.push(' ');
+        // Most lines have no run of spaces, tab or no-break space: as they are.
+        let plain = !line.contains(['\t', '\u{00A0}']) && !line.contains("  ");
+        let collapsed: &str = if plain {
+            line
+        } else {
+            collapsed.clear();
+            let mut prev_space = false;
+            for c in line.chars() {
+                let space = c == ' ' || c == '\t' || c == '\u{00A0}';
+                if space {
+                    if !prev_space {
+                        collapsed.push(' ');
+                    }
+                } else {
+                    collapsed.push(c);
                 }
-            } else {
-                collapsed.push(c);
+                prev_space = space;
             }
-            prev_space = space;
-        }
+            &collapsed
+        };
         let trimmed = collapsed.trim_end();
         if trimmed.trim().is_empty() {
             blank_run += 1;

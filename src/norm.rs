@@ -91,6 +91,10 @@ pub fn unspace_cjk(s: &str) -> String {
 /// spaced apart. Borrows when nothing changes (ASCII text, the common case,
 /// costs one scan).
 pub fn fold(s: &str) -> Cow<'_, str> {
+    // Plain ASCII, most mail: nothing to fold, checked a word at a time.
+    if s.is_ascii() {
+        return Cow::Borrowed(s);
+    }
     space_cjk(fold_letters(s))
 }
 

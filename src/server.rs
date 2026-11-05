@@ -113,7 +113,41 @@ fn router(cfg: &crate::config::Config) -> ToolRouter<Timbre> {
         tool_router.remove_route("prepare_send");
         tool_router.remove_route("confirm_send");
     }
+    for route in tool_router.map.values_mut() {
+        let mut schema = (*route.attr.input_schema).clone();
+        schema.remove("$schema");
+        lean(&mut schema);
+        route.attr.input_schema = Arc::new(schema);
+    }
     tool_router
+}
+
+/// A tool's parameters as Claude needs them, which it reads in every
+/// conversation: without integer formats, a minimum of 0 on counts, and
+/// "or null" on parameters that may be left out anyway (left out or null,
+/// both read as not given). A fifth of the tools' definitions.
+fn lean(o: &mut serde_json::Map<String, serde_json::Value>) {
+    use serde_json::Value;
+    o.remove("format");
+    if o.get("minimum").and_then(Value::as_u64) == Some(0) {
+        o.remove("minimum");
+    }
+    if let Some(Value::Array(types)) = o.get("type") {
+        let kept: Vec<Value> = types.iter().filter(|t| t.as_str() != Some("null")).cloned().collect();
+        if kept.len() == 1 {
+            o.insert("type".into(), kept[0].clone());
+        }
+    }
+    if let Some(Value::Object(props)) = o.get_mut("properties") {
+        for v in props.values_mut() {
+            if let Value::Object(p) = v {
+                lean(p);
+            }
+        }
+    }
+    if let Some(Value::Object(items)) = o.get_mut("items") {
+        lean(items);
+    }
 }
 
 /// The tool definitions, for the server that waits for access to Mail.
