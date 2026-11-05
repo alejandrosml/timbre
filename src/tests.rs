@@ -1335,7 +1335,7 @@ fn a_label_named_like_spam_is_not_the_junk() {
     // Trashed from the inbox: Gmail's rules let it, so Mail is asked (it
     // cannot be here).
     let e = move_mail(&env, vec![101], "trash").unwrap_err();
-    assert!(e.contains("only available on macOS"), "{e}");
+    assert!(e.contains(crate::mailapp::unavailable().unwrap()), "{e}");
 }
 
 /// "archive" is the account's archive, never a folder of the user's that
@@ -1750,5 +1750,5 @@ fn a_mailbox_just_made_can_be_filed_into() {
     assert!(lp.mailboxes.iter().any(|m| m.name == "INBOX/Tout neuf"), "{:?}", lp.mailboxes);
     // Planned and handed to Mail (which cannot run here), not "no mailbox".
     let e = move_mail(&env, vec![1234], "Tout neuf").unwrap_err();
-    assert!(e.contains("only available on macOS"), "{e}");
+    assert!(e.contains(crate::mailapp::unavailable().unwrap()), "{e}");
 }
