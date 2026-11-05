@@ -3,7 +3,12 @@
 All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.6.5] - 2026-11-05
+
+Timbre now makes and deletes mailboxes, and two more reviews went over
+every part of it, each checked on a real Mac. After this update Timbre
+reads the messages again in the background, newest first, so that the
+index holds what Mail shows of each one; search works meanwhile.
 
 ### Added
 - **Making and deleting mailboxes.** `create_mailbox` makes a folder or a
@@ -35,7 +40,6 @@ All notable changes are listed here. The format follows
 - **Encrypted and checked.** The connection to the mail server is TLS from
   the first byte, or STARTTLS before anything is said; the certificate is
   checked by macOS, as Mail checks it; a password never travels unencrypted.
-
 - **Mailboxes Mail no longer has.** Mail's database keeps a row for some
   mailboxes Mail deleted; Timbre knows them by their folder gone from the
   Mac (in an account whose other folders are where they should be, and only
@@ -46,6 +50,11 @@ All notable changes are listed here. The format follows
 - **iCloud's own mailboxes.** Where another app made "Trash" or "Sent"
   beside iCloud's "Deleted Messages" and "Sent Messages", trash and sent
   mean iCloud's own, as in Mail.
+
+### Changed
+- **Lighter for Claude.** What Claude reads of the tools' parameters, in
+  every conversation, is 1,600 characters shorter. Plain text is read
+  faster; the index is the same.
 
 ### Fixed
 - **Archives at La Poste.** Archiving the mail of an account with no archive

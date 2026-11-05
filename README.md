@@ -143,6 +143,8 @@ A synthetic mailbox of 20,000 messages (788 MB: HTML newsletters, replies with q
 
 What made the difference: messages are parsed on every core while a single writer commits large transactions, with FTS5's merging deferred and a 64 MiB pending-terms table; the text kept for snippets is stored once, compressed with zstd; there is no prefix index; snippets and details are computed for the returned page only, and very broad queries are ranked over their 10,000 most recent matches. Index-time work that only matters when reading a message is skipped. To reproduce: `timbre dev-corpus /tmp/corpus 20000` (debug build), then `timbre index --rebuild` and `timbre bench` from a release build with `TIMBRE_MAIL_ROOT`, `TIMBRE_ACCOUNTS_DB` and `TIMBRE_DATA_DIR` pointing at it.
 
+0.6.5, which also makes and deletes mailboxes, is as fast as 0.5.7, measured side by side on the same machine: the index is built in 15 to 16 s and keeps the same size, and searches answer in 25 to 26 ms (median) and 43 to 45 ms (95th percentile). What Claude reads of Timbre's tools in every conversation is 1,600 characters shorter.
+
 On a real Mac (Apple silicon, 132,000 messages across six accounts, Gmail included), the index takes about 500 MB and searches answer in 20 to 40 ms.
 
 ## Install

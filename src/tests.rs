@@ -233,7 +233,8 @@ fn an_older_index_is_read_again_without_losing_search() {
         conn.execute_batch("ALTER TABLE docs DROP COLUMN attachments; ALTER TABLE docs DROP COLUMN parser;").unwrap();
     }
     let mut conn = index::open(&cfg, &store, true).unwrap();
-    let outdated: i64 = conn.query_row("SELECT count(*) FROM docs WHERE parser < 2", [], |r| r.get(0)).unwrap();
+    let outdated: i64 =
+        conn.query_row("SELECT count(*) FROM docs WHERE parser < ?1", [index::PARSER_VERSION], |r| r.get(0)).unwrap();
     assert_eq!(outdated, 6, "the columns are added in place, rows marked as outdated");
     assert_eq!(ids(&search(&env, q("facture"))), vec![101], "searches work before the re-read");
     let mut indexer = Indexer::new(cfg.clone(), store.clone(), env.ctx.progress.clone());
@@ -244,12 +245,40 @@ fn an_older_index_is_read_again_without_losing_search() {
     }
     assert_eq!(rounds, 3, "6 messages, 2 at a time");
     let (left, counted): (i64, i64) = conn
-        .query_row("SELECT sum(parser < 2), sum(attachments IS NOT NULL) FROM docs", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_row("SELECT sum(parser < ?1), sum(attachments IS NOT NULL) FROM docs", [index::PARSER_VERSION], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .unwrap();
     assert_eq!((left, counted), (0, 6));
     let fts: i64 = conn.query_row("SELECT count(*) FROM fts_docsize", [], |r| r.get(0)).unwrap();
     assert_eq!(fts, 6, "each message is in the full-text index once");
     assert_eq!(ids(&search(&env, q("reunion"))), vec![104]);
+}
+
+#[test]
+fn an_index_read_by_the_previous_parser_is_read_again() {
+    let env = setup("reread-previous", true);
+    let cfg = env.ctx.cfg.clone();
+    let store = env.ctx.store.clone();
+    let mut conn = index::open(&cfg, &store, true).unwrap();
+    // As left by Timbre 0.5.7, before HTML charsets were read as Mail reads them.
+    conn.execute("UPDATE docs SET parser = ?1", [index::PARSER_VERSION - 1]).unwrap();
+    let mut indexer = Indexer::new(cfg.clone(), store.clone(), env.ctx.progress.clone());
+    let mut read = 0;
+    loop {
+        let n = indexer.reread_batch(&mut conn, 4).unwrap();
+        if n == 0 {
+            break;
+        }
+        read += n;
+        assert_eq!(ids(&search(&env, q("facture"))), vec![101], "searches work during the re-read");
+    }
+    assert_eq!(read, 6, "every message is read again once");
+    let left: i64 =
+        conn.query_row("SELECT count(*) FROM docs WHERE parser < ?1", [index::PARSER_VERSION], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0);
+    let fts: i64 = conn.query_row("SELECT count(*) FROM fts_docsize", [], |r| r.get(0)).unwrap();
+    assert_eq!(fts, 6, "each message is in the full-text index once");
 }
 
 #[test]

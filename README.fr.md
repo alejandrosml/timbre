@@ -143,6 +143,8 @@ La 0.5.7 est un peu plus lente parce qu'elle est plus exacte : elle lit chaque p
 
 Ce qui a fait la différence : les messages sont analysés sur tous les cœurs pendant qu'un seul fil d'écriture enregistre de grosses transactions, avec les fusions de FTS5 repoussées à la fin et une table de termes en attente de 64 Mio ; le texte gardé pour les extraits n'est stocké qu'une fois, compressé en zstd ; il n'y a plus d'index de préfixes ; extraits et détails ne sont calculés que pour la page renvoyée, et les requêtes très larges sont classées parmi leurs 10 000 résultats les plus récents. Les vérifications utiles seulement à la lecture d'un message ne sont plus faites à l'indexation. Pour reproduire : `timbre dev-corpus /tmp/corpus 20000` (compilation de débogage), puis `timbre index --rebuild` et `timbre bench` en compilation optimisée, avec `TIMBRE_MAIL_ROOT`, `TIMBRE_ACCOUNTS_DB` et `TIMBRE_DATA_DIR` pointant dessus.
 
+La 0.6.5, qui crée et supprime aussi des boîtes aux lettres, est aussi rapide que la 0.5.7, mesurées côte à côte sur la même machine : l'index se construit en 15 à 16 s et garde la même taille, et les recherches répondent en 25 à 26 ms (médiane) et 43 à 45 ms (95ᵉ centile). Ce que Claude lit des outils de Timbre à chaque conversation a raccourci de 1 600 caractères.
+
 Sur un vrai Mac (Apple silicon, 132 000 messages répartis sur six comptes, dont Gmail), l'index occupe environ 500 Mo et les recherches répondent en 20 à 40 ms.
 
 ## Installation

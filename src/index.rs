@@ -29,7 +29,9 @@ pub const SCHEMA_VERSION: &str = "3";
 /// Version of what is read from each message (indexed text, attachment
 /// count). Rows read by an older Timbre are read again in the background,
 /// newest first, while searches keep using the index.
-pub const PARSER_VERSION: i64 = 2;
+/// 3: HTML charsets as Mail's WebKit reads them, "base64," in visible text
+/// kept, names on one line (0.6.5).
+pub const PARSER_VERSION: i64 = 3;
 /// Messages read again per transaction when the parser changed.
 const REFRESH_BATCH: usize = 1000;
 /// Longest body text indexed per message (characters).
