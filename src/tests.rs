@@ -1087,15 +1087,16 @@ fn gmail_moves_mail_cannot_make_are_refused() {
     refused(102, "archive", "delete it for good");
     refused(102, "junk", "delete it for good");
     refused(102, "Perso", "delete it for good");
-    // To the trash, and out of it to the inbox, Mail can: here, on Linux,
-    // only Mail itself is missing.
+    // To the trash, and out of it to the inbox, Mail can: here only Mail
+    // itself is missing (tests never drive it).
+    let no_mail = crate::mailapp::unavailable().unwrap();
     for (id, to) in [(101, "trash"), (101, "junk"), (104, "trash"), (102, "inbox")] {
         let e = move_mail(&env, vec![id], to).unwrap_err();
-        assert!(e.contains("macOS"), "{id} to {to}: {e}");
+        assert!(e.contains(no_mail), "{id} to {to}: {e}");
     }
     // The fixture's iCloud is no Gmail: archiving is planned as before.
     let e = move_mail(&env, vec![103], "archive").unwrap_err();
-    assert!(e.contains("macOS"), "{e}");
+    assert!(e.contains(no_mail), "{e}");
 }
 
 /// Undo takes a Gmail message out of the trash the only way Mail can: to
@@ -1158,12 +1159,13 @@ fn a_missing_archive_is_made_beside_the_accounts_mailboxes() {
     let mut local = inbox_of(fixture::ACCOUNT);
     local.local = true;
     assert!(crate::actions::new_archive(store, &local).is_none());
-    // Archiving from La Poste makes the mailbox first; here Mail is missing,
-    // so nothing is moved and the result says why.
+    // Archiving from La Poste makes the mailbox first; Mail is never driven
+    // from tests, so nothing is moved and the result says why.
     let r = move_mail(&env, vec![1234], "archive").unwrap();
     assert_eq!((r.done, r.undo_token.is_none()), (0, true));
     let why = &r.failed[0].error;
-    assert!(why.contains("archive mailbox for") && why.contains("macOS") && why.contains("Nothing was moved"), "{why}");
+    let no_mail = crate::mailapp::unavailable().unwrap();
+    assert!(why.contains("archive mailbox for") && why.contains(no_mail) && why.contains("Nothing was moved"), "{why}");
 }
 
 /// A mailbox Mail creates after Timbre read the list ("Recovered Messages")

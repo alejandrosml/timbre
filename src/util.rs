@@ -243,6 +243,14 @@ pub fn app_path() -> std::path::PathBuf {
         .unwrap_or(exe)
 }
 
+/// A test's time limit for work that must stay far from quadratic: room
+/// for debug builds on a slow machine, where the same work runs several
+/// times slower.
+#[cfg(test)]
+pub fn time_limit(secs: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(if cfg!(debug_assertions) { secs * 4 } else { secs })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

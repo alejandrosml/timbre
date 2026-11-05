@@ -217,8 +217,8 @@ end run
 
 /// Ask Mail to make a mailbox at the top of an account.
 pub async fn make_mailbox(account_id: &str, name: &str, timeout: Duration) -> Result<()> {
-    if !cfg!(target_os = "macos") {
-        bail!("Mail.app scripting is only available on macOS");
+    if let Some(why) = unavailable() {
+        bail!("{why}");
     }
     let child = tokio::process::Command::new("/usr/bin/osascript")
         .arg("-e")
@@ -306,10 +306,22 @@ const NO_ANSWER: &str = "Mail did not answer";
 const NOT_ALLOWED: &str = "macOS has not allowed Timbre to act in Mail (Automation). Call open_permission_settings \
 with pane \"automation\" and ask the user to switch on Mail under Timbre, then try again.";
 
+/// Why Mail cannot be asked from here: not on a Mac, or in a test, which
+/// must never drive the Mail of the Mac it runs on.
+pub fn unavailable() -> Option<&'static str> {
+    if !cfg!(target_os = "macos") {
+        Some("Mail.app scripting is only available on macOS")
+    } else if cfg!(test) {
+        Some("Mail is not driven from tests")
+    } else {
+        None
+    }
+}
+
 /// Run one JXA script with `input` as JSON on stdin.
 pub async fn run(script: &str, input: &Value, timeout: Duration) -> Result<Value> {
-    if !cfg!(target_os = "macos") {
-        bail!("Mail.app scripting is only available on macOS");
+    if let Some(why) = unavailable() {
+        bail!("{why}");
     }
     use tokio::io::AsyncWriteExt;
     let source = format!("{PRELUDE}\n{script}");
@@ -408,8 +420,8 @@ pub async fn run_batch(script: &str, input: &Value, timeout: Duration) -> (Vec<V
 
 /// Open a message in Mail via its `message:` URL (no Automation needed).
 pub fn open_message_url(message_id: &str) -> Result<()> {
-    if !cfg!(target_os = "macos") {
-        bail!("opening Mail is only available on macOS");
+    if let Some(why) = unavailable() {
+        bail!("{why}");
     }
     let mut enc = String::new();
     for b in format!("<{message_id}>").bytes() {

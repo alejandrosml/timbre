@@ -1438,7 +1438,7 @@ mod tests {
         // A tag with fifty thousand attributes.
         let attrs: String = (0..50_000).map(|i| format!(" a{i}")).collect();
         assert!(to_text(&format!("<p{attrs}>x</p>")).degraded);
-        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "{:?}", t0.elapsed());
+        assert!(t0.elapsed() < crate::util::time_limit(5), "{:?}", t0.elapsed());
         // Sloppy but ordinary mail is read: unclosed fonts and links.
         let sloppy = format!(
             "{}{}<p>end</p>",
@@ -1455,7 +1455,7 @@ mod tests {
         let t0 = std::time::Instant::now();
         let t = to_text(&picture);
         assert!(t.text.contains("over a picture") && t.text.contains("after"), "{:?}", t.text);
-        assert!(t0.elapsed() < std::time::Duration::from_secs(2), "{:?}", t0.elapsed());
+        assert!(t0.elapsed() < crate::util::time_limit(2), "{:?}", t0.elapsed());
     }
 
     #[test]
@@ -1464,7 +1464,7 @@ mod tests {
         let html = format!("<p>top</p>{}secret &amp; more{}", "<div>".repeat(depth), "</div>".repeat(depth));
         let started = std::time::Instant::now();
         let t = to_text(&html);
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
+        assert!(started.elapsed() < crate::util::time_limit(5), "took {:?}", started.elapsed());
         assert!(t.degraded);
         assert!(t.text.is_empty());
         assert!(t.hidden_chars > 0 && t.hidden_sample.contains("secret & more"), "{}", t.hidden_sample);
@@ -1479,12 +1479,12 @@ mod tests {
             let t0 = std::time::Instant::now();
             assert!(too_deep(&hostile, MAX_PARSE_DEPTH));
             assert!(to_text(&hostile).degraded);
-            assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+            assert!(t0.elapsed() < crate::util::time_limit(5));
         }
         let t0 = std::time::Instant::now();
         assert!(!too_deep(&"<br".repeat(n), MAX_PARSE_DEPTH));
         assert!(strip_tags(&"<script>".repeat(n)).len() < 10 * n);
-        assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+        assert!(t0.elapsed() < crate::util::time_limit(5));
         let t = to_text("<style>.x{}</style><div><b>Hi</b></div>");
         assert!(!t.degraded && t.text.trim() == "Hi", "{}", t.text);
     }
@@ -2308,7 +2308,7 @@ mod tests {
         for html in [slots, open] {
             let t0 = std::time::Instant::now();
             let _ = std::thread::Builder::new().stack_size(8 << 20).spawn(move || to_text(&html)).unwrap().join();
-            assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{:?}", t0.elapsed());
+            assert!(t0.elapsed() < crate::util::time_limit(10), "{:?}", t0.elapsed());
         }
     }
 
@@ -2367,7 +2367,7 @@ mod tests {
         let html = format!("<style>{rules}</style><p d=\"{}\">x</p>", "a".repeat(500_000));
         let t0 = std::time::Instant::now();
         let _ = to_text(&html);
-        assert!(t0.elapsed() < std::time::Duration::from_secs(3), "{:?}", t0.elapsed());
+        assert!(t0.elapsed() < crate::util::time_limit(3), "{:?}", t0.elapsed());
     }
 
     /// Custom properties referring to each other many times over: worked out
@@ -2382,14 +2382,14 @@ mod tests {
             );
             let t0 = std::time::Instant::now();
             let t = to_text(&html);
-            assert!(t0.elapsed() < std::time::Duration::from_secs(2), "{:?}", t0.elapsed());
+            assert!(t0.elapsed() < crate::util::time_limit(2), "{:?}", t0.elapsed());
             assert!(!t.text.contains("SECRET"));
         }
         let rules: String = (0..17).map(|i| format!("--a{i}:var(--a{}) var(--a{});", i + 1, i + 1)).collect();
         let html = format!("<style>*{{{rules}--a17:x}}</style>{}", "<i>x</i>".repeat(2_000));
         let t0 = std::time::Instant::now();
         let _ = to_text(&html);
-        assert!(t0.elapsed() < std::time::Duration::from_secs(3), "{:?}", t0.elapsed());
+        assert!(t0.elapsed() < crate::util::time_limit(3), "{:?}", t0.elapsed());
     }
 
     #[test]

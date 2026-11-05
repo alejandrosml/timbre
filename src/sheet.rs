@@ -2519,7 +2519,7 @@ mod tests {
         for e in doc.tree.nodes().filter_map(ElementRef::wrap) {
             let _ = s.compute(e, None);
         }
-        assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
+        assert!(t.elapsed() < crate::util::time_limit(10), "{:?}", t.elapsed());
         assert!(s.overflowed());
         // Deep nesting and selectors that try every way up a deep tree.
         let deep = format!("<body>{}<b id=z>z</b>{}</body>", "<div>".repeat(300), "</div>".repeat(300));
@@ -2531,7 +2531,7 @@ mod tests {
         for e in doc.tree.nodes().filter_map(ElementRef::wrap) {
             let _ = s.compute(e, None);
         }
-        assert!(t.elapsed() < std::time::Duration::from_secs(10), "{:?}", t.elapsed());
+        assert!(t.elapsed() < crate::util::time_limit(10), "{:?}", t.elapsed());
         // Too many rules.
         let mut s = Sheet::new(false, css::WINDOWS[0]);
         s.add_css(&".y{display:none}".repeat(30_000));
@@ -2561,7 +2561,7 @@ mod tests {
             for e in doc.tree.nodes().filter_map(ElementRef::wrap) {
                 let _ = s.compute(e, None);
             }
-            assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}: {}", t.elapsed(), &css[..60]);
+            assert!(t.elapsed() < crate::util::time_limit(5), "{:?}: {}", t.elapsed(), &css[..60]);
         }
         let mut s = Sheet::new(false, css::WINDOWS[0]);
         s.add_css(&format!("{}.b{{display:none}}{}", ".a{".repeat(40), "}".repeat(40)));
