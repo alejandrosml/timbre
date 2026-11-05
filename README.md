@@ -7,9 +7,9 @@ Instant full-text search of all your mail accounts, safe reading, drafting and f
 
 ---
 
-Timbre lets Claude work with the mail you already have in Apple Mail, whatever the account (iCloud, Gmail, Outlook and Exchange, Orange, La Poste, any IMAP…). It reads Mail's own data on disk, so a search across hundreds of thousands of messages — bodies included — answers in tens of milliseconds, and it acts in Mail through the official scripting interface when you ask it to draft, file or flag.
+Timbre connects Claude to Apple Mail on your Mac. It is an MCP server packaged as a one-click Claude Desktop extension, and it lets Claude work with the mail you already have in Mail, whatever the account (iCloud, Gmail, Outlook and Exchange, Orange, La Poste, any IMAP…). It reads Mail's own data on disk, so a search across hundreds of thousands of messages — bodies included — answers in tens of milliseconds, and it acts in Mail through the official scripting interface when you ask it to draft, file or flag.
 
-It is built for the reality of an AI assistant reading untrusted email: hidden instructions are stripped and reported, forged senders are flagged, nothing is ever deleted for good, and nothing is sent without you.
+It is built for the reality of an AI assistant reading untrusted email: hidden instructions are stripped and reported, forged senders are flagged, no message is ever deleted for good, and nothing is sent without you.
 
 > **Status:** v0.6, in daily use on a real mailbox of 132,000 messages across six accounts. Feedback welcome in [Issues](https://github.com/alejandrosml/timbre/issues).
 
@@ -175,6 +175,20 @@ The full-text index builds in the background on first launch (about a minute per
 | `create_mailbox` | Make a mailbox or Gmail label: by Mail, or on the server | adds a mailbox |
 | `delete_mailbox` | Delete an empty mailbox or Gmail label, on the server | yes, empty ones only |
 | `prepare_send` / `confirm_send` | Two-step sending (only when enabled) | sends |
+
+## Questions
+
+**How do I connect Claude to Apple Mail?** Install Timbre in Claude Desktop (download the `.mcpb` from [Releases](https://github.com/alejandrosml/timbre/releases) and open it), give it Full Disk Access when Claude asks, and ask Claude about your mail in your own words.
+
+**Which accounts work?** Every account set up in Apple Mail: iCloud, Gmail and Google Workspace (labels included), Outlook and Exchange, Yahoo, Orange, Free, SFR, La Poste and any IMAP or POP account, plus On My Mac mailboxes.
+
+**Does my mail leave my Mac?** Searching and the index stay on your Mac. Only what Claude reads, to answer you, goes to Claude. Timbre itself collects nothing.
+
+**Can Claude send email or delete my mail?** Sending is off until you turn it on, and then each message takes two explicit steps. No message is ever deleted for good: moves to the trash can be undone, and only empty mailboxes are deleted.
+
+**Is it safe against phishing and prompt injection?** Text hidden from you but aimed at an AI is removed and reported, every email is fenced as untrusted, and forged senders and lying links are flagged.
+
+**Does it need the Gmail connector, or work without Claude Desktop?** No connector is needed: Timbre reads every account through Mail. It is made for Claude Desktop on macOS 12 or later; other MCP clients on a Mac can run its program too.
 
 ## Settings
 

@@ -1,0 +1,29 @@
+# Timbre
+
+> Timbre connects Claude to Apple Mail on macOS. It is an open-source MCP server (Rust, MIT licence) packaged as a one-click Claude Desktop extension (.mcpb), signed with a Developer ID and notarized by Apple. Created by Alejandro San Martin Lamas (https://github.com/alejandrosml).
+
+Timbre reads Apple Mail's own data on the Mac, so Claude can search every account set up in Mail (iCloud, Gmail and its labels, Outlook and Exchange, Yahoo, Orange, La Poste, any IMAP or POP account) in 20 to 40 ms over 132,000 messages, message bodies and attachment names included. Searching and the index stay on the Mac.
+
+What sets it apart from other Apple Mail MCP servers:
+
+- Safe reading: text hidden from the reader but aimed at an AI is removed and reported; every email is fenced as untrusted; SPF/DKIM/DMARC results, look-alike senders, reply-to tricks and links that lie about their destination are flagged.
+- Safe actions: drafts open in Mail and are never sent on their own; moves to the archive or trash can be undone; sending is off by default and takes two explicit steps when turned on.
+- Mailboxes made, and empty ones deleted, even where Mail lets no app do it: Timbre then acts on the mail server itself (IMAP, encrypted); the account's password is asked once, in a window, the first time, and kept in the macOS keychain.
+- One signed app holds its own macOS permission (Full Disk Access): nothing else to install, nothing to configure beforehand.
+
+## Install
+
+- Download timbre-<version>.mcpb from https://github.com/alejandrosml/timbre/releases and open it: Claude Desktop installs it.
+- Give Timbre Full Disk Access when Claude asks (Claude can open the right settings pane).
+
+## Tools
+
+search_mail, read_mail, get_thread, list_mailboxes, read_attachment, mail_status, open_permission_settings, selected_mail, open_in_mail, save_attachment, create_draft, mark_mail, move_mail, undo_move, create_mailbox, delete_mailbox, and, only when the user enables sending, prepare_send and confirm_send.
+
+## Links
+
+- README (English): https://github.com/alejandrosml/timbre#readme
+- README (français): https://github.com/alejandrosml/timbre/blob/main/README.fr.md
+- Changelog: https://github.com/alejandrosml/timbre/blob/main/CHANGELOG.md
+- Releases: https://github.com/alejandrosml/timbre/releases
+- MCP Registry name: io.github.alejandrosml/timbre

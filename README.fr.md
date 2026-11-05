@@ -7,9 +7,9 @@ Recherche instantanée dans tous vos comptes mail, lecture, brouillons et rangem
 
 ---
 
-Timbre permet à Claude de travailler avec le courrier que vous avez déjà dans Mail, quel que soit le compte (iCloud, Gmail, Outlook et Exchange, Orange, La Poste, tout compte IMAP…). Il lit directement les données de Mail sur le disque : une recherche parmi des centaines de milliers de messages, corps compris, répond en quelques dizaines de millisecondes. Et quand vous lui demandez un brouillon, un rangement ou un drapeau, il agit dans Mail par l'interface de scripts officielle.
+Timbre connecte Claude à Mail sur votre Mac. C'est un serveur MCP livré en extension Claude Desktop qui s'installe en un clic, et il permet à Claude de travailler avec le courrier que vous avez déjà dans Mail, quel que soit le compte (iCloud, Gmail, Outlook et Exchange, Orange, La Poste, tout compte IMAP…). Il lit directement les données de Mail sur le disque : une recherche parmi des centaines de milliers de messages, corps compris, répond en quelques dizaines de millisecondes. Et quand vous lui demandez un brouillon, un rangement ou un drapeau, il agit dans Mail par l'interface de scripts officielle.
 
-Il est conçu pour la réalité d'un assistant qui lit des mails dont on ne connaît pas l'auteur : les instructions cachées sont retirées et signalées, les expéditeurs usurpés sont repérés, rien n'est jamais supprimé définitivement, et rien n'est envoyé sans vous.
+Il est conçu pour la réalité d'un assistant qui lit des mails dont on ne connaît pas l'auteur : les instructions cachées sont retirées et signalées, les expéditeurs usurpés sont repérés, aucun message n'est jamais supprimé définitivement, et rien n'est envoyé sans vous.
 
 > **État :** v0.6, utilisé chaque jour sur une vraie boîte de 132 000 messages répartis sur six comptes. Vos retours sont bienvenus dans les [Issues](https://github.com/alejandrosml/timbre/issues).
 
@@ -175,6 +175,20 @@ L'index plein texte se construit en arrière-plan au premier lancement (environ 
 | `create_mailbox` | Créer une boîte ou un libellé Gmail : par Mail, ou sur le serveur | ajoute une boîte |
 | `delete_mailbox` | Supprimer une boîte ou un libellé Gmail vide, sur le serveur | oui, boîtes vides seulement |
 | `prepare_send` / `confirm_send` | Envoi en deux étapes (seulement si activé) | envoie |
+
+## Questions
+
+**Comment connecter Claude à Mail ?** Installez Timbre dans Claude Desktop (téléchargez le `.mcpb` dans les [Releases](https://github.com/alejandrosml/timbre/releases) et ouvrez-le), donnez-lui l'accès complet au disque quand Claude vous le propose, puis parlez à Claude de votre courrier avec vos mots.
+
+**Quels comptes fonctionnent ?** Tous ceux configurés dans Mail : iCloud, Gmail et Google Workspace (libellés compris), Outlook et Exchange, Yahoo, Orange, Free, SFR, La Poste et tout compte IMAP ou POP, ainsi que les boîtes « Sur mon Mac ».
+
+**Mon courrier quitte-t-il mon Mac ?** La recherche et l'index restent sur votre Mac. Seul ce que Claude lit pour vous répondre part chez Claude. Timbre lui-même ne collecte rien.
+
+**Claude peut-il envoyer des mails ou supprimer mon courrier ?** L'envoi est désactivé tant que vous ne l'activez pas, et chaque message demande alors deux étapes explicites. Aucun message n'est jamais supprimé définitivement : un passage à la corbeille s'annule, et seules les boîtes vides sont supprimées.
+
+**Est-il protégé contre l'hameçonnage et l'injection d'instructions ?** Le texte qu'on vous cache mais qui vise une IA est retiré et signalé, chaque mail est encadré comme non fiable, et les expéditeurs usurpés et les liens trompeurs sont signalés.
+
+**Faut-il le connecteur Gmail, ou peut-on s'en servir sans Claude Desktop ?** Aucun connecteur n'est nécessaire : Timbre lit tous les comptes à travers Mail. Il est fait pour Claude Desktop sur macOS 12 ou plus récent ; d'autres clients MCP sur Mac peuvent aussi lancer son programme.
 
 ## Réglages
 

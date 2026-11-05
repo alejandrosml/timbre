@@ -1,0 +1,55 @@
+# Lists each published release in the official MCP Registry
+# (registry.modelcontextprotocol.io), from which MCP clients and directories
+# learn about servers. GitHub's OIDC token proves the repository is
+# alejandrosml's, so the name io.github.alejandrosml/timbre needs no secret.
+# Run it by hand (Actions → MCP Registry → Run workflow) with a tag to list
+# an existing release.
+name: MCP Registry
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to list, like v0.6.0"
+        required: true
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      # mcp-publisher v1.8.7, linux/amd64, as in the release's checksums file.
+      PUBLISHER_URL: https://github.com/modelcontextprotocol/registry/releases/download/v1.8.7/mcp-publisher_linux_amd64.tar.gz
+      PUBLISHER_SHA256: 00b21004149a4ce66f0782508ae4a2bce67d1bea395a8da0bd8028159fb59579
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Describe the release
+        run: |
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac
+          VERSION="${TAG#v}"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/timbre-${VERSION}.mcpb"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/timbre.mcpb" "$URL"
+          SHA="$(sha256sum "$RUNNER_TEMP/timbre.mcpb" | cut -d' ' -f1)"
+          jq --arg v "$VERSION" --arg u "$URL" --arg s "$SHA" \
+            '.version = $v | .packages[0].identifier = $u | .packages[0].fileSha256 = $s' \
+            server.json > "$RUNNER_TEMP/server.json"
+          mv "$RUNNER_TEMP/server.json" server.json
+          cat server.json
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/publisher.tgz" "$PUBLISHER_URL"
+          echo "$PUBLISHER_SHA256  $RUNNER_TEMP/publisher.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/publisher.tgz" -C "$RUNNER_TEMP" mcp-publisher
+      - name: Publish
+        run: |
+          "$RUNNER_TEMP/mcp-publisher" login github-oidc
+          "$RUNNER_TEMP/mcp-publisher" publish
