@@ -26,6 +26,9 @@ All notable changes are listed here. The format follows
   provider's own folders); messages are never deleted with it. Exchange,
   Outlook.com, POP accounts and On My Mac mailboxes are left to Mail's menu,
   and the result says so.
+- **Mail catching up.** A mailbox made on the server shows in Mail within
+  seconds; one deleted there stays in Mail's sidebar until Mail is next
+  opened, which removes it by itself. The result says which happened.
 - **Encrypted and checked.** The connection to the mail server is TLS from
   the first byte, or STARTTLS before anything is said; the certificate is
   checked by macOS, as Mail checks it; a password never travels unencrypted.

@@ -580,6 +580,13 @@ pub fn name_key(s: &str) -> String {
     crate::norm::for_match(s.trim())
 }
 
+/// An account name as compared with what the user typed, spaces and
+/// punctuation left out too: "La Poste" is the account Mail calls
+/// "Laposte".
+pub fn account_key(s: &str) -> String {
+    name_key(s).chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
 /// Where an account keeps every mailbox inside INBOX (La Poste, Orange),
 /// Mail shows them from its path prefix on: the server's
 /// "INBOX/Archives/2009" is "Archives/2009" in Mail.
@@ -1016,13 +1023,13 @@ impl Store {
     pub fn resolve_mailboxes(&self, spec: &str, account: Option<&str>) -> Vec<i64> {
         let role = Role::from_alias(spec);
         let want = name_key(spec);
-        let acct = account.map(name_key).filter(|a| !a.is_empty());
+        let acct = account.map(|a| (account_key(a), a.trim())).filter(|(k, _)| !k.is_empty());
         let mut out: Vec<i64> = self
             .mailboxes()
             .values()
             .filter(|m| {
-                acct.as_ref().is_none_or(|a| {
-                    name_key(&m.account).contains(a.as_str()) || m.account_id.eq_ignore_ascii_case(a.as_str())
+                acct.as_ref().is_none_or(|(key, raw)| {
+                    account_key(&m.account).contains(key.as_str()) || m.account_id.eq_ignore_ascii_case(raw)
                 })
             })
             .filter(|m| {

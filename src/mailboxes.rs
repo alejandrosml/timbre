@@ -29,7 +29,7 @@ use crate::app::Ctx;
 use crate::imap::{self, Entry, Server, Session};
 use crate::keychain::{self, Found};
 use crate::mailapp::{self, Loc};
-use crate::store::{Mailbox, Role, Store, name_key};
+use crate::store::{Mailbox, Role, Store, account_key};
 
 /// How long a tool waits for the user to answer a window before saying so.
 const WAIT_FOR_USER: Duration = Duration::from_secs(30);
@@ -146,7 +146,7 @@ async fn account(loc: &Loc) -> Result<Account, String> {
 
 /// An account by the name the user gave, as a place for Mail's scripting.
 fn find_account(store: &Store, name: &str) -> Result<Loc, String> {
-    let want = name_key(name);
+    let want = account_key(name);
     if want.is_empty() {
         return Err("Say which account (list_mailboxes names them).".into());
     }
@@ -156,12 +156,15 @@ fn find_account(store: &Store, name: &str) -> Result<Loc, String> {
     accounts.sort_unstable();
     accounts.dedup();
     let exact: Vec<_> =
-        accounts.iter().filter(|(id, n)| name_key(n) == want || id.eq_ignore_ascii_case(name.trim())).collect();
-    let hits =
-        if exact.is_empty() { accounts.iter().filter(|(_, n)| name_key(n).contains(&want)).collect() } else { exact };
+        accounts.iter().filter(|(id, n)| account_key(n) == want || id.eq_ignore_ascii_case(name.trim())).collect();
+    let hits = if exact.is_empty() {
+        accounts.iter().filter(|(_, n)| account_key(n).contains(&want)).collect()
+    } else {
+        exact
+    };
     match hits.as_slice() {
         [(id, n)] => Ok(Loc { account_id: id.to_string(), account: n.to_string(), path: vec![], local: false }),
-        [] if ["on my mac", "sur mon mac"].contains(&want.as_str()) => Err(ON_MY_MAC.into()),
+        [] if ["onmymac", "surmonmac"].contains(&want.as_str()) => Err(ON_MY_MAC.into()),
         [] => {
             let mut names: Vec<&str> = accounts.iter().map(|(_, n)| *n).collect();
             names.dedup();
@@ -783,8 +786,8 @@ pub async fn delete_mailbox(ctx: &Ctx, p: &DeleteMailboxParams) -> Result<Mailbo
         (true, true) => "Deleted: Gmail removed the label (no message had it), and Mail no longer shows it.",
         (true, false) => "Deleted on the server; Mail no longer shows it.",
         (false, _) => {
-            "Deleted on the server. Mail still shows it until it reads the account's list of mailboxes again, \
-             which it does on its own (at the latest when it is next opened)."
+            "Deleted on the server. Mail keeps showing it until Mail is next opened, which removes it by itself: \
+             nothing else to do (quitting and reopening Mail shows it gone now)."
         }
     };
     Ok(MailboxDone { mailbox: shown(&mb.path), account: mb.account, on_server: mb.path.join("/"), note: note.into() })
@@ -968,6 +971,13 @@ mod tests {
         // Two that differ only in case: never a guess.
         assert_eq!(find(&entries, &path("FOO")), None);
         assert_eq!(find(&entries, &path("foo")).map(|e| e.name.as_str()), Some("foo"));
+    }
+
+    #[test]
+    fn accounts_are_named_as_the_user_writes_them() {
+        assert_eq!(account_key("La Poste"), account_key("Laposte"));
+        assert_eq!(account_key(" iCloud "), "icloud");
+        assert_eq!(account_key("Sur mon Mac"), "surmonmac");
     }
 
     #[test]
