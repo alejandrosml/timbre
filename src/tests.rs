@@ -1181,3 +1181,72 @@ fn a_new_mailbox_is_named_in_results() {
     let hit = r.results.iter().find(|h| h.id == 101).expect("101 found");
     assert_eq!((hit.mailbox.as_str(), hit.account.as_str()), ("Recovered Messages (iCloud)", "On My Mac"));
 }
+
+/// La Poste's mailboxes as Orange's are too: folders inside an "Archives"
+/// folder, all inside INBOX; and Gmail's sent mail, its name written by
+/// Mail's database with a combining accent. 1234 is filed in
+/// "INBOX/Archives/Important", 103 sent from La Poste, 104 sent from Gmail.
+fn folders_inside_inbox(cfg: &crate::config::Config) {
+    gmail_and_laposte(cfg);
+    let c = envelope_index(cfg);
+    for p in ["INBOX/Archives", "INBOX/Archives/2009", "INBOX/Archives/Important"] {
+        c.execute("INSERT INTO mailboxes(url) VALUES(?1)", [format!("imap://{LAPOSTE}/{p}")]).unwrap();
+    }
+    let sent = format!("{GMAIL}/%5BGmail%5D/Messages%20envoye%CC%81s");
+    c.execute("INSERT INTO mailboxes(url) VALUES(?1)", [format!("imap://{sent}")]).unwrap();
+    let mb = |p: &str| format!("(SELECT ROWID FROM mailboxes WHERE url = 'imap://{p}')");
+    c.execute_batch(&format!(
+        "UPDATE messages SET mailbox = {important} WHERE ROWID = 1234;
+         UPDATE messages SET mailbox = {outbox} WHERE ROWID = 103;
+         INSERT INTO labels VALUES(104, {sent});",
+        important = mb(&format!("{LAPOSTE}/INBOX/Archives/Important")),
+        outbox = mb(&format!("{LAPOSTE}/INBOX/OUTBOX")),
+        sent = mb(&sent),
+    ))
+    .unwrap();
+}
+
+/// Mailboxes are found as Mail shows them: from the INBOX prefix on at La
+/// Poste and Orange, with or without accents however they are written, and
+/// a folder with the folders inside it. An inbox is searched alone: inside
+/// La Poste's are its sent mail and trash.
+#[test]
+fn mailboxes_are_found_as_mail_shows_them() {
+    let env = setup_with("mailnames", false, folders_inside_inbox);
+    let found = |p: SearchParams| {
+        let mut v = ids(&search(&env, p));
+        v.sort_unstable();
+        v
+    };
+    let named = |mailbox: &str, account: &str| {
+        found(SearchParams { mailbox: Some(mailbox.into()), account: Some(account.into()), ..Default::default() })
+    };
+    assert_eq!(named("Archives/Important", LAPOSTE), vec![1234]);
+    assert_eq!(named("INBOX/Archives/Important", LAPOSTE), vec![1234]);
+    // The account's archive, a folder that holds others, with them.
+    assert_eq!(named("archive", LAPOSTE), vec![1234]);
+    assert_eq!(named("Archives", LAPOSTE), vec![1234]);
+    assert!(named("inbox", LAPOSTE).is_empty(), "the inbox alone, not the mailboxes inside it");
+    assert_eq!(named("sent", LAPOSTE), vec![103]);
+    // Gmail's sent mail is its sent mail, however its name is written.
+    for name in ["sent", "Messages envoyés", "messages envoyes", "[Gmail]/Messages envoyés"] {
+        assert!(named(name, GMAIL).contains(&104), "{name}");
+    }
+    // Left out with the folders inside it.
+    let mut p = q("-in:Archives");
+    p.account = Some(LAPOSTE.into());
+    assert_eq!(found(p), vec![103]);
+    // Listed: the archive, empty though it holds folders, and the sent mail.
+    let list = app::list_mailboxes(&env.ctx).unwrap();
+    let role = |account: &str, name: &str| {
+        let a = list.accounts.iter().find(|a| a.account == account).expect("account listed");
+        let m = a.mailboxes.iter().find(|m| m.name == name).unwrap_or_else(|| panic!("{name} listed"));
+        (m.role.clone(), m.total)
+    };
+    assert_eq!(role(LAPOSTE, "INBOX/Archives"), (Some("archive".into()), 0));
+    assert_eq!(role(GMAIL, "[Gmail]/Messages envoyés").0.as_deref(), Some("sent"));
+    // A move to a folder named as Mail shows it goes to Mail (never driven
+    // from tests) instead of failing to find the folder.
+    let e = move_mail(&env, vec![1234], "Archives/2009").unwrap_err();
+    assert!(e.contains(crate::mailapp::unavailable().unwrap()), "{e}");
+}

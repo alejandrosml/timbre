@@ -5,7 +5,7 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
-## [0.5.6] - 2026-11-05
+## [0.5.7] - 2026-11-05
 
 A review of every part of Timbre, by four independent reviewers and on a
 real mailbox of 132,000 messages. After this update Timbre reads the
@@ -79,6 +79,22 @@ messages again in the background, newest first; search works meanwhile.
   soon as Mail lists it.
 - **New mailboxes.** A mailbox Mail creates while Timbre runs ("Recovered
   Messages", a new archive) is named in results instead of left blank.
+- **Mailbox names with accents.** Mail's database may write "é" as an "e"
+  followed by a combining accent: Gmail's "Messages envoyés" was then not
+  taken for the sent mailbox (searching sent mail failed, and people written
+  to from Gmail neither ranked first nor counted when telling a first
+  contact), and no mailbox with an accent could be named in a search or a
+  move. Accents now count however they are written, and a name is found
+  with or without them ("Envoyes"). An inbox is the one at the top of an
+  account: a copy kept in a folder (".../Boîte de réception") is not
+  searched as one.
+- **Folders as Mail shows them.** Where an account keeps every mailbox
+  inside INBOX (La Poste, Orange), a folder named as Mail shows it
+  ("Archives/2009") was not found; it is now, in searches and in moves, and
+  Mail is asked for it by the name it uses. A folder is searched with the
+  folders inside it, an inbox excepted: an Orange account's "Archives", the
+  folder that holds "Archives/2009" and the like, no longer gives nothing,
+  and `list_mailboxes` lists it as the account's archive.
 - **Mailbox roles.** Whole words only: "Présentations" or "Essentiel" are
   no longer taken for the sent mailbox; each account's usual mailbox is
   chosen, the same every time (Gmail's own before a label of the same

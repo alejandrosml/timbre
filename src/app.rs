@@ -377,7 +377,9 @@ pub fn list_mailboxes(ctx: &Ctx) -> Result<MailboxesView, String> {
     let mut list: Vec<_> = mailboxes.values().collect();
     list.sort_by_key(|m| (m.account.to_lowercase(), m.role != Role::Inbox, m.display_path().to_lowercase()));
     // Empty folders that only hold others ("[Gmail]") are left out; an empty
-    // folder of the user's is listed, so it can be found and filed into.
+    // folder of the user's is listed, so it can be found and filed into, and
+    // so is one with a role ("Archives" holding "Archives/2009"), so where
+    // archived mail goes can be seen.
     let parents: std::collections::HashSet<(String, String)> = mailboxes
         .values()
         .filter(|m| m.path.len() > 1)
@@ -385,7 +387,10 @@ pub fn list_mailboxes(ctx: &Ctx) -> Result<MailboxesView, String> {
         .collect();
     for m in list {
         let (total, unread) = counts.get(&m.id).copied().unwrap_or((0, 0));
-        if total == 0 && parents.contains(&(m.account_id.clone() + &m.account, m.display_path())) {
+        if total == 0
+            && m.role == Role::Other
+            && parents.contains(&(m.account_id.clone() + &m.account, m.display_path()))
+        {
             continue;
         }
         by_account.entry(m.account.clone()).or_default().push(MailboxView {

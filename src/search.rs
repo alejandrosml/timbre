@@ -695,13 +695,13 @@ pub fn search(
             ));
         }
         named_mailbox = true;
-        f.sql.push(store.in_mailboxes(&ids));
+        f.sql.push(store.in_mailboxes(&store.with_submailboxes(&ids)));
     } else if let Some(acct) = req.account.as_deref().filter(|a| !a.trim().is_empty()) {
-        let a = acct.trim().to_lowercase();
+        let a = crate::store::name_key(acct);
         let ids: Vec<String> = store
             .mailboxes()
             .values()
-            .filter(|m| m.account.to_lowercase().contains(&a))
+            .filter(|m| crate::store::name_key(&m.account).contains(&a))
             .map(|m| m.id.to_string())
             .collect();
         if ids.is_empty() {
@@ -714,7 +714,7 @@ pub fn search(
         if ids.is_empty() {
             return Err(format!("No mailbox matches '{v}'. Call list_mailboxes to see names."));
         }
-        f.sql.push(format!("NOT {}", store.in_mailboxes(&ids)));
+        f.sql.push(format!("NOT {}", store.in_mailboxes(&store.with_submailboxes(&ids))));
     }
     if !named_mailbox && !req.include_junk_and_trash.unwrap_or(false) {
         let skip = store.skipped_mailboxes(&cfg.excluded_roles);

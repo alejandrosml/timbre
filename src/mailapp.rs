@@ -52,20 +52,36 @@ function mailbox(loc) {
   const key = JSON.stringify(loc);
   if (_mb[key]) return _mb[key];
   const container = account(loc) || Mail;
-  const full = loc.path.join('/');
-  let found = null;
-  try { const mb = container.mailboxes.byName(full); mb.name(); found = mb; } catch (e) {}
-  if (!found) {
-    try { let cur = container; for (const p of loc.path) { cur = cur.mailboxes.byName(p); } cur.name(); found = cur; } catch (e) {}
+  const at = (path) => {
+    try { const mb = container.mailboxes.byName(path.join('/')); mb.name(); return mb; } catch (e) { if (fatal(e)) throw e; }
+    try { let cur = container; for (const p of path) { cur = cur.mailboxes.byName(p); } cur.name(); return cur; } catch (e) { if (fatal(e)) throw e; }
+    return null;
+  };
+  // The path as Mail's database writes it, then with accents composed and
+  // decomposed (Mail's scripting may write them the other way), each also
+  // from Mail's path prefix on where an account keeps every mailbox inside
+  // INBOX (La Poste, Orange): the server's "INBOX/Archives/2009" is Mail's
+  // "Archives/2009".
+  const paths = [];
+  const seen = {};
+  for (const form of ['', 'NFC', 'NFD']) {
+    const p = form ? loc.path.map((s) => String(s).normalize(form)) : loc.path;
+    const ways = p.length > 1 && String(p[0]).toUpperCase() === 'INBOX' ? [p, p.slice(1)] : [p];
+    for (const w of ways) { const k = w.join('/'); if (w.length && !seen[k]) { seen[k] = true; paths.push(w); } }
   }
+  let found = null;
+  for (const p of paths) { found = at(p); if (found) break; }
   if (!found) {
     // Only when the name leaves no doubt: never another mailbox that
     // happens to share the last part of the path.
-    const leaf = loc.path[loc.path.length - 1];
-    const hits = container.mailboxes.whose({name: leaf})();
-    if (hits.length === 1) found = hits[0];
+    const leaves = [];
+    for (const p of paths) { const leaf = p[p.length - 1]; if (leaves.indexOf(leaf) < 0) leaves.push(leaf); }
+    for (const leaf of leaves) {
+      const hits = container.mailboxes.whose({name: leaf})();
+      if (hits.length === 1) { found = hits[0]; break; }
+    }
   }
-  if (!found) throw new Error('Mailbox not found in Mail: ' + (loc.account ? loc.account + ' / ' : '') + full);
+  if (!found) throw new Error('Mailbox not found in Mail: ' + (loc.account ? loc.account + ' / ' : '') + loc.path.join('/'));
   _mb[key] = found;
   return found;
 }
@@ -488,5 +504,116 @@ mod tests {
         assert!(busy.maybe_applied && !busy.unreported);
         let other = batch(&json!({"items": [], "fatal": {"error": "boom"}})).1.unwrap();
         assert_eq!(other.text, "Mail refused: boom");
+    }
+
+    /// Run JavaScript with Node, which reads the same language as JavaScript
+    /// for Automation; None where Node is missing (the test is then skipped).
+    fn node(tag: &str, args: &[&str], source: &str) -> Option<std::process::Output> {
+        let dir = std::env::temp_dir().join(format!("timbre-js-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("script.js");
+        std::fs::write(&file, source).unwrap();
+        let out = std::process::Command::new("node").args(args).arg(&file).output();
+        let _ = std::fs::remove_dir_all(&dir);
+        match out {
+            Ok(o) => Some(o),
+            Err(e) => {
+                eprintln!("skipped: no Node to read the scripts with ({e})");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn every_script_parses() {
+        for (name, script) in [
+            ("VERIFY", VERIFY),
+            ("DRAFT_NEW", DRAFT_NEW),
+            ("DRAFT_REPLY", DRAFT_REPLY),
+            ("DRAFT_FORWARD", DRAFT_FORWARD),
+            ("MARK", MARK),
+            ("MOVE", MOVE),
+            ("FIND_MAILBOX", FIND_MAILBOX),
+            ("MOVE_BACK", MOVE_BACK),
+            ("SELECTION", SELECTION),
+            ("SEND_OUTGOING", SEND_OUTGOING),
+        ] {
+            let Some(out) = node("parse", &["--check"], &format!("{PRELUDE}\n{script}")) else { return };
+            assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
+
+    /// Mail's scripting stood in for: an account's mailboxes by name at each
+    /// level, or all of them by their path from the account's prefix on.
+    const FAKE_MAIL: &str = r#"
+const ObjC = {import() {}};
+const $ = {};
+function delay() {}
+function list(kids) {
+  const f = () => kids;
+  f.byName = (n) => kids.find((k) => k.label === n) || {name() { throw new Error('no ' + n); }, mailboxes: list([])};
+  f.whose = (q) => () => kids.filter((k) => k.label === q.name);
+  return f;
+}
+function box(label, tag, kids) { return {label, tag, name: () => label, mailboxes: list(kids || [])}; }
+const ACCOUNTS = {
+  // La Poste as Mail names it: from the prefix INBOX on, folders inside folders.
+  LP: box('Laposte', 'lp', [box('INBOX', 'lp-inbox'), box('OUTBOX', 'lp-sent'), box('Important', 'lp-important'),
+    box('Archives', 'lp-archives', [box('2009', 'lp-2009'), box('Passé', 'lp-passe')])]),
+  // The same, each mailbox listed by its whole path.
+  LF: box('Orange', 'lf', [box('INBOX', 'lf-inbox'), box('Archives', 'lf-archives'), box('Archives/2009', 'lf-2009')]),
+  GM: box('Bob', 'gm', [box('INBOX', 'gm-inbox'), box('[Gmail]', 'gm-gmail', [box('Messages envoyés', 'gm-sent')])]),
+  // iCloud: a folder inside the inbox, and another of the same name at the top.
+  IC: box('iCloud', 'ic', [box('INBOX', 'ic-inbox', [box('Clients', 'ic-inbox-clients')]), box('Clients', 'ic-clients')]),
+};
+const accounts = () => Object.values(ACCOUNTS);
+accounts.byId = (id) => ACCOUNTS[id] || {name() { throw new Error('no account ' + id); }};
+accounts.byName = (n) => accounts().find((a) => a.label === n) || {name() { throw new Error('no account ' + n); }};
+function Application() { return {accounts, mailboxes: list([])}; }
+"#;
+
+    /// Mail names an INBOX-prefixed account's mailboxes from the prefix on,
+    /// and may write accents differently from its database: each is found,
+    /// and never another mailbox that merely shares a name.
+    #[test]
+    fn mailboxes_are_found_as_mail_names_them() {
+        let cases = r#"
+const cases = [
+  ['LP', ['INBOX', 'Archives', '2009']],
+  ['LP', ['INBOX', 'Archives', 'Passé']],
+  ['LP', ['INBOX', 'OUTBOX']],
+  ['LP', ['INBOX']],
+  ['LP', ['INBOX', 'Archives']],
+  ['LF', ['INBOX', 'Archives', '2009']],
+  ['GM', ['[Gmail]', 'Messages envoyés']],
+  ['IC', ['INBOX', 'Clients']],
+  ['IC', ['Clients']],
+  ['LP', ['INBOX', 'Ailleurs', 'Important']],
+  ['LP', ['INBOX', 'Nulle part']],
+];
+console.log(JSON.stringify(cases.map(([id, path]) => {
+  try { return mailbox({account_id: id, account: '', path, local: false}).tag; } catch (e) { return 'error: ' + e.message; }
+})));
+"#;
+        let Some(out) = node("find", &[], &format!("{FAKE_MAIL}\n{PRELUDE}\n{cases}")) else { return };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let found: Vec<String> = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            found,
+            [
+                "lp-2009",
+                "lp-passe",
+                "lp-sent",
+                "lp-inbox",
+                "lp-archives",
+                "lf-2009",
+                "gm-sent",
+                "ic-inbox-clients",
+                "ic-clients",
+                // Only a name no other mailbox has, as before.
+                "lp-important",
+                "error: Mailbox not found in Mail: INBOX/Nulle part",
+            ]
+        );
     }
 }

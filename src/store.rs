@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 use serde::Serialize;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::config::Config;
 use crate::util::{MAC_EPOCH_OFFSET, fmt_addr, percent_decode, sqlite_uri};
@@ -65,7 +66,7 @@ impl Role {
     }
 
     pub fn from_alias(s: &str) -> Option<Role> {
-        match s.trim().to_lowercase().as_str() {
+        match s.trim().nfc().collect::<String>().to_lowercase().as_str() {
             "inbox" | "boîte de réception" | "reception" | "réception" | "bandeja de entrada" | "entrada" => {
                 Some(Role::Inbox)
             }
@@ -87,12 +88,15 @@ impl Role {
     /// The role and how sure the guess is: 2 for a name Mail or a provider
     /// gives that mailbox ("Sent Messages", "[Gmail]/Corbeille"), 1 for a
     /// name holding such a word ("Old Spam"), 0 for none. Whole words only:
-    /// "Présentations" is not a sent mailbox, nor "Essentiel".
+    /// "Présentations" is not a sent mailbox, nor "Essentiel". Accents
+    /// count however they are written (Mail's database may keep "é" as "e"
+    /// and a combining accent). An inbox is at the top of its account: a
+    /// "Boîte de réception" inside a folder is a copy kept there.
     pub fn detect_scored(path: &[String]) -> (Role, u8) {
         let Some(last) = path.last() else { return (Role::Other, 0) };
-        let n = last.trim().to_lowercase();
-        if (path.len() == 1 && n == "inbox") || INBOX_NAMES.contains(&n.as_str()) {
-            return (Role::Inbox, 2);
+        let n = last.trim().nfc().collect::<String>().to_lowercase();
+        if INBOX_NAMES.contains(&n.as_str()) || n == "inbox" {
+            return if path.len() == 1 { (Role::Inbox, 2) } else { (Role::Other, 0) };
         }
         // Gmail's All Mail, in its languages: only under "[Gmail]". A label of
         // the user's named "Todos" is no archive.
@@ -570,6 +574,19 @@ pub fn gmail_folder(m: &Mailbox) -> bool {
     !m.local && m.path.first().is_some_and(|p| p == "[Gmail]" || p == "[Google Mail]")
 }
 
+/// A mailbox or account name as compared with what the user typed: case,
+/// accents ("Envoyes" for "Envoyés") and how they are written ignored.
+pub fn name_key(s: &str) -> String {
+    crate::norm::for_match(s.trim())
+}
+
+/// Where an account keeps every mailbox inside INBOX (La Poste, Orange),
+/// Mail shows them from its path prefix on: the server's
+/// "INBOX/Archives/2009" is "Archives/2009" in Mail.
+fn path_in_mail(m: &Mailbox) -> Option<String> {
+    (m.path.len() >= 2 && m.path[0].eq_ignore_ascii_case("INBOX")).then(|| m.path[1..].join("/"))
+}
+
 /// Is mailbox `m` in this account? By id when there is one ("On My Mac"
 /// has none), never by a name two accounts may share.
 pub fn same_account(m: &Mailbox, account_id: &str, account: &str) -> bool {
@@ -616,7 +633,10 @@ fn looks_like_uuid(s: &str) -> bool {
 pub fn parse_mailbox_url(id: i64, url: &str, accounts: &HashMap<String, (String, Option<String>)>) -> Mailbox {
     let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
     let (netloc, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let segments: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(percent_decode).collect();
+    // Accents composed: Mail's database may spell "envoyés" with a combining
+    // accent, which neither role names nor what the user types would match.
+    let segments: Vec<String> =
+        path.split('/').filter(|s| !s.is_empty()).map(|s| percent_decode(s).nfc().collect()).collect();
     let local = scheme == "local" || netloc.is_empty();
     let account_id = if looks_like_uuid(netloc) { netloc.to_uppercase() } else { String::new() };
     let account = if local {
@@ -701,6 +721,7 @@ impl Store {
 
     /// The mailbox at this place of an account, if Mail lists it.
     pub fn mailbox_at(&self, account_id: &str, account: &str, path: &[String]) -> Option<Mailbox> {
+        let path: Vec<String> = path.iter().map(|p| p.nfc().collect()).collect();
         self.mailboxes().values().find(|m| same_account(m, account_id, account) && m.path == path).cloned()
     }
 
@@ -993,25 +1014,51 @@ impl Store {
     /// Resolve a mailbox name, path or role alias to mailbox ids.
     /// Matching is case-insensitive on the full path or the leaf name.
     pub fn resolve_mailboxes(&self, spec: &str, account: Option<&str>) -> Vec<i64> {
-        let spec = spec.trim();
         let role = Role::from_alias(spec);
-        let lower = spec.to_lowercase();
-        let acct = account.map(|a| a.trim().to_lowercase()).filter(|a| !a.is_empty());
+        let want = name_key(spec);
+        let acct = account.map(name_key).filter(|a| !a.is_empty());
         let mut out: Vec<i64> = self
             .mailboxes()
             .values()
             .filter(|m| {
-                acct.as_ref()
-                    .is_none_or(|a| m.account.to_lowercase().contains(a.as_str()) || m.account_id.to_lowercase() == *a)
+                acct.as_ref().is_none_or(|a| {
+                    name_key(&m.account).contains(a.as_str()) || m.account_id.eq_ignore_ascii_case(a.as_str())
+                })
             })
             .filter(|m| {
                 role.is_some_and(|r| m.role == r)
-                    || m.display_path().to_lowercase() == lower
-                    || m.name.to_lowercase() == lower
+                    || name_key(&m.display_path()) == want
+                    || name_key(&m.name) == want
+                    || path_in_mail(m).is_some_and(|p| name_key(&p) == want)
             })
             .map(|m| m.id)
             .collect();
         out.sort_unstable();
+        out
+    }
+
+    /// These mailboxes and the mailboxes inside them, for searches: a folder
+    /// is searched with its folders ("Archives" with "Archives/2009"). Not
+    /// an inbox's: where an account keeps every mailbox inside INBOX (La
+    /// Poste, Orange), those are its sent mail, drafts and trash.
+    pub fn with_submailboxes(&self, ids: &[i64]) -> Vec<i64> {
+        let mailboxes = self.mailboxes();
+        let mut out = ids.to_vec();
+        for top in ids.iter().filter_map(|id| mailboxes.get(id)).filter(|m| m.role != Role::Inbox) {
+            out.extend(
+                mailboxes
+                    .values()
+                    .filter(|m| {
+                        m.local == top.local
+                            && same_account(m, &top.account_id, &top.account)
+                            && m.path.len() > top.path.len()
+                            && m.path.starts_with(&top.path)
+                    })
+                    .map(|m| m.id),
+            );
+        }
+        out.sort_unstable();
+        out.dedup();
         out
     }
 
@@ -1114,6 +1161,13 @@ mod tests {
         let m = parse_mailbox_url(4, "imap://62653857-BF50-4534-AB81-8F72E0FCEDF5/Sent%20Messages", &acc);
         assert_eq!(m.role, Role::Sent);
         assert_eq!(m.name, "Sent Messages");
+        // "envoyés" written with a combining accent, as Mail's database may.
+        let m = parse_mailbox_url(
+            5,
+            "imap://62653857-BF50-4534-AB81-8F72E0FCEDF5/%5BGmail%5D/Messages%20envoye%CC%81s",
+            &acc,
+        );
+        assert_eq!((m.name.as_str(), m.role), ("Messages envoyés", Role::Sent));
     }
 
     #[test]
@@ -1142,11 +1196,26 @@ mod tests {
             ("Itens Enviados", Role::Sent),
             ("Concepten", Role::Drafts),
             ("Rascunhos", Role::Drafts),
-            ("Postvak IN", Role::Inbox),
-            ("Caixa de entrada", Role::Inbox),
         ] {
             assert_eq!(Role::detect(&["Compte".into(), name.into()]), role, "{name}");
         }
+        // An inbox is at the top of its account; inside a folder, a copy.
+        for name in ["Postvak IN", "Caixa de entrada", "Boîte de réception", "INBOX"] {
+            assert_eq!(r(name), Role::Inbox, "{name}");
+            assert_eq!(
+                Role::detect(&["Archives locales".into(), "Laposte".into(), name.into()]),
+                Role::Other,
+                "{name}"
+            );
+        }
+        // Accents however Mail's database writes them: "é" as "e" and a
+        // combining accent.
+        let decomposed = |s: &str| s.nfd().collect::<String>();
+        assert_eq!(Role::detect(&["[Gmail]".into(), decomposed("Messages envoyés")]), Role::Sent);
+        assert_eq!(r(&decomposed("Éléments supprimés")), Role::Trash);
+        assert_eq!(r(&decomposed("Courrier indésirable")), Role::Junk);
+        assert_eq!(r(&decomposed("Boîte de réception")), Role::Inbox);
+        assert_eq!(Role::from_alias(&decomposed("Envoyés")), Some(Role::Sent));
         assert_eq!(Role::detect(&["[Gmail]".into(), "Alle Nachrichten".into()]), Role::Archive);
         assert_eq!(Role::detect(&["[Gmail]".into(), "Todos".into()]), Role::Archive);
         assert_eq!(Role::detect(&["Todos".into()]), Role::Other, "a label of the user's");
