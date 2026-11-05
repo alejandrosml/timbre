@@ -1249,4 +1249,9 @@ fn mailboxes_are_found_as_mail_shows_them() {
     // from tests) instead of failing to find the folder.
     let e = move_mail(&env, vec![1234], "Archives/2009").unwrap_err();
     assert!(e.contains(crate::mailapp::unavailable().unwrap()), "{e}");
+    // A mailbox is made where Mail shows the account's mailboxes: inside
+    // INBOX at La Poste, at the top at Gmail.
+    let loc = |id: &str| crate::mailapp::Loc { account_id: id.into(), account: id.into(), path: vec![], local: false };
+    assert_eq!(crate::mailboxes::mail_prefix(&env.ctx.store, &loc(LAPOSTE)), Some(vec!["INBOX".to_string()]));
+    assert_eq!(crate::mailboxes::mail_prefix(&env.ctx.store, &loc(GMAIL)), Some(vec![]));
 }

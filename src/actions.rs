@@ -633,16 +633,23 @@ pub async fn move_mail(ctx: &Ctx, p: &MoveParams) -> Result<BatchResult, String>
         } else {
             match mailapp::make_mailbox(&loc.account_id, &name, MAKE_TIMEOUT).await {
                 Ok(()) => mailapp::run(mailapp::FIND_MAILBOX, &json!({"loc": loc}), FIND_TIMEOUT).await.map(|_| ()),
-                Err(e) => Err(e),
+                // Mail refuses some accounts (La Poste): made on the server
+                // instead, when Timbre has the password already.
+                Err(e) => match crate::mailboxes::make_if_password_known(ctx, &loc, &name).await {
+                    Ok(()) => mailapp::run(mailapp::FIND_MAILBOX, &json!({"loc": loc}), FIND_TIMEOUT).await.map(|_| ()),
+                    Err(_) => Err(e),
+                },
             }
         };
         if let Err(e) = made {
             let why = format!(
-                "Mail could not make an archive mailbox for '{}' ({}). Nothing was moved. Make a mailbox \
-                 named Archive for this account once, on the provider's website or in Mail (Mailbox > New \
-                 Mailbox), and archiving will use it.",
+                "Mail could not make an archive mailbox for '{}' ({}). Nothing was moved. Call create_mailbox \
+                 with mailbox \"{}\" and account \"{}\" (the first time, a window on the Mac asks the user for \
+                 the account's password, once), then archive again.",
                 loc.account,
-                e.to_string().trim_end_matches('.')
+                e.to_string().trim_end_matches('.'),
+                name,
+                loc.account
             );
             items.retain(|(id, .., to)| {
                 let keep = *to != loc;

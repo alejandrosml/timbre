@@ -259,6 +259,142 @@ pub async fn make_mailbox(account_id: &str, name: &str, timeout: Duration) -> Re
     bail!("{}", script_error(&String::from_utf8_lossy(&out.stderr)))
 }
 
+/// How Mail reaches an account's server: what Timbre needs to make and
+/// delete mailboxes there itself (never the password, which Mail keeps).
+pub const ACCOUNT_SERVER: &str = r#"
+function main(i) {
+  const a = account(i.loc);
+  if (!a) throw new Error('On My Mac has no server');
+  const g = (f) => { try { const v = f(); return v === undefined ? null : v; } catch (e) { if (fatal(e)) throw e; return null; } };
+  return {name: g(() => a.name()), type: g(() => String(a.accountType())), server: g(() => a.serverName()),
+          port: g(() => a.port()), ssl: g(() => a.usesSsl()), user: g(() => a.userName())};
+}
+"#;
+
+/// Ask Mail to synchronize an account with its server, as Mailbox >
+/// Synchronize does: it reads the account's list of mailboxes again, after
+/// one was made or deleted there. Mail goes on in the background past the
+/// timeout. The account id is an argument, never script.
+const SYNC_ACCOUNT: &str = r#"
+on run argv
+	with timeout of 20 seconds
+		tell application "Mail" to synchronize with account id (item 1 of argv)
+	end timeout
+	return "ok"
+end run
+"#;
+
+/// Ask Mail to synchronize an account (see [`SYNC_ACCOUNT`]).
+pub async fn sync_account(account_id: &str) -> Result<()> {
+    if let Some(why) = unavailable() {
+        bail!("{why}");
+    }
+    let child = tokio::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(SYNC_ACCOUNT)
+        .arg(account_id)
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| anyhow!("could not start osascript: {e}"))?;
+    let out = match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await {
+        Ok(r) => r?,
+        Err(_) => return Ok(()),
+    };
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // -1712: Mail took longer than the timeout and goes on by itself.
+    if out.status.success() || stderr.contains("-1712") {
+        return Ok(());
+    }
+    bail!("{}", script_error(&stderr))
+}
+
+/// A window asking for a password; with a button opening the page where
+/// the provider makes app passwords, when it takes only those. Gives up
+/// after ten minutes. The text and labels are arguments, never script.
+const ASK_PASSWORD: &str = r#"
+on run argv
+	set {msg, okText, cancelText, linkText, linkURL} to {item 1 of argv, item 2 of argv, item 3 of argv, item 4 of argv, item 5 of argv}
+	if linkText is "" then
+		set theButtons to {cancelText, okText}
+	else
+		set theButtons to {cancelText, linkText, okText}
+	end if
+	repeat
+		tell me to activate
+		try
+			set r to display dialog msg with title "Timbre" default answer "" with hidden answer buttons theButtons default button okText cancel button cancelText with icon note giving up after 600
+		on error number -128
+			return "cancel"
+		end try
+		if gave up of r then return "cancel"
+		if button returned of r is okText then return "ok:" & (text returned of r)
+		open location linkURL
+	end repeat
+end run
+"#;
+
+/// Ask the user for a password in a window of Timbre's: `Some` with what
+/// they typed, `None` if they closed it. What is typed goes from the window
+/// to Timbre on a pipe, and nowhere else.
+pub async fn ask_password(text: &str, ok: &str, cancel: &str, link: Option<(&str, &str)>) -> Result<Option<String>> {
+    if let Some(why) = unavailable() {
+        bail!("{why}");
+    }
+    let (link_text, link_url) = link.unwrap_or(("", ""));
+    let child = tokio::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(ASK_PASSWORD)
+        .args([text, ok, cancel, link_text, link_url])
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| anyhow!("could not start osascript: {e}"))?;
+    let out = match tokio::time::timeout(Duration::from_secs(660), child.wait_with_output()).await {
+        Ok(r) => r?,
+        Err(_) => return Ok(None),
+    };
+    let said = String::from_utf8(out.stdout).map_err(|_| anyhow!("the window's answer was not text"))?;
+    let said = said.strip_suffix('\n').unwrap_or(&said);
+    if let Some(typed) = said.strip_prefix("ok:") {
+        return Ok(Some(typed.to_string()));
+    }
+    if said == "cancel" {
+        return Ok(None);
+    }
+    bail!("{}", script_error(&String::from_utf8_lossy(&out.stderr)))
+}
+
+/// The user's Mac speaks French: Timbre's windows do too.
+pub fn user_reads_french() -> bool {
+    static FRENCH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FRENCH.get_or_init(|| {
+        if unavailable().is_some() {
+            return false;
+        }
+        // The first of the preferred languages: ( "fr-FR", "en-FR" )
+        std::process::Command::new("/usr/bin/defaults")
+            .args(["read", "-g", "AppleLanguages"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                let text = String::from_utf8_lossy(&o.stdout).into_owned();
+                text.split(|c: char| c == '"' || c == ',' || c == '(' || c.is_whitespace())
+                    .find(|w| !w.is_empty())
+                    .map(|w| w.to_ascii_lowercase().starts_with("fr"))
+            })
+            .unwrap_or(false)
+    })
+}
+
 /// What an AppleScript run by osascript failed with, said as for JXA:
 /// "12:345: execution error: Mail got an error: … (-10000)".
 fn script_error(stderr: &str) -> String {
@@ -537,6 +673,7 @@ mod tests {
             ("MOVE_BACK", MOVE_BACK),
             ("SELECTION", SELECTION),
             ("SEND_OUTGOING", SEND_OUTGOING),
+            ("ACCOUNT_SERVER", ACCOUNT_SERVER),
         ] {
             let Some(out) = node("parse", &["--check"], &format!("{PRELUDE}\n{script}")) else { return };
             assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));

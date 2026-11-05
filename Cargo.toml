@@ -1,6 +1,6 @@
 [package]
 name = "timbre-mail"
-version = "0.5.7"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.98"
 description = "Timbre — the connector for Apple Mail and Claude: instant full-text search, safe reading and filing over MCP."
@@ -42,10 +42,16 @@ html5ever = "0.40"
 encoding_rs = "0.8"
 ego-tree = "0.11"
 unicode-normalization = "0.1"
+# TLS for talking to the mail server itself (IMAP), certificates checked by
+# the system's own trust settings.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 embed_plist = "1"
 libc = "0.2"
+# The keychain, where the password for the mail server is kept.
+security-framework = "3"
 
 [lints.rust]
 unsafe_code = "deny" # the few libc calls are allowed where they are made

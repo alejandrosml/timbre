@@ -21,6 +21,7 @@ use crate::app::{
     self, AttachmentParams, AttachmentText, Ctx, MailView, MailboxesView, ReadParams, SavedAttachment, StatusView,
     ThreadParams, ThreadView,
 };
+use crate::mailboxes::{self, CreateMailboxParams, DeleteMailboxParams, MailboxDone};
 use crate::search::{self, SearchParams, SearchResult};
 
 const INSTRUCTIONS: &str = "Timbre gives you the user's email: every account set up in Apple Mail on this Mac \
@@ -51,8 +52,17 @@ pub fn instructions(cfg: &crate::config::Config) -> String {
     text
 }
 
-const WRITE_TOOLS: &[&str] =
-    &["save_attachment", "create_draft", "mark_mail", "move_mail", "undo_move", "prepare_send", "confirm_send"];
+const WRITE_TOOLS: &[&str] = &[
+    "save_attachment",
+    "create_draft",
+    "mark_mail",
+    "move_mail",
+    "undo_move",
+    "create_mailbox",
+    "delete_mailbox",
+    "prepare_send",
+    "confirm_send",
+];
 
 #[derive(Clone)]
 pub struct Timbre {
@@ -310,6 +320,42 @@ impl Timbre {
     )]
     async fn undo_move(&self, Parameters(p): Parameters<UndoParams>) -> Result<Json<BatchResult>, String> {
         actions::undo(&self.ctx, &p).await.map(Json)
+    }
+
+    #[tool(
+        name = "create_mailbox",
+        description = "Make a mailbox (a folder, or a Gmail label) in an account, on its mail server; Mail then shows it. Mail lets no app do this, so Timbre does it on the server itself: the first time in an account, a window on the Mac asks the user for that account's password, once (kept in the keychain; you never see it). Give the path as Mail shows it: \"Projects/2026\" makes 2026 inside Projects.",
+        annotations(
+            title = "Make a mailbox",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn create_mailbox(
+        &self,
+        Parameters(p): Parameters<CreateMailboxParams>,
+    ) -> Result<Json<MailboxDone>, String> {
+        mailboxes::create_mailbox(&self.ctx, &p).await.map(Json)
+    }
+
+    #[tool(
+        name = "delete_mailbox",
+        description = "Delete an empty mailbox (a folder, or a Gmail label) on its mail server, without Mail's confirmation; Mail then drops it. Mail lets no app do this, so Timbre does it on the server itself: the first time in an account, a window on the Mac asks the user for that account's password, once (kept in the keychain; you never see it). Only a mailbox the server says is empty is deleted: move its messages out first with move_mail, which can be undone. Never an account's inbox, sent mail, drafts, trash or junk, nor the provider's own folders.",
+        annotations(
+            title = "Delete an empty mailbox",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn delete_mailbox(
+        &self,
+        Parameters(p): Parameters<DeleteMailboxParams>,
+    ) -> Result<Json<MailboxDone>, String> {
+        mailboxes::delete_mailbox(&self.ctx, &p).await.map(Json)
     }
 
     #[tool(

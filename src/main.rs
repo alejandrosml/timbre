@@ -19,9 +19,12 @@ mod extract;
 #[cfg(any(test, debug_assertions))]
 mod fixture;
 mod html;
+mod imap;
 mod index;
+mod keychain;
 mod launcher;
 mod mailapp;
+mod mailboxes;
 mod mime;
 mod norm;
 mod quote;

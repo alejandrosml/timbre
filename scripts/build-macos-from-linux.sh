@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Cross-compile the universal macOS binary from Linux with cargo-zigbuild.
 # Release builds are made on macOS in CI; this is for development only.
-# The only Apple framework Timbre links is CoreFoundation (through chrono's
-# time-zone lookup); a text stub lists the few symbols needed.
+# Timbre links two Apple frameworks: CoreFoundation (chrono's time-zone
+# lookup) and Security (the keychain, and checking mail servers'
+# certificates); text stubs list the few symbols needed.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 STUBS="$PWD/build/macos-stubs"

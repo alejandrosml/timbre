@@ -52,6 +52,8 @@ ro = {t["name"] for t in tools if (t.get("annotations") or {}).get("readOnlyHint
 print("read-only:", sorted(ro))
 assert {"search_mail", "read_mail", "get_thread", "list_mailboxes", "read_attachment", "mail_status"} <= ro
 assert "move_mail" not in ro and tools[names.index("move_mail")]["annotations"]["destructiveHint"] is True
+assert "delete_mailbox" not in ro and tools[names.index("delete_mailbox")]["annotations"]["destructiveHint"] is True
+assert "create_mailbox" not in ro and tools[names.index("create_mailbox")]["annotations"]["destructiveHint"] is False
 size = len(json.dumps(tools))
 print(f"tools/list payload: {size} chars (~{size//4} tokens)")
 

@@ -6,6 +6,10 @@ current-version: 1971
 compatibility-version: 150
 exports:
   - targets:     [ x86_64-macos, arm64-macos ]
-    symbols:     [ _CFRelease, _CFStringGetBytes, _CFStringGetCStringPtr, _CFStringGetLength,
-                   _CFTimeZoneCopySystem, _CFTimeZoneGetName, _CFTimeZoneResetSystem ]
+    symbols:     [ _CFArrayCreate, _CFDataCreate, _CFDataGetBytePtr, _CFDataGetLength, _CFDataGetTypeID,
+                   _CFDateCreate, _CFDictionaryCreate, _CFErrorCopyDescription, _CFErrorGetCode, _CFGetTypeID,
+                   _CFRelease, _CFRetain, _CFStringCreateWithBytes, _CFStringGetBytes, _CFStringGetCStringPtr,
+                   _CFStringGetLength, _CFTimeZoneCopySystem, _CFTimeZoneGetName, _CFTimeZoneResetSystem,
+                   _kCFAbsoluteTimeIntervalSince1970, _kCFAllocatorDefault, _kCFBooleanTrue,
+                   _kCFTypeArrayCallBacks, _kCFTypeDictionaryKeyCallBacks, _kCFTypeDictionaryValueCallBacks ]
 ...
