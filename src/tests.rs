@@ -1446,7 +1446,9 @@ fn leftover_rows_of_deleted_mailboxes_are_left_out() {
     assert!(!leftovers.contains(&named("Vide")), "empty, but Mail has it");
     assert!(!leftovers.contains(&named("Perso")), "a label points to it");
     assert!(!store.mailboxes().values().any(|m| m.account_id == LAPOSTE && leftovers.contains(&m.id)));
-    assert!(store.resolve_mailboxes("Timbre essai", None).is_empty());
+    // Named alone, such a row is still found (Mail may not have made a new
+    // mailbox's folder yet): Mail says, when acting, whether it is there.
+    assert_eq!(store.resolve_mailboxes("Timbre essai", None), vec![named("Timbre essai")]);
     assert_eq!(store.role_mailbox_for_account(GMAIL, GMAIL, Role::Trash).map(|m| m.id), Some(900));
     let list = app::list_mailboxes(&env.ctx).unwrap();
     let gmail: Vec<&str> = list
@@ -1524,7 +1526,16 @@ fn ids_given_twice_are_acted_on_once() {
 fn the_accounts_own_mailboxes_keep_their_roles() {
     let env = setup_with("ownroles", false, |cfg| {
         gmail_and_laposte(cfg);
+        // Named alike by another app, made after; or before Mail's own (as
+        // the rows of a Mac's iCloud may come in any order).
         add_mailboxes(cfg, fixture::ACCOUNT, &["Trash", "Spam", "Sent", "Archives"]);
+        envelope_index(cfg)
+            .execute_batch(&format!(
+                "UPDATE mailboxes SET ROWID = 9001 WHERE url = 'imap://{a}/Deleted%20Messages';
+                 UPDATE mailboxes SET ROWID = 9002 WHERE url = 'imap://{a}/Sent%20Messages';",
+                a = fixture::ACCOUNT
+            ))
+            .unwrap();
         add_mailboxes(cfg, LAPOSTE, &["Archive", "INBOX/Archive"]);
     });
     let store = &env.ctx.store;
@@ -1584,9 +1595,17 @@ fn a_mailbox_made_again_is_found_at_once() {
     let folder = store.version_dir.join(fixture::ACCOUNT).join("Clients.mbox");
     std::fs::remove_dir_all(&folder).unwrap();
     store.refresh_leftovers_now(&env.ctx.db());
-    assert!(store.resolve_mailboxes("Clients", None).is_empty());
+    let clients = || store.mailbox(store.resolve_mailboxes("Clients", None)[0]).unwrap();
+    assert!(store.is_leftover(&clients()));
     std::fs::create_dir_all(&folder).unwrap();
-    assert_eq!(store.resolve_mailboxes("Clients", None).len(), 1);
+    assert!(!store.is_leftover(&clients()));
+    // Mail saying it shows one whose folder it has not made: listed.
+    std::fs::remove_dir_all(&folder).unwrap();
+    assert!(store.is_leftover(&clients()));
+    store.note_mail_said(clients().id, true);
+    assert!(!store.is_leftover(&clients()));
+    let list = app::list_mailboxes(&env.ctx).unwrap();
+    assert!(list.accounts.iter().flat_map(|a| &a.mailboxes).any(|m| m.name == "Clients"));
 }
 
 /// Without a token, undo takes this Timbre's latest move, or one made
@@ -1683,4 +1702,24 @@ fn a_thread_warns_as_reading_does() {
             assert_eq!(m.hidden_text_removed, read.hidden_text_removed, "message {}", m.id);
         }
     }
+}
+
+/// A mailbox Timbre made a moment ago, before Mail's database lists it, is
+/// listed and mail can be filed into it.
+#[test]
+fn a_mailbox_just_made_can_be_filed_into() {
+    let env = setup_with("justmade", false, gmail_and_laposte);
+    let loc = crate::mailapp::Loc {
+        account_id: LAPOSTE.into(),
+        account: LAPOSTE.into(),
+        path: vec!["INBOX".into(), "Tout neuf".into()],
+        local: false,
+    };
+    env.ctx.store.note_made(loc);
+    let list = app::list_mailboxes(&env.ctx).unwrap();
+    let lp = list.accounts.iter().find(|a| a.account == LAPOSTE).unwrap();
+    assert!(lp.mailboxes.iter().any(|m| m.name == "INBOX/Tout neuf"), "{:?}", lp.mailboxes);
+    // Planned and handed to Mail (which cannot run here), not "no mailbox".
+    let e = move_mail(&env, vec![1234], "Tout neuf").unwrap_err();
+    assert!(e.contains("only available on macOS"), "{e}");
 }

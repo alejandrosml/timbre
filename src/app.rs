@@ -409,6 +409,42 @@ pub struct MailboxesView {
     pub accounts: Vec<AccountView>,
 }
 
+/// Rows that look left over (no folder on the Mac), for Mail to say whether
+/// it shows them: Mail may make a new mailbox's folder later.
+pub fn leftovers_to_ask(ctx: &Ctx) -> Vec<(i64, crate::mailapp::Loc, Option<bool>)> {
+    {
+        let conn = ctx.db();
+        let _ = ctx.store.reload_mailboxes(&conn);
+        ctx.store.refresh_leftovers_now(&conn);
+    }
+    ctx.store
+        .leftovers_to_ask()
+        .iter()
+        .map(|m| {
+            let loc = crate::mailapp::Loc::from(m);
+            let prefixed = crate::mailboxes::prefixed(&ctx.store, &loc);
+            (m.id, loc, prefixed)
+        })
+        .collect()
+}
+
+/// Ask Mail about them; its answer holds a few minutes. Mail closed or
+/// unable to answer: the folders decide.
+pub async fn ask_mail_about(ctx: &Ctx, asks: Vec<(i64, crate::mailapp::Loc, Option<bool>)>) {
+    let items: Vec<serde_json::Value> =
+        asks.iter().map(|(id, loc, p)| serde_json::json!({"id": id, "loc": loc, "prefixed": p})).collect();
+    let input = serde_json::json!({ "items": items });
+    let Ok(v) = crate::mailapp::run(crate::mailapp::MAILBOXES_SHOWN, &input, Duration::from_secs(20)).await else {
+        return;
+    };
+    let Some(shown) = v.get("shown").and_then(serde_json::Value::as_object) else { return };
+    for (id, ..) in &asks {
+        if let Some(b) = shown.get(&id.to_string()).and_then(serde_json::Value::as_bool) {
+            ctx.store.note_mail_said(*id, b);
+        }
+    }
+}
+
 pub fn list_mailboxes(ctx: &Ctx) -> Result<MailboxesView, String> {
     let conn = ctx.db();
     ctx.store.reload_mailboxes(&conn).map_err(|e| e.to_string())?;
@@ -445,6 +481,17 @@ pub fn list_mailboxes(ctx: &Ctx) -> Result<MailboxesView, String> {
             total,
             unread,
         });
+    }
+    // Made by Timbre a moment ago, before Mail's database lists them.
+    for loc in ctx.store.made_lately() {
+        let listed = mailboxes
+            .values()
+            .any(|m| crate::store::same_account(m, &loc.account_id, &loc.account) && m.path == loc.path);
+        if !listed {
+            let list = by_account.entry(loc.account.clone()).or_default();
+            list.push(MailboxView { name: loc.path.join("/"), role: None, total: 0, unread: 0 });
+            list.sort_by_key(|v| (v.role.as_deref() != Some("inbox"), v.name.to_lowercase()));
+        }
     }
     Ok(MailboxesView {
         accounts: by_account.into_iter().map(|(account, mailboxes)| AccountView { account, mailboxes }).collect(),

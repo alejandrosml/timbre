@@ -553,8 +553,35 @@ fn destination(ctx: &Ctx, src: &Mailbox, to: &str, account: Option<&str>) -> Res
     match (same.len(), all.len()) {
         (1, _) => Ok(found(same[0].clone())),
         (0, 1) => Ok(found(all[0].clone())),
-        (0, 0) => Err(format!("No mailbox named '{to}'. Call list_mailboxes.")),
+        (0, 0) => {
+            // Made by Timbre a moment ago (create_mailbox), before Mail's
+            // database lists it: Mail finds it by its path.
+            let account_id = match account.map(|a| ctx.store.accounts_named(a)) {
+                Some(named) if named.len() == 1 => named[0].0.clone(),
+                Some(_) => String::new(),
+                None => src.account_id.clone(),
+            };
+            ctx.store
+                .made_lately_named(to, &account_id)
+                .map(|loc| found(mailbox_at(&loc)))
+                .ok_or_else(|| format!("No mailbox named '{to}'. Call list_mailboxes."))
+        }
         _ => Err(format!("'{to}' matches several mailboxes: give 'account' or the full path.")),
+    }
+}
+
+/// A mailbox known by its place alone (Mail's database does not list it yet).
+fn mailbox_at(loc: &Loc) -> Mailbox {
+    Mailbox {
+        id: -2,
+        url: String::new(),
+        account_id: loc.account_id.clone(),
+        account: loc.account.clone(),
+        name: loc.path.last().cloned().unwrap_or_default(),
+        path: loc.path.clone(),
+        role: Role::Other,
+        role_strength: 0,
+        local: loc.local,
     }
 }
 

@@ -351,6 +351,16 @@ pub struct Schema {
     pub labels: Option<String>,
 }
 
+/// The names Mail gives the mailboxes of an account's roles (iCloud's are
+/// so named on the server too).
+const MAILS_OWN: &[&str] = &["deleted messages", "sent messages", "junk", "drafts", "archive"];
+
+/// How long a mailbox Timbre made is known so.
+const MADE_KEPT: Duration = Duration::from_secs(30 * 60);
+
+/// How long what Mail said of a row looking left over holds.
+const MAIL_SAID_FOR: Duration = Duration::from_secs(600);
+
 /// How often Timbre looks again for rows of mailboxes Mail no longer has.
 const LEFTOVERS_EVERY: Duration = Duration::from_secs(60);
 
@@ -367,6 +377,11 @@ pub struct Store {
     /// Rows Mail's database keeps for mailboxes Mail no longer has, and when
     /// they were last looked for.
     leftovers: RwLock<(Option<Instant>, Arc<HashSet<i64>>)>,
+    /// What Mail answered, asked whether it shows such a row's mailbox.
+    shown_by_mail: RwLock<HashMap<i64, (bool, Instant)>>,
+    /// Mailboxes Timbre made lately: Mail's database may list one only
+    /// later, and mail is filed into it meanwhile.
+    made: Mutex<Vec<(crate::mailapp::Loc, Instant)>>,
     /// When a mailbox nobody knew made the list be read again.
     reread: Mutex<Option<Instant>>,
 }
@@ -759,6 +774,8 @@ impl Store {
             account_addresses,
             mailboxes: RwLock::new(Arc::new(HashMap::new())),
             leftovers: RwLock::new((None, Arc::new(HashSet::new()))),
+            shown_by_mail: RwLock::new(HashMap::new()),
+            made: Mutex::new(vec![]),
             reread: Mutex::new(None),
         };
         store.reload_mailboxes(&conn)?;
@@ -813,10 +830,60 @@ impl Store {
     }
 
     /// Whether this mailbox is such a row now: found so at the last look,
-    /// and its folder still missing (a mailbox made again under its old row
-    /// is Mail's again at once).
+    /// its folder still missing (a mailbox made again under its old row is
+    /// Mail's again at once), and not one Mail said it shows (Mail may make
+    /// a new mailbox's folder later).
     pub fn is_leftover(&self, m: &Mailbox) -> bool {
-        self.leftovers().contains(&m.id) && !folder_present(&self.version_dir, m)
+        self.leftovers().contains(&m.id) && !folder_present(&self.version_dir, m) && self.mail_said(m.id) != Some(true)
+    }
+
+    /// What Mail said of a row looking left over, while it holds.
+    fn mail_said(&self, id: i64) -> Option<bool> {
+        let said = self.shown_by_mail.read().unwrap_or_else(|e| e.into_inner());
+        said.get(&id).filter(|(_, at)| at.elapsed() < MAIL_SAID_FOR).map(|(shown, _)| *shown)
+    }
+
+    /// Rows that look left over and Mail has not been asked about lately.
+    pub fn leftovers_to_ask(&self) -> Vec<Mailbox> {
+        let mailboxes = self.mailboxes();
+        self.leftovers()
+            .iter()
+            .filter_map(|id| mailboxes.get(id))
+            .filter(|m| !folder_present(&self.version_dir, m) && self.mail_said(m.id).is_none())
+            .cloned()
+            .collect()
+    }
+
+    /// A mailbox Timbre has just made.
+    pub fn note_made(&self, loc: crate::mailapp::Loc) {
+        let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
+        made.retain(|(l, at)| at.elapsed() < MADE_KEPT && *l != loc);
+        made.push((loc, Instant::now()));
+    }
+
+    /// The mailboxes Timbre made lately.
+    pub fn made_lately(&self) -> Vec<crate::mailapp::Loc> {
+        let made = self.made.lock().unwrap_or_else(|e| e.into_inner());
+        made.iter().filter(|(_, at)| at.elapsed() < MADE_KEPT).map(|(l, _)| l.clone()).collect()
+    }
+
+    /// One Timbre made lately in this account, named `spec` as Mail shows it
+    /// or by its whole path.
+    pub fn made_lately_named(&self, spec: &str, account_id: &str) -> Option<crate::mailapp::Loc> {
+        let want = name_key(spec.trim().trim_matches('/'));
+        self.made_lately().into_iter().find(|l| {
+            !account_id.is_empty()
+                && l.account_id == account_id
+                && (name_key(&l.path.join("/")) == want
+                    || (l.path.len() >= 2
+                        && l.path[0].eq_ignore_ascii_case("INBOX")
+                        && name_key(&l.path[1..].join("/")) == want))
+        })
+    }
+
+    /// Keep what Mail said: whether it shows this mailbox.
+    pub fn note_mail_said(&self, id: i64, shown: bool) {
+        self.shown_by_mail.write().unwrap_or_else(|e| e.into_inner()).insert(id, (shown, Instant::now()));
     }
 
     fn find_leftovers(&self, conn: &Connection, map: &HashMap<i64, Mailbox>) -> HashSet<i64> {
@@ -1205,7 +1272,6 @@ impl Store {
         let candidates: Vec<&Mailbox> = mailboxes
             .values()
             .filter(|m| accounts.as_ref().is_none_or(|a| a.iter().any(|(id, n)| same_account(m, id, n))))
-            .filter(|m| !self.is_leftover(m))
             .collect();
         let tiers: [&dyn Fn(&Mailbox) -> bool; 3] = [
             &|m| name_key(&m.display_path()) == want,
@@ -1216,7 +1282,12 @@ impl Store {
             &|m| name_key(&m.name) == want,
         ];
         for tier in tiers {
-            let mut out: Vec<i64> = candidates.iter().filter(|m| tier(m)).map(|m| m.id).collect();
+            let hits: Vec<&&Mailbox> = candidates.iter().filter(|m| tier(m)).collect();
+            // A row Mail keeps for a mailbox it no longer has gives way to one
+            // it has; alone, it is taken (Mail may not have made a new
+            // mailbox's folder yet), and Mail says if it is not there.
+            let live: Vec<&&Mailbox> = hits.iter().copied().filter(|m| !self.is_leftover(m)).collect();
+            let mut out: Vec<i64> = if live.is_empty() { hits } else { live }.iter().map(|m| m.id).collect();
             if !out.is_empty() {
                 out.sort_unstable();
                 return out;
@@ -1294,9 +1365,9 @@ impl Store {
     /// it ("Archive", "[Gmail]/Corbeille"): never a folder of the user's
     /// that merely holds the word ("Archives clients 2019"). A row Mail
     /// keeps for a mailbox it no longer has comes last; then Gmail's own,
-    /// the shallowest, and the oldest row: the account's own mailbox, made
-    /// with the account, before any folder of the user's named the same
-    /// ("Trash" beside iCloud's "Deleted Messages").
+    /// those named as Mail names an account's own ("Deleted Messages" before
+    /// a "Trash" another app made beside it at iCloud), the shallowest, and
+    /// the oldest row: the account's own, made with the account.
     pub fn role_mailbox_for_account(&self, account_id: &str, account: &str, role: Role) -> Option<Mailbox> {
         let mailboxes = self.mailboxes();
         let mut candidates: Vec<&Mailbox> = mailboxes
@@ -1304,7 +1375,8 @@ impl Store {
             .filter(|m| m.role == role && m.role_strength == 2 && same_account(m, account_id, account))
             .collect();
         let system = |m: &Mailbox| m.path.first().is_some_and(|p| p.starts_with('['));
-        candidates.sort_by_cached_key(|m| (self.is_leftover(m), !system(m), m.path.len(), m.id));
+        let mails_own = |m: &Mailbox| MAILS_OWN.contains(&m.name.trim().to_lowercase().as_str());
+        candidates.sort_by_cached_key(|m| (self.is_leftover(m), !system(m), !mails_own(m), m.path.len(), m.id));
         candidates.first().map(|m| (*m).clone())
     }
 

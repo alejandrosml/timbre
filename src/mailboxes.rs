@@ -956,7 +956,6 @@ pub(crate) fn mailbox_to_delete(store: &Store, spec: &str, account: Option<&str>
     let candidates: Vec<&Mailbox> = mailboxes
         .values()
         .filter(|m| accounts.as_ref().is_none_or(|a| a.iter().any(|(id, n)| crate::store::same_account(m, id, n))))
-        .filter(|m| !store.is_leftover(m))
         .collect();
     // Whether each account shows its mailboxes from INBOX on.
     let mut inside: HashMap<(bool, String, String), bool> = HashMap::new();
@@ -981,6 +980,10 @@ pub(crate) fn mailbox_to_delete(store: &Store, spec: &str, account: Option<&str>
     ];
     for rule in rules {
         let hits: Vec<&&Mailbox> = candidates.iter().filter(|m| rule(m)).collect();
+        // A row Mail keeps for a mailbox it no longer has gives way to one it
+        // has; alone, it is taken, and Mail's own view decides below.
+        let live: Vec<&&Mailbox> = hits.iter().copied().filter(|m| !store.is_leftover(m)).collect();
+        let hits = if live.is_empty() { hits } else { live };
         match hits.as_slice() {
             [] => continue,
             [one] => return Ok(Some((**one).clone())),
@@ -1150,11 +1153,14 @@ async fn make(ctx: &Arc<Ctx>, loc: &Loc, wanted: &[String], deadline: Deadline) 
     // Where Mail will show it.
     let path: Vec<String> = pre.iter().cloned().chain(rel.iter().cloned()).collect();
     let at = Loc { path: path.clone(), ..loc.clone() };
-    let done = |path: &[String], note: &str| MailboxDone {
-        mailbox: shown(path, fix),
-        account: loc.account.clone(),
-        on_server: path.join("/"),
-        note: note.into(),
+    let done = |path: &[String], note: &str| {
+        ctx.store.note_made(Loc { path: path.to_vec(), ..loc.clone() });
+        MailboxDone {
+            mailbox: shown(path, fix),
+            account: loc.account.clone(),
+            on_server: path.join("/"),
+            note: note.into(),
+        }
     };
     if mail_shows(&ctx.store, &at, true, Duration::ZERO, deadline).await == Some(true) {
         return Ok(done(&path, "It exists already."));

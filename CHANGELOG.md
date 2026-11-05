@@ -39,8 +39,13 @@ All notable changes are listed here. The format follows
 - **Mailboxes Mail no longer has.** Mail's database keeps a row for some
   mailboxes Mail deleted; Timbre knows them by their folder gone from the
   Mac (in an account whose other folders are where they should be, and only
-  when nothing is in them), and leaves them out of `list_mailboxes`, of
-  names and of the roles' mailboxes.
+  when nothing is in them), asks Mail when it is open, and leaves them out
+  of `list_mailboxes` and of the roles' mailboxes.
+- **A mailbox just made is there at once.** One `create_mailbox` made is
+  listed, and mail is filed into it, before Mail's database lists it.
+- **iCloud's own mailboxes.** Where another app made "Trash" or "Sent"
+  beside iCloud's "Deleted Messages" and "Sent Messages", trash and sent
+  mean iCloud's own, as in Mail.
 
 ### Fixed
 - **Archives at La Poste.** Archiving the mail of an account with no archive

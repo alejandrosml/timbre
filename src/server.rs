@@ -236,6 +236,11 @@ impl Timbre {
         annotations(title = "List mailboxes", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_mailboxes(&self) -> Result<Json<MailboxesView>, String> {
+        // Rows that look left over: Mail says whether it shows them.
+        let asks = blocking(&self.ctx, |c| Ok(app::leftovers_to_ask(c))).await?;
+        if !asks.is_empty() {
+            app::ask_mail_about(&self.ctx, asks).await;
+        }
         blocking(&self.ctx, app::list_mailboxes).await.map(Json)
     }
 

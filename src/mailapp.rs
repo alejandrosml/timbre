@@ -291,6 +291,20 @@ function main(i) {
 }
 "#;
 
+/// Whether Mail shows each of these mailboxes (rows of Mail's database
+/// whose folder is missing on the Mac: left over, or new); nothing is said
+/// when Mail is not open.
+pub const MAILBOXES_SHOWN: &str = r#"
+function main(i) {
+  if (!Mail.running()) return {running: false};
+  const shown = {};
+  for (const it of i.items) {
+    try { shown[String(it.id)] = exactMailbox(it.loc, it.prefixed) !== null; } catch (e) { if (fatal(e)) throw e; }
+  }
+  return {running: true, shown: shown};
+}
+"#;
+
 /// Make a mailbox at the top of an account, as Mail's own New Mailbox does:
 /// the `make` told to the account itself, the form that reaches IMAP
 /// servers. Mail names an IMAP account's mailboxes from its path prefix, so
@@ -769,6 +783,7 @@ mod tests {
             ("SEND_OUTGOING", SEND_OUTGOING),
             ("ACCOUNT_SERVER", ACCOUNT_SERVER),
             ("MAILBOX_SHOWN", MAILBOX_SHOWN),
+            ("MAILBOXES_SHOWN", MAILBOXES_SHOWN),
         ] {
             let Some(out) = node("parse", &["--check"], &format!("{PRELUDE}\n{script}")) else { return };
             assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
