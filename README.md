@@ -13,6 +13,15 @@ It is built for the reality of an AI assistant reading untrusted email: hidden i
 
 > **Status:** v0.5, in daily use on a real mailbox of 132,000 messages across six accounts. Feedback welcome in [Issues](https://github.com/alejandrosml/timbre/issues).
 
+## Why Timbre
+
+- **One search for all your mail.** iCloud, Gmail with its labels, Outlook, Orange, La Poste, any IMAP: message bodies and attachment names included, in 20 to 40 ms over 132,000 messages, with Gmail-style operators and folders named as Mail shows them.
+- **Nothing missed, nothing hidden.** Shop and newsletter layouts are read in full, and so is text placed after an attachment; text hidden from you but aimed at an AI is removed and reported.
+- **Phishing spotted.** Forged senders, links that lie about where they lead (behind Outlook's Safe Links too), first-time senders, risky attachments.
+- **Attachments read.** PDF, Word, RTF, ODT, text, CSV, invitations, contact cards, forwarded mail.
+- **Safe actions.** Drafts open in Mail and never leave on their own; archive and trash can be undone; Timbre says plainly what Mail does not allow instead of pretending.
+- **Private and trusted.** Searched on your Mac, not on a server; one app, signed and notarized by Apple, holding its own permission; nothing else to install, nothing to restart.
+
 ## In practice
 
 Ask Claude in your own words; Timbre does the searching and reading:
@@ -34,7 +43,7 @@ Claude's Gmail connector sends each search to Google's servers through the Gmail
 | Accounts | All of them: iCloud, Gmail, Outlook and Exchange, Orange, La Poste, any IMAP | Gmail only |
 | What Google receives | Nothing: Mail syncs your mail as usual | Every search and every message read |
 | Access you grant | Reading Mail's files on this Mac, to Timbre alone | Your Google account, through Google sign-in |
-| Search time on 132,000 messages | 15 to 30 ms | A network round trip per search |
+| Search time on 132,000 messages | 20 to 40 ms | A network round trip per search |
 
 In both cases, what Claude reads goes to Claude to answer you.
 
@@ -51,18 +60,24 @@ In both cases, what Claude reads goes to Claude to answer you.
 
 ## How it compares
 
-Timbre takes the best ideas of the existing open-source Apple Mail connectors and adds what none of them combined. Facts below come from each project's code or documentation (November 2026).
+Timbre takes the best ideas of the open-source Apple Mail connectors and adds what none of them combines. Facts below come from each project's documentation or code (November 2026); "—" means the project does not describe it.
 
-| | **Timbre** | [falconbradley](https://github.com/falconbradley/claude-connector-apple-mail) | [sweetrb](https://github.com/sweetrb/apple-mail-mcp) | [imdinu](https://github.com/imdinu/apple-mail-mcp) | [apple-mail-fast-mcp](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp) |
-|---|---|---|---|---|---|
-| Runtime | Native binary (Rust), nothing to install | Python (uv) | Node.js | Python | Python |
-| Reads Mail's database directly | ✅ | ✅ (AppleScript fallback) | opt-in | ✅ | ❌ AppleScript / IMAP |
-| Full-text search in message bodies | ✅ ranked, incremental | ❌ subject and sender | opt-in index | ✅ | via IMAP server |
-| Drafts, replies, forwards | ✅ | ✅ | ✅ | ❌ read-only | ✅ |
-| Move, archive, trash | ✅ with undo | ❌ | ✅ | ❌ | ✅ |
-| Sending | off by default, two-step | off by default | always available | — | with confirmation |
-| macOS permission held by | Timbre's own signed app | the `uv` launcher shared by Python extensions | Node.js | Python / Terminal | Python |
-| Licence | MIT | MIT | MIT | GPL-3.0 | MIT |
+| | **Timbre** | [sweetrb](https://github.com/sweetrb/apple-mail-mcp) | [patrickfreyer](https://github.com/patrickfreyer/apple-mail-mcp) | [imdinu](https://github.com/imdinu/apple-mail-mcp) | [apple-mail-fast-mcp](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp) | [falconbradley](https://github.com/falconbradley/claude-connector-apple-mail) |
+|---|---|---|---|---|---|---|
+| Runs as | Native app (Rust), signed and notarized | Node.js 20+ | Python | Python 3.11+ | Python 3.10+ | Python 3.11+ (uv) |
+| Reads mail through | Mail's database and files | AppleScript (IMAP optional) | AppleScript | Mail's database and files | AppleScript (IMAP optional) | Mail's database and files |
+| Search in message bodies | ✅ ranked index, new mail within seconds | AppleScript (slow on big mailboxes, per its docs), or IMAP once set up | AppleScript | ✅ index, built by a command, kept fresh with `--watch` | AppleScript, or IMAP once set up | subject and sender |
+| Hidden text and injected instructions | removed, reported, fenced | — | — | — | — | — |
+| Sender and link checks | SPF/DKIM/DMARC, lying links, first contact | — | — | — | — | — |
+| Text of attachments (PDF, Word…) | ✅ | saved to disk | saved to disk | ✅ | ✅ | raw content |
+| Drafts, replies, forwards | ✅ | ✅ | ✅ | ❌ read-only | ✅ | ✅ |
+| Move, archive, trash | ✅ with undo | ✅ | ✅ | ❌ | ✅ | ❌ |
+| Create or delete mailboxes | ❌ Mail refuses it to scripts | ✅ | — | ❌ | ✅ through IMAP | ❌ |
+| Sending | off by default, two steps | on by default | on by default | — | with confirmation | none |
+| macOS permission held by | Timbre's own app | Node.js | Python | Terminal and the launching app | Python | the `uv` launcher |
+| Licence | MIT | MIT | MIT | GPL-3.0 | MIT | MIT |
+
+Mailboxes are the one thing Timbre leaves to Mail: Mail lets no script delete one, and getting around it means giving the connector your password for the mail server, as apple-mail-fast-mcp asks. Claude can still do it in Mail itself, with computer use.
 
 **New in Timbre**
 
@@ -109,7 +124,7 @@ A synthetic mailbox of 20,000 messages (788 MB: HTML newsletters, replies with q
 
 What made the difference: messages are parsed on every core while a single writer commits large transactions, with FTS5's merging deferred and a 64 MiB pending-terms table; the text kept for snippets is stored once, compressed with zstd; there is no prefix index; snippets and details are computed for the returned page only, and very broad queries are ranked over their 10,000 most recent matches. Index-time work that only matters when reading a message is skipped. To reproduce: `timbre dev-corpus /tmp/corpus 20000` (debug build), then `timbre index --rebuild` and `timbre bench` from a release build with `TIMBRE_MAIL_ROOT`, `TIMBRE_ACCOUNTS_DB` and `TIMBRE_DATA_DIR` pointing at it.
 
-On a real Mac (Apple silicon, 132,000 messages across six accounts, Gmail included), the index takes about 500 MB and searches answer in 15 to 30 ms.
+On a real Mac (Apple silicon, 132,000 messages across six accounts, Gmail included), the index takes about 500 MB and searches answer in 20 to 40 ms.
 
 ## Install
 

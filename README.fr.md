@@ -13,6 +13,15 @@ Il est conçu pour la réalité d'un assistant qui lit des mails dont on ne conn
 
 > **État :** v0.5, utilisé chaque jour sur une vraie boîte de 132 000 messages répartis sur six comptes. Vos retours sont bienvenus dans les [Issues](https://github.com/alejandrosml/timbre/issues).
 
+## Pourquoi Timbre
+
+- **Une seule recherche pour tout votre courrier.** iCloud, Gmail et ses libellés, Outlook, Orange, La Poste, tout compte IMAP : corps des messages et noms des pièces jointes compris, en 20 à 40 ms sur 132 000 messages, avec les opérateurs de Gmail et les dossiers nommés comme Mail les affiche.
+- **Rien de perdu, rien de caché.** Les mises en page des boutiques et des lettres d'information sont lues en entier, comme le texte placé après une pièce jointe ; le texte qu'on vous cache mais qui vise une IA est retiré et signalé.
+- **L'hameçonnage repéré.** Expéditeurs usurpés, liens qui mentent sur leur destination (même derrière les liens protégés d'Outlook), premiers contacts, pièces jointes dangereuses.
+- **Les pièces jointes lues.** PDF, Word, RTF, ODT, texte, CSV, invitations, fiches contact, mails transférés.
+- **Des actions sans risque.** Les brouillons s'ouvrent dans Mail et ne partent jamais seuls ; archives et corbeille s'annulent ; Timbre dit clairement ce que Mail ne permet pas, au lieu de faire semblant.
+- **Privé et digne de confiance.** La recherche se fait sur votre Mac, pas sur un serveur ; une seule application, signée et notarisée par Apple, qui détient sa propre autorisation ; rien d'autre à installer, rien à redémarrer.
+
 ## Concrètement
 
 Demandez à Claude avec vos mots ; Timbre se charge de chercher et de lire :
@@ -34,7 +43,7 @@ Le connecteur Gmail de Claude envoie chaque recherche aux serveurs de Google par
 | Comptes | Tous : iCloud, Gmail, Outlook et Exchange, Orange, La Poste, tout IMAP | Gmail seulement |
 | Ce que reçoit Google | Rien : Mail synchronise votre courrier comme d'habitude | Chaque recherche et chaque message lu |
 | Accès que vous accordez | La lecture des fichiers de Mail sur ce Mac, à Timbre seul | Votre compte Google, par la connexion Google |
-| Durée d'une recherche sur 132 000 messages | 15 à 30 ms | Un aller-retour réseau par recherche |
+| Durée d'une recherche sur 132 000 messages | 20 à 40 ms | Un aller-retour réseau par recherche |
 
 Dans les deux cas, ce que Claude lit part chez Claude pour vous répondre.
 
@@ -51,18 +60,24 @@ Dans les deux cas, ce que Claude lit part chez Claude pour vous répondre.
 
 ## Ce qui change par rapport à l'existant
 
-Timbre reprend les meilleures idées des connecteurs Apple Mail open source existants et ajoute ce qu'aucun ne réunissait. Les informations ci-dessous viennent du code ou de la documentation de chaque projet (novembre 2026).
+Timbre reprend les meilleures idées des connecteurs Apple Mail open source et ajoute ce qu'aucun ne réunit. Les informations ci-dessous viennent de la documentation ou du code de chaque projet (novembre 2026) ; « — » signifie que le projet ne le décrit pas.
 
-| | **Timbre** | [falconbradley](https://github.com/falconbradley/claude-connector-apple-mail) | [sweetrb](https://github.com/sweetrb/apple-mail-mcp) | [imdinu](https://github.com/imdinu/apple-mail-mcp) | [apple-mail-fast-mcp](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp) |
-|---|---|---|---|---|---|
-| Technologie | Binaire natif (Rust), rien à installer | Python (uv) | Node.js | Python | Python |
-| Lit directement la base de Mail | ✅ | ✅ (repli sur AppleScript) | en option | ✅ | ❌ AppleScript / IMAP |
-| Recherche dans le corps des messages | ✅ classée, mise à jour en continu | ❌ sujet et expéditeur | index en option | ✅ | via le serveur IMAP |
-| Brouillons, réponses, transferts | ✅ | ✅ | ✅ | ❌ lecture seule | ✅ |
-| Déplacer, archiver, corbeille | ✅ avec annulation | ❌ | ✅ | ❌ | ✅ |
-| Envoi | désactivé par défaut, en deux étapes | désactivé par défaut | toujours disponible | — | avec confirmation |
-| Permission macOS accordée à | sa propre application signée | le lanceur `uv` partagé par les extensions Python | Node.js | Python / Terminal | Python |
-| Licence | MIT | MIT | MIT | GPL-3.0 | MIT |
+| | **Timbre** | [sweetrb](https://github.com/sweetrb/apple-mail-mcp) | [patrickfreyer](https://github.com/patrickfreyer/apple-mail-mcp) | [imdinu](https://github.com/imdinu/apple-mail-mcp) | [apple-mail-fast-mcp](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp) | [falconbradley](https://github.com/falconbradley/claude-connector-apple-mail) |
+|---|---|---|---|---|---|---|
+| Fonctionne comme | Application native (Rust), signée et notarisée | Node.js 20+ | Python | Python 3.11+ | Python 3.10+ | Python 3.11+ (uv) |
+| Lit le courrier par | La base et les fichiers de Mail | AppleScript (IMAP en option) | AppleScript | La base et les fichiers de Mail | AppleScript (IMAP en option) | La base et les fichiers de Mail |
+| Recherche dans le corps des messages | ✅ index classé, nouveau courrier en quelques secondes | AppleScript (lent sur les grosses boîtes, selon sa doc), ou IMAP une fois configuré | AppleScript | ✅ index, construit par une commande, tenu à jour avec `--watch` | AppleScript, ou IMAP une fois configuré | sujet et expéditeur |
+| Texte caché et instructions piégées | retirés, signalés, balisés | — | — | — | — | — |
+| Contrôle de l'expéditeur et des liens | SPF/DKIM/DMARC, liens trompeurs, premier contact | — | — | — | — | — |
+| Texte des pièces jointes (PDF, Word…) | ✅ | enregistrées sur le disque | enregistrées sur le disque | ✅ | ✅ | contenu brut |
+| Brouillons, réponses, transferts | ✅ | ✅ | ✅ | ❌ lecture seule | ✅ | ✅ |
+| Déplacer, archiver, corbeille | ✅ avec annulation | ✅ | ✅ | ❌ | ✅ | ❌ |
+| Créer ou supprimer des boîtes | ❌ Mail le refuse aux scripts | ✅ | — | ❌ | ✅ par IMAP | ❌ |
+| Envoi | désactivé par défaut, en deux étapes | activé par défaut | activé par défaut | — | avec confirmation | aucun |
+| Permission macOS accordée à | l'application de Timbre | Node.js | Python | Terminal et l'app qui le lance | Python | le lanceur `uv` |
+| Licence | MIT | MIT | MIT | GPL-3.0 | MIT | MIT |
+
+Les boîtes aux lettres sont la seule chose que Timbre laisse à Mail : Mail ne laisse aucun script en supprimer une, et le contourner demande de confier au connecteur votre mot de passe du serveur de messagerie, comme le fait apple-mail-fast-mcp. Claude peut quand même le faire dans Mail, avec le contrôle de l'ordinateur.
 
 **Ce que Timbre apporte de nouveau**
 
@@ -109,7 +124,7 @@ La 0.5.7 est un peu plus lente parce qu'elle est plus exacte : elle lit chaque p
 
 Ce qui a fait la différence : les messages sont analysés sur tous les cœurs pendant qu'un seul fil d'écriture enregistre de grosses transactions, avec les fusions de FTS5 repoussées à la fin et une table de termes en attente de 64 Mio ; le texte gardé pour les extraits n'est stocké qu'une fois, compressé en zstd ; il n'y a plus d'index de préfixes ; extraits et détails ne sont calculés que pour la page renvoyée, et les requêtes très larges sont classées parmi leurs 10 000 résultats les plus récents. Les vérifications utiles seulement à la lecture d'un message ne sont plus faites à l'indexation. Pour reproduire : `timbre dev-corpus /tmp/corpus 20000` (compilation de débogage), puis `timbre index --rebuild` et `timbre bench` en compilation optimisée, avec `TIMBRE_MAIL_ROOT`, `TIMBRE_ACCOUNTS_DB` et `TIMBRE_DATA_DIR` pointant dessus.
 
-Sur un vrai Mac (Apple silicon, 132 000 messages répartis sur six comptes, dont Gmail), l'index occupe environ 500 Mo et les recherches répondent en 15 à 30 ms.
+Sur un vrai Mac (Apple silicon, 132 000 messages répartis sur six comptes, dont Gmail), l'index occupe environ 500 Mo et les recherches répondent en 20 à 40 ms.
 
 ## Installation
 
