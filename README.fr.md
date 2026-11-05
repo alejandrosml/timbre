@@ -98,14 +98,14 @@ spctl --assess -vv "$APP"                                # accepted, source=Nota
 
 Une boîte synthétique de 20 000 messages (788 Mo : lettres d'information en HTML, réponses avec historique cité, pièces jointes, textes en français, anglais et espagnol au vocabulaire réaliste), indexée sur une petite machine virtuelle à 2 cœurs :
 
-| | v0.1.0 | v0.4.0 | v0.5.6 |
+| | v0.1.0 | v0.4.0 | v0.5.7 |
 |---|---|---|---|
-| Construction complète de l'index | 28,6 s | 13,0 s | 16,0 s |
+| Construction complète de l'index | 28,6 s | 13,0 s | 17,0 s |
 | Taille de l'index | 298 Mo | 124 Mo | 126 Mo |
-| Recherche, médiane | 42 ms | 18 ms | 25 ms |
-| Recherche, 95ᵉ centile | 62 ms | 30 ms | 46 ms |
+| Recherche, médiane | 42 ms | 18 ms | 28 ms |
+| Recherche, 95ᵉ centile | 62 ms | 30 ms | 45 ms |
 
-La 0.5.6 est un peu plus lente parce qu'elle est plus exacte : elle lit chaque partie de chaque message et détermine le texte visible comme le fait le moteur WebKit de Mail, elle indexe aussi les indésirables et la corbeille (que la recherche laisse toujours de côté), et elle classe une recherche large parmi ses résultats les plus récents selon leur date plutôt que selon l'ordre où Mail les a enregistrés : le courrier d'un compte ajouté après coup ne peut plus évincer celui du mois.
+La 0.5.7 est un peu plus lente parce qu'elle est plus exacte : elle lit chaque partie de chaque message et détermine le texte visible comme le fait le moteur WebKit de Mail, elle indexe aussi les indésirables et la corbeille (que la recherche laisse toujours de côté), et elle classe une recherche large parmi ses résultats les plus récents selon leur date plutôt que selon l'ordre où Mail les a enregistrés : le courrier d'un compte ajouté après coup ne peut plus évincer celui du mois.
 
 Ce qui a fait la différence : les messages sont analysés sur tous les cœurs pendant qu'un seul fil d'écriture enregistre de grosses transactions, avec les fusions de FTS5 repoussées à la fin et une table de termes en attente de 64 Mio ; le texte gardé pour les extraits n'est stocké qu'une fois, compressé en zstd ; il n'y a plus d'index de préfixes ; extraits et détails ne sont calculés que pour la page renvoyée, et les requêtes très larges sont classées parmi leurs 10 000 résultats les plus récents. Les vérifications utiles seulement à la lecture d'un message ne sont plus faites à l'indexation. Pour reproduire : `timbre dev-corpus /tmp/corpus 20000` (compilation de débogage), puis `timbre index --rebuild` et `timbre bench` en compilation optimisée, avec `TIMBRE_MAIL_ROOT`, `TIMBRE_ACCOUNTS_DB` et `TIMBRE_DATA_DIR` pointant dessus.
 
