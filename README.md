@@ -136,6 +136,7 @@ The full-text index builds in the background on first launch (about a minute per
 | `create_draft` | New, reply, reply all, forward — as a draft | adds a draft |
 | `mark_mail` | Read/unread, flag/unflag | yes |
 | `move_mail` / `undo_move` | Archive, trash, any mailbox — and back (Gmail: trash and junk) | yes, reversible |
+| `delete_mailbox` | Delete an empty mailbox or Gmail label, without Mail's confirmation (never one holding mail, nor the inbox, sent, drafts, trash or junk) | yes, nothing lost |
 | `prepare_send` / `confirm_send` | Two-step sending (only when enabled) | sends |
 
 ## Settings

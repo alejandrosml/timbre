@@ -48,20 +48,12 @@ function account(loc) {
   }
   throw new Error('Mail account not found: ' + (loc.account || loc.account_id));
 }
-function mailbox(loc) {
-  const key = JSON.stringify(loc);
-  if (_mb[key]) return _mb[key];
-  const container = account(loc) || Mail;
-  const at = (path) => {
-    try { const mb = container.mailboxes.byName(path.join('/')); mb.name(); return mb; } catch (e) { if (fatal(e)) throw e; }
-    try { let cur = container; for (const p of path) { cur = cur.mailboxes.byName(p); } cur.name(); return cur; } catch (e) { if (fatal(e)) throw e; }
-    return null;
-  };
-  // The path as Mail's database writes it, then with accents composed and
-  // decomposed (Mail's scripting may write them the other way), each also
-  // from Mail's path prefix on where an account keeps every mailbox inside
-  // INBOX (La Poste, Orange): the server's "INBOX/Archives/2009" is Mail's
-  // "Archives/2009".
+// The ways Mail may name a mailbox: the path as Mail's database writes it,
+// then with accents composed and decomposed (Mail's scripting may write them
+// the other way), each also from Mail's path prefix on where an account
+// keeps every mailbox inside INBOX (La Poste, Orange): the server's
+// "INBOX/Archives/2009" is Mail's "Archives/2009".
+function mailboxPaths(loc) {
   const paths = [];
   const seen = {};
   for (const form of ['', 'NFC', 'NFD']) {
@@ -69,13 +61,29 @@ function mailbox(loc) {
     const ways = p.length > 1 && String(p[0]).toUpperCase() === 'INBOX' ? [p, p.slice(1)] : [p];
     for (const w of ways) { const k = w.join('/'); if (w.length && !seen[k]) { seen[k] = true; paths.push(w); } }
   }
-  let found = null;
-  for (const p of paths) { found = at(p); if (found) break; }
+  return paths;
+}
+// The mailbox at this path, named one of those ways; null if Mail has none.
+function mailboxAt(loc) {
+  const container = account(loc) || Mail;
+  const at = (path) => {
+    try { const mb = container.mailboxes.byName(path.join('/')); mb.name(); return mb; } catch (e) { if (fatal(e)) throw e; }
+    try { let cur = container; for (const p of path) { cur = cur.mailboxes.byName(p); } cur.name(); return cur; } catch (e) { if (fatal(e)) throw e; }
+    return null;
+  };
+  for (const p of mailboxPaths(loc)) { const found = at(p); if (found) return found; }
+  return null;
+}
+function mailbox(loc) {
+  const key = JSON.stringify(loc);
+  if (_mb[key]) return _mb[key];
+  let found = mailboxAt(loc);
   if (!found) {
     // Only when the name leaves no doubt: never another mailbox that
     // happens to share the last part of the path.
+    const container = account(loc) || Mail;
     const leaves = [];
-    for (const p of paths) { const leaf = p[p.length - 1]; if (leaves.indexOf(leaf) < 0) leaves.push(leaf); }
+    for (const p of mailboxPaths(loc)) { const leaf = p[p.length - 1]; if (leaves.indexOf(leaf) < 0) leaves.push(leaf); }
     for (const leaf of leaves) {
       const hits = container.mailboxes.whose({name: leaf})();
       if (hits.length === 1) { found = hits[0]; break; }
@@ -206,6 +214,24 @@ function main(i) {
     try { mailbox(i.loc); return {found: true}; } catch (e) { if (fatal(e)) throw e; }
   }
   throw new Error('Mail does not list the mailbox');
+}
+"#;
+
+/// Delete an empty mailbox, as Mail's Mailbox > Delete Mailbox does (on the
+/// server too). Mail is asked first what it holds, its own count rather than
+/// its database's, and nothing that holds a message or a mailbox is deleted.
+pub const DELETE_MAILBOX: &str = r#"
+function main(i) {
+  const exact = mailboxAt(i.loc);
+  const mb = exact || mailbox(i.loc);
+  const inner = mb.mailboxes.length;
+  if (inner > 0) throw new Error('it holds ' + inner + ' other mailbox(es)');
+  const held = mb.messages.length;
+  if (held > 0) throw new Error('Mail shows ' + held + ' message(s) in it');
+  Mail.delete(mb);
+  // Gone when Mail no longer has it where it was.
+  if (exact) return {deleted: !mailboxAt(i.loc)};
+  try { mb.name(); return {deleted: false}; } catch (e) { if (fatal(e)) throw e; return {deleted: true}; }
 }
 "#;
 
@@ -534,6 +560,7 @@ mod tests {
             ("MARK", MARK),
             ("MOVE", MOVE),
             ("FIND_MAILBOX", FIND_MAILBOX),
+            ("DELETE_MAILBOX", DELETE_MAILBOX),
             ("MOVE_BACK", MOVE_BACK),
             ("SELECTION", SELECTION),
             ("SEND_OUTGOING", SEND_OUTGOING),
@@ -551,14 +578,20 @@ const $ = {};
 function delay() {}
 function list(kids) {
   const f = () => kids;
+  Object.defineProperty(f, 'length', {get: () => kids.length});
   f.byName = (n) => kids.find((k) => k.label === n) || {name() { throw new Error('no ' + n); }, mailboxes: list([])};
   f.whose = (q) => () => kids.filter((k) => k.label === q.name);
   return f;
 }
-function box(label, tag, kids) { return {label, tag, name: () => label, mailboxes: list(kids || [])}; }
+function box(label, tag, kids, held) {
+  const b = {label, tag, kids: kids || [], name: () => label, messages: {length: held || 0}};
+  b.mailboxes = list(b.kids);
+  for (const k of b.kids) k.parent = b;
+  return b;
+}
 const ACCOUNTS = {
   // La Poste as Mail names it: from the prefix INBOX on, folders inside folders.
-  LP: box('Laposte', 'lp', [box('INBOX', 'lp-inbox'), box('OUTBOX', 'lp-sent'), box('Important', 'lp-important'),
+  LP: box('Laposte', 'lp', [box('INBOX', 'lp-inbox'), box('OUTBOX', 'lp-sent'), box('Important', 'lp-important', [], 3),
     box('Archives', 'lp-archives', [box('2009', 'lp-2009'), box('Passé', 'lp-passe')])]),
   // The same, each mailbox listed by its whole path.
   LF: box('Orange', 'lf', [box('INBOX', 'lf-inbox'), box('Archives', 'lf-archives'), box('Archives/2009', 'lf-2009')]),
@@ -569,7 +602,10 @@ const ACCOUNTS = {
 const accounts = () => Object.values(ACCOUNTS);
 accounts.byId = (id) => ACCOUNTS[id] || {name() { throw new Error('no account ' + id); }};
 accounts.byName = (n) => accounts().find((a) => a.label === n) || {name() { throw new Error('no account ' + n); }};
-function Application() { return {accounts, mailboxes: list([])}; }
+function Application() {
+  const remove = (mb) => { const at = mb.parent.kids.indexOf(mb); if (at >= 0) mb.parent.kids.splice(at, 1); };
+  return {accounts, mailboxes: list([]), delete: remove};
+}
 "#;
 
     /// Mail names an INBOX-prefixed account's mailboxes from the prefix on,
@@ -614,6 +650,37 @@ console.log(JSON.stringify(cases.map(([id, path]) => {
                 "lp-important",
                 "error: Mailbox not found in Mail: INBOX/Nulle part",
             ]
+        );
+    }
+
+    /// A mailbox is deleted only once Mail itself shows it empty, and the
+    /// result says whether Mail still has it.
+    #[test]
+    fn mail_deletes_only_an_empty_mailbox() {
+        let cases = r#"
+const outcome = (path) => {
+  try { return main({loc: {account_id: 'LP', account: '', path, local: false}}); } catch (e) { return 'error: ' + e.message; }
+};
+console.log(JSON.stringify([
+  outcome(['INBOX', 'Archives']),
+  outcome(['INBOX', 'Important']),
+  outcome(['INBOX', 'Archives', '2009']),
+  ACCOUNTS.LP.kids.find((k) => k.label === 'Archives').kids.map((k) => k.tag),
+]));
+"#;
+        let Some(out) = node("delete", &[], &format!("{FAKE_MAIL}\n{PRELUDE}\n{DELETE_MAILBOX}\n{cases}")) else {
+            return;
+        };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let got: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            got,
+            json!([
+                "error: it holds 2 other mailbox(es)",
+                "error: Mail shows 3 message(s) in it",
+                {"deleted": true},
+                ["lp-passe"],
+            ])
         );
     }
 }

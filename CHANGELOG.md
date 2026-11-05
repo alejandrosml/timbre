@@ -5,6 +5,18 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-05
+
+### Added
+- **Deleting a mailbox.** `delete_mailbox` deletes an empty mailbox or
+  Gmail label, on the server too, without Mail's confirmation dialog. Only
+  an empty one: a mailbox that holds messages is refused, so mail is never
+  deleted (move the messages first, which can be undone), and so is one
+  that holds other mailboxes. An account's inbox, drafts, sent mail, trash
+  and junk, Gmail's own folders, and the mailboxes Mail keeps for itself
+  (mail to send later, Apple Notes) are never deleted. Mail is asked what
+  the mailbox holds before deleting it, by its own count.
+
 ## [0.5.7] - 2026-11-05
 
 A review of every part of Timbre, by four independent reviewers and on a
