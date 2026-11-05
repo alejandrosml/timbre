@@ -11,7 +11,7 @@ Timbre lets Claude work with the mail you already have in Apple Mail, whatever t
 
 It is built for the reality of an AI assistant reading untrusted email: hidden instructions are stripped and reported, forged senders are flagged, nothing is ever deleted for good, and nothing is sent without you.
 
-> **Status:** v0.5, in daily use on a real mailbox of 132,000 messages across six accounts. Feedback welcome in [Issues](https://github.com/alejandrosml/timbre/issues).
+> **Status:** v0.6, in daily use on a real mailbox of 132,000 messages across six accounts. Feedback welcome in [Issues](https://github.com/alejandrosml/timbre/issues).
 
 ## Why Timbre
 
@@ -19,7 +19,7 @@ It is built for the reality of an AI assistant reading untrusted email: hidden i
 - **Nothing missed, nothing hidden.** Shop and newsletter layouts are read in full, and so is text placed after an attachment; text hidden from you but aimed at an AI is removed and reported.
 - **Phishing spotted.** Forged senders, links that lie about where they lead (behind Outlook's Safe Links too), first-time senders, risky attachments.
 - **Attachments read.** PDF, Word, RTF, ODT, text, CSV, invitations, contact cards, forwarded mail.
-- **Safe actions.** Drafts open in Mail and never leave on their own; archive and trash can be undone; Timbre says plainly what Mail does not allow instead of pretending.
+- **Safe actions.** Drafts open in Mail and never leave on their own; archive and trash can be undone; folders are made, and empty ones deleted, even where Mail lets no app do it; Timbre says plainly what it cannot do instead of pretending.
 - **Private and trusted.** Searched on your Mac, not on a server; one app, signed and notarized by Apple, holding its own permission; nothing else to install, nothing to restart.
 
 ## In practice
@@ -32,6 +32,7 @@ Ask Claude in your own words; Timbre does the searching and reading:
 - *"Is this email from my bank genuine?"* Sender authentication, look-alike addresses, links that lie about where they go, hidden text.
 - *"Draft a reply saying Thursday works for me."* The draft opens in Mail for you to check; nothing is sent.
 - *"Archive last month's newsletters."* Moves can be undone.
+- *"Delete the empty folders in my La Poste account."* Each is checked empty on the server first; the password is asked once, in a window of Timbre, the first time.
 
 ## Searched on your Mac, not on Google's servers
 
@@ -55,7 +56,8 @@ In both cases, what Claude reads goes to Claude to answer you.
 - **Read safely.** The text a person sees in Mail: hidden HTML content removed, and nothing that is shown lost (shops' MJML layouts, text after an attachment placed inside the message, the text version of mail made of pictures), with warnings about sender authenticity, deceptive links and risky attachments (programs, macros, web pages).
 - **Follow conversations.** A whole thread, each message reduced to its new text.
 - **Read attachments.** PDF, Word, RTF and ODT (converted by macOS in a separate process), text, HTML, CSV, calendars, contact cards and attached emails.
-- **Act, reversibly.** Drafts (new, reply, reply all, forward) open in Mail for you to review; mark read/unread, flag; move to archive, trash or any mailbox — with **undo**. An account with no archive mailbox is given one when Mail allows it, as with its Archive button. Gmail is the exception: Mail lets a script move Gmail mail to the trash or junk only, and Timbre says so rather than pretend.
+- **Act, reversibly.** Drafts (new, reply, reply all, forward) open in Mail for you to review; mark read/unread, flag; move to archive, trash or any mailbox — with **undo**. An account with no archive mailbox is given one, as with Mail's Archive button. Gmail is the exception: Mail lets a script move Gmail mail to the trash or junk only, and Timbre says so rather than pretend.
+- **Make and delete mailboxes.** Folders and Gmail labels are made, and empty ones deleted, even where Mail lets no app do it: Timbre then acts on the mail server itself, with a password asked once ([how and why](#making-and-deleting-mailboxes)).
 - **Send, only if you allow it.** Off by default. When enabled, every message takes two explicit steps, with an optional recipient allowlist and an hourly cap.
 
 ## How it compares
@@ -72,12 +74,12 @@ Timbre takes the best ideas of the open-source Apple Mail connectors and adds wh
 | Text of attachments (PDF, Word…) | ✅ | saved to disk | saved to disk | ✅ | ✅ | raw content |
 | Drafts, replies, forwards | ✅ | ✅ | ✅ | ❌ read-only | ✅ | ✅ |
 | Move, archive, trash | ✅ with undo | ✅ | ✅ | ❌ | ✅ | ❌ |
-| Create or delete mailboxes | ❌ Mail refuses it to scripts | ✅ | — | ❌ | ✅ through IMAP | ❌ |
+| Create or delete mailboxes | ✅ on the server, password asked once in a window when first needed; empty mailboxes only | ✅ through IMAP, password stored beforehand in Terminal; deletes with what it holds | — | ❌ | ✅ deletes through IMAP, password stored beforehand with a setup command; a full one only when told | ❌ |
 | Sending | off by default, two steps | on by default | on by default | — | with confirmation | none |
 | macOS permission held by | Timbre's own app | Node.js | Python | Terminal and the launching app | Python | the `uv` launcher |
 | Licence | MIT | MIT | MIT | GPL-3.0 | MIT | MIT |
 
-Mailboxes are the one thing Timbre leaves to Mail: Mail lets no script delete one, and getting around it means giving the connector your password for the mail server, as apple-mail-fast-mcp asks. Claude can still do it in Mail itself, with computer use.
+To our knowledge, Timbre is the only Apple Mail connector that combines a ranked full-text index of message bodies, protection against hidden instructions, sender and link checks, undo, mailbox management with no setup beforehand, and a signed, notarized app that holds its own permission. sweetrb offers more tools for running Mail itself (rules, smart mailboxes, templates); Timbre keeps to what an assistant needs to find, read and file your mail safely.
 
 **New in Timbre**
 
@@ -91,6 +93,23 @@ Mailboxes are the one thing Timbre leaves to Mail: Mail lets no script delete on
 - **Attachments.** Executables, double extensions (`invoice.pdf.app`) and macro files are labelled; saved files go to one folder you choose, are never overwritten and are marked for Gatekeeper.
 - **Least privilege.** Read tools are marked read-only so Claude can use them without asking; tools that change anything are marked as such; sending tools do not even exist until you enable them.
 - **One permission, for Timbre only.** Full Disk Access is granted to Timbre's own signed app, with its name and icon, not to Claude or a launcher shared with other extensions: Timbre tells macOS it answers for its own access.
+
+## Making and deleting mailboxes
+
+Mail lets no script delete a mailbox, and on current macOS it refuses to make one too, at La Poste for one: its scripting answers "AppleEvent handler failed" (sweetrb measured the same for every kind of account). So Timbre does what Mail's own Mailbox menu does: it acts on the mail server itself, over IMAP, then asks Mail to catch up. It still asks Mail first to make a mailbox, in case it will: no password is then needed.
+
+- **What you do, once per account.** Nothing at installation. The first time you ask Claude to make or delete a folder in an account where Mail will not, a window of Timbre asks for that account's password and says why in one sentence. The server checks it; it then stays in your login keychain, where only Timbre's signed app may read it, and is never asked again. Claude never sees it. Google, Apple and Yahoo take only an app password here: the window's button opens the page that makes one.
+- **What Timbre checks.** A mailbox is deleted only if the server says it holds no message and no other mailbox, and if neither the server nor Mail keeps it for itself (inbox, sent mail, drafts, trash, junk, archive, Gmail's own folders). Messages are never deleted with it: move them first, which can be undone. The connection is encrypted, its certificate checked by macOS as Mail checks it.
+- **Mail catching up.** A mailbox made or deleted on the server appears or disappears in Mail once Mail reads the account's list of mailboxes again, which it does on its own (a new one showed within seconds in our tests); Timbre says so when Mail has not caught up yet.
+- **Where it cannot.** Exchange and Outlook.com accounts (Microsoft takes only its own sign-in, which Mail keeps to itself), POP accounts and On My Mac mailboxes (kept by Mail alone): there, Mail's Mailbox menu does it.
+
+Three other routes were weighed and left aside:
+
+- *Editing Mail's database while Mail is closed.* It is Mail's copy of what the server holds: a mailbox deleted there comes back at Mail's next check.
+- *Reusing the passwords Mail keeps, unlocked with your Mac's password.* Current macOS keeps them in the protected part of the keychain ("Local Items"), which only Apple's own apps may open: no window lets another app in. Timbre still looks where earlier versions of macOS kept them, the login keychain, where macOS asks for your Mac's password before letting it read one.
+- *Driving Mail's menus.* It takes Accessibility, a permission to control your whole Mac, and breaks when Mail changes its menus or speaks another language.
+
+sweetrb and apple-mail-fast-mcp also go through IMAP, with a password you make and store yourself beforehand, from Terminal or with a setup command. Both store it with macOS's `security` tool, which then hands it to any program that runs the same tool, without asking. sweetrb deletes a mailbox with whatever it holds; apple-mail-fast-mcp refuses one that is not empty unless told to delete its messages too; Timbre never deletes a message with a mailbox.
 
 ## Signed and notarized
 
@@ -132,6 +151,8 @@ On a real Mac (Apple silicon, 132,000 messages across six accounts, Gmail includ
 2. Give Timbre **Full Disk Access**. Ask Claude to *open Timbre's permission settings*: System Settings opens at Privacy & Security › Full Disk Access and Finder selects Timbre (the stamp icon). Drag it into the list and switch it on. Timbre starts working by itself a few seconds later: nothing to restart.
 3. The first time you ask for a draft or a move, macOS asks whether Timbre may control Mail: click OK.
 
+Nothing else is asked at installation. A password is asked only the first time you make or delete a folder in an account where Mail will not, and only once.
+
 The full-text index builds in the background on first launch (about a minute per 100,000 messages on a recent Mac); searches work meanwhile on subjects and senders. Afterwards, new mail is searchable within seconds. After an update that reads messages better, Timbre reads them again in the background, newest first, while search keeps working.
 
 ## Tools
@@ -151,6 +172,8 @@ The full-text index builds in the background on first launch (about a minute per
 | `create_draft` | New, reply, reply all, forward — as a draft | adds a draft |
 | `mark_mail` | Read/unread, flag/unflag | yes |
 | `move_mail` / `undo_move` | Archive, trash, any mailbox — and back (Gmail: trash and junk) | yes, reversible |
+| `create_mailbox` | Make a mailbox or Gmail label: by Mail, or on the server | adds a mailbox |
+| `delete_mailbox` | Delete an empty mailbox or Gmail label, on the server | yes, empty ones only |
 | `prepare_send` / `confirm_send` | Two-step sending (only when enabled) | sends |
 
 ## Settings
@@ -159,7 +182,7 @@ In Claude › Settings › Extensions › Timbre: read-only mode, allow sending,
 
 ## Privacy
 
-Searching, reading and the index stay on your Mac: Timbre sends nothing about your mail anywhere and collects nothing. Its one network request is a daily check of the latest version number on GitHub; turn off *Check for updates* to stop it. What Claude reads goes to Claude, to answer you. The index (`~/Library/Application Support/Timbre`) contains the text of your messages for searching; delete that folder to remove it. Mail's own database is only ever opened read-only.
+Searching, reading and the index stay on your Mac: Timbre sends nothing about your mail anywhere and collects nothing. It goes on the network for two things only: a daily check of the latest version number on GitHub (turn off *Check for updates* to stop it), and, when you make or delete a mailbox Mail will not, an encrypted connection to your own mail server. The password for that stays in your login keychain as *Timbre IMAP (server)*; delete it there and Timbre forgets it. What Claude reads goes to Claude, to answer you. The index (`~/Library/Application Support/Timbre`) contains the text of your messages for searching; delete that folder to remove it. Mail's own database is only ever opened read-only.
 
 ## Build from source
 
@@ -170,6 +193,16 @@ scripts/build-macos-from-linux.sh   # cross-compile from Linux (cargo-zigbuild)
 scripts/package-mcpb.sh         # assemble the Claude Desktop extension
 timbre index | timbre search "facture from:orange" | timbre doctor | timbre bench
 ```
+
+## Star history
+
+<a href="https://www.star-history.com/#alejandrosml/timbre&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=alejandrosml/timbre&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=alejandrosml/timbre&type=Date" />
+    <img alt="Star history of Timbre" src="https://api.star-history.com/svg?repos=alejandrosml/timbre&type=Date" />
+  </picture>
+</a>
 
 ## Credits
 

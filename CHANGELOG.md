@@ -5,6 +5,37 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Making and deleting mailboxes.** `create_mailbox` makes a folder or a
+  Gmail label, `delete_mailbox` deletes an empty one, without Mail's
+  confirmation. Mail lets no script delete a mailbox, and on current macOS
+  refuses to make one too at La Poste and elsewhere, so Timbre does what
+  Mail's Mailbox menu does, on the mail server itself (IMAP), then asks Mail
+  to synchronize; it still asks Mail first to make one. Nothing is asked at
+  installation: the first time a mailbox is made or deleted in an account
+  where Mail will not, a window of Timbre asks for the account's password
+  in one sentence, the server checks it, and it stays in the login keychain,
+  where only Timbre's signed app reads it. Claude never sees it. Google,
+  Apple and Yahoo take only an app password there: the window's button opens
+  the page that makes one. Where earlier versions of macOS kept Mail's own
+  passwords, in the login keychain, Timbre looks too: macOS then asks for the
+  Mac's password before letting it read one.
+- **What is never deleted.** A mailbox is deleted only if the server says it
+  holds no message and no other mailbox, and if neither the server nor Mail
+  keeps it for itself (inbox, sent mail, drafts, trash, junk, archive, the
+  provider's own folders); messages are never deleted with it. Exchange,
+  Outlook.com, POP accounts and On My Mac mailboxes are left to Mail's menu,
+  and the result says so.
+- **Encrypted and checked.** The connection to the mail server is TLS from
+  the first byte, or STARTTLS before anything is said; the certificate is
+  checked by macOS, as Mail checks it; a password never travels unencrypted.
+
+### Fixed
+- **Archives at La Poste.** Archiving the mail of an account with no archive
+  mailbox, where Mail will not make one for a script (La Poste), makes it on
+  the server when Timbre has the password already; otherwise the result
+  says to call `create_mailbox` once.
+
 ## [0.5.7] - 2026-11-05
 
 A review of every part of Timbre, by four independent reviewers and on a

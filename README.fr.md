@@ -11,7 +11,7 @@ Timbre permet à Claude de travailler avec le courrier que vous avez déjà dans
 
 Il est conçu pour la réalité d'un assistant qui lit des mails dont on ne connaît pas l'auteur : les instructions cachées sont retirées et signalées, les expéditeurs usurpés sont repérés, rien n'est jamais supprimé définitivement, et rien n'est envoyé sans vous.
 
-> **État :** v0.5, utilisé chaque jour sur une vraie boîte de 132 000 messages répartis sur six comptes. Vos retours sont bienvenus dans les [Issues](https://github.com/alejandrosml/timbre/issues).
+> **État :** v0.6, utilisé chaque jour sur une vraie boîte de 132 000 messages répartis sur six comptes. Vos retours sont bienvenus dans les [Issues](https://github.com/alejandrosml/timbre/issues).
 
 ## Pourquoi Timbre
 
@@ -19,7 +19,7 @@ Il est conçu pour la réalité d'un assistant qui lit des mails dont on ne conn
 - **Rien de perdu, rien de caché.** Les mises en page des boutiques et des lettres d'information sont lues en entier, comme le texte placé après une pièce jointe ; le texte qu'on vous cache mais qui vise une IA est retiré et signalé.
 - **L'hameçonnage repéré.** Expéditeurs usurpés, liens qui mentent sur leur destination (même derrière les liens protégés d'Outlook), premiers contacts, pièces jointes dangereuses.
 - **Les pièces jointes lues.** PDF, Word, RTF, ODT, texte, CSV, invitations, fiches contact, mails transférés.
-- **Des actions sans risque.** Les brouillons s'ouvrent dans Mail et ne partent jamais seuls ; archives et corbeille s'annulent ; Timbre dit clairement ce que Mail ne permet pas, au lieu de faire semblant.
+- **Des actions sans risque.** Les brouillons s'ouvrent dans Mail et ne partent jamais seuls ; archives et corbeille s'annulent ; les dossiers se créent, et les vides se suppriment, même là où Mail ne le permet à aucune app ; Timbre dit clairement ce qu'il ne peut pas faire, au lieu de faire semblant.
 - **Privé et digne de confiance.** La recherche se fait sur votre Mac, pas sur un serveur ; une seule application, signée et notarisée par Apple, qui détient sa propre autorisation ; rien d'autre à installer, rien à redémarrer.
 
 ## Concrètement
@@ -32,6 +32,7 @@ Demandez à Claude avec vos mots ; Timbre se charge de chercher et de lire :
 - *« Ce mail de ma banque est-il authentique ? »* Authentification de l'expéditeur, adresses qui en imitent d'autres, liens qui mentent sur leur destination, texte caché.
 - *« Prépare une réponse pour dire que jeudi me va. »* Le brouillon s'ouvre dans Mail pour que vous le relisiez ; rien n'est envoyé.
 - *« Archive les lettres d'information du mois dernier. »* Les déplacements s'annulent.
+- *« Supprime les dossiers vides de mon compte La Poste. »* Chacun est d'abord vérifié vide sur le serveur ; le mot de passe est demandé une seule fois, dans une fenêtre de Timbre, la première fois.
 
 ## La recherche se fait sur votre Mac, pas sur les serveurs de Google
 
@@ -55,7 +56,8 @@ Dans les deux cas, ce que Claude lit part chez Claude pour vous répondre.
 - **Lire sans risque.** Le texte que vous voyez dans Mail, sans le contenu HTML caché mais sans rien perdre de ce qui s'affiche (mises en page MJML des boutiques en ligne, texte après une pièce jointe insérée dans le message, version texte des mails faits d'images), avec des alertes sur l'authenticité de l'expéditeur, sur les liens trompeurs et sur les pièces jointes dangereuses (programmes, macros, pages web).
 - **Suivre une conversation.** Le fil entier, chaque message réduit à ce qu'il apporte de nouveau.
 - **Lire les pièces jointes.** PDF, Word, RTF et ODT (convertis par macOS dans un processus séparé), texte, HTML, CSV, invitations de calendrier, fiches contact et mails joints.
-- **Agir, de façon réversible.** Les brouillons (nouveau, réponse, réponse à tous, transfert) s'ouvrent dans Mail pour que vous les relisiez ; marquer lu ou non lu, poser un drapeau ; déplacer vers les archives, la corbeille ou n'importe quelle boîte — avec **annulation**. Un compte sans boîte d'archives en reçoit une quand Mail le permet, comme avec son bouton Archiver. Gmail fait exception : Mail ne laisse un script déplacer le courrier Gmail que vers la corbeille ou les indésirables, et Timbre le dit au lieu de faire semblant.
+- **Agir, de façon réversible.** Les brouillons (nouveau, réponse, réponse à tous, transfert) s'ouvrent dans Mail pour que vous les relisiez ; marquer lu ou non lu, poser un drapeau ; déplacer vers les archives, la corbeille ou n'importe quelle boîte — avec **annulation**. Un compte sans boîte d'archives en reçoit une, comme avec le bouton Archiver de Mail. Gmail fait exception : Mail ne laisse un script déplacer le courrier Gmail que vers la corbeille ou les indésirables, et Timbre le dit au lieu de faire semblant.
+- **Créer et supprimer des boîtes.** Dossiers et libellés Gmail se créent, et les vides se suppriment, même là où Mail ne le permet à aucune app : Timbre agit alors sur le serveur de messagerie lui-même, avec un mot de passe demandé une seule fois ([comment et pourquoi](#créer-et-supprimer-des-boîtes-aux-lettres)).
 - **Envoyer, seulement si vous l'autorisez.** Désactivé par défaut. Une fois activé, chaque envoi demande deux étapes explicites, avec une liste facultative de destinataires autorisés et un plafond par heure.
 
 ## Ce qui change par rapport à l'existant
@@ -72,12 +74,12 @@ Timbre reprend les meilleures idées des connecteurs Apple Mail open source et a
 | Texte des pièces jointes (PDF, Word…) | ✅ | enregistrées sur le disque | enregistrées sur le disque | ✅ | ✅ | contenu brut |
 | Brouillons, réponses, transferts | ✅ | ✅ | ✅ | ❌ lecture seule | ✅ | ✅ |
 | Déplacer, archiver, corbeille | ✅ avec annulation | ✅ | ✅ | ❌ | ✅ | ❌ |
-| Créer ou supprimer des boîtes | ❌ Mail le refuse aux scripts | ✅ | — | ❌ | ✅ par IMAP | ❌ |
+| Créer ou supprimer des boîtes | ✅ sur le serveur, mot de passe demandé une fois dans une fenêtre, au premier besoin ; boîtes vides seulement | ✅ par IMAP, mot de passe rangé à l'avance dans le Terminal ; supprime avec ce qu'elle contient | — | ❌ | ✅ suppression par IMAP, mot de passe rangé à l'avance par une commande d'installation ; une boîte pleine seulement sur demande | ❌ |
 | Envoi | désactivé par défaut, en deux étapes | activé par défaut | activé par défaut | — | avec confirmation | aucun |
 | Permission macOS accordée à | l'application de Timbre | Node.js | Python | Terminal et l'app qui le lance | Python | le lanceur `uv` |
 | Licence | MIT | MIT | MIT | GPL-3.0 | MIT | MIT |
 
-Les boîtes aux lettres sont la seule chose que Timbre laisse à Mail : Mail ne laisse aucun script en supprimer une, et le contourner demande de confier au connecteur votre mot de passe du serveur de messagerie, comme le fait apple-mail-fast-mcp. Claude peut quand même le faire dans Mail, avec le contrôle de l'ordinateur.
+À notre connaissance, Timbre est le seul connecteur pour Mail qui réunisse un index plein texte classé du corps des messages, la protection contre les instructions cachées, la vérification des expéditeurs et des liens, l'annulation, la gestion des boîtes sans rien préparer à l'avance, et une application signée et notarisée qui détient sa propre autorisation. sweetrb propose plus d'outils pour piloter Mail lui-même (règles, boîtes intelligentes, modèles) ; Timbre s'en tient à ce dont un assistant a besoin pour trouver, lire et ranger votre courrier en toute sécurité.
 
 **Ce que Timbre apporte de nouveau**
 
@@ -91,6 +93,23 @@ Les boîtes aux lettres sont la seule chose que Timbre laisse à Mail : Mail ne 
 - **Pièces jointes.** Les exécutables, les doubles extensions (`facture.pdf.app`) et les fichiers à macros sont signalés. Les fichiers enregistrés vont dans un seul dossier de votre choix, ne sont jamais écrasés et sont marqués pour que Gatekeeper les contrôle.
 - **Le minimum de droits.** Les outils de lecture sont déclarés en lecture seule, Claude peut donc s'en servir sans vous demander ; ceux qui modifient quelque chose sont déclarés comme tels ; les outils d'envoi n'existent même pas tant que vous ne les avez pas activés.
 - **Une permission, pour Timbre seul.** L'accès complet au disque est donné à l'application signée de Timbre, avec son nom et son icône, ni à Claude ni à un lanceur partagé avec d'autres extensions : Timbre indique à macOS qu'il répond lui-même de ses accès.
+
+## Créer et supprimer des boîtes aux lettres
+
+Mail ne laisse aucun script supprimer une boîte aux lettres, et sur les versions actuelles de macOS il refuse aussi d'en créer, à La Poste par exemple : ses scripts répondent « Le gestionnaire AppleEvent a échoué » (sweetrb a mesuré la même chose pour tous les types de comptes). Timbre fait donc ce que fait le menu Boîte aux lettres de Mail : il agit sur le serveur de messagerie lui-même, par IMAP, puis demande à Mail de se mettre à jour. Pour créer une boîte, il demande quand même d'abord à Mail, au cas où il accepterait : aucun mot de passe n'est alors nécessaire.
+
+- **Ce que vous faites, une fois par compte.** Rien à l'installation. La première fois que vous demandez à Claude de créer ou de supprimer un dossier dans un compte où Mail ne le fait pas, une fenêtre de Timbre demande le mot de passe de ce compte et explique pourquoi en une phrase. Le serveur le vérifie ; il reste ensuite dans votre trousseau de session, où seule l'application signée de Timbre peut le lire, et ne vous est plus jamais demandé. Claude ne le voit jamais. Google, Apple et Yahoo n'acceptent ici qu'un mot de passe d'application : le bouton de la fenêtre ouvre la page qui le crée.
+- **Ce que Timbre vérifie.** Une boîte n'est supprimée que si le serveur dit qu'elle ne contient ni message ni autre boîte, et si ni le serveur ni Mail ne la gardent pour eux (réception, envoyés, brouillons, corbeille, indésirables, archives, dossiers propres à Gmail). Aucun message n'est supprimé avec elle : déplacez-les d'abord, ce qui s'annule. La connexion est chiffrée, et son certificat vérifié par macOS comme Mail le vérifie.
+- **Mail qui se met à jour.** Une boîte créée ou supprimée sur le serveur apparaît ou disparaît dans Mail quand Mail relit la liste des boîtes du compte, ce qu'il fait de lui-même (une nouvelle boîte est apparue en quelques secondes dans nos essais) ; Timbre le dit quand Mail n'a pas encore suivi.
+- **Là où ce n'est pas possible.** Comptes Exchange et Outlook.com (Microsoft n'accepte que sa propre connexion, que Mail garde pour lui), comptes POP et boîtes « Sur mon Mac » (gardées par Mail seul) : là, le menu Boîte aux lettres de Mail s'en charge.
+
+Trois autres voies ont été étudiées puis écartées :
+
+- *Modifier la base de Mail pendant que Mail est fermé.* C'est la copie, par Mail, de ce que contient le serveur : une boîte supprimée là revient à la vérification suivante de Mail.
+- *Réutiliser les mots de passe que garde Mail, déverrouillés avec le mot de passe de votre Mac.* Les versions actuelles de macOS les rangent dans la partie protégée du trousseau (« Éléments locaux »), que seules les apps d'Apple peuvent ouvrir : aucune fenêtre ne laisse une autre app y entrer. Timbre regarde quand même là où les anciennes versions de macOS les rangeaient, le trousseau de session, où macOS demande le mot de passe de votre Mac avant de le laisser en lire un.
+- *Piloter les menus de Mail.* Cela demande l'autorisation Accessibilité, qui permet de contrôler tout le Mac, et se casse dès que Mail change ses menus ou parle une autre langue.
+
+sweetrb et apple-mail-fast-mcp passent aussi par IMAP, avec un mot de passe que vous créez et rangez vous-même à l'avance, dans le Terminal ou par une commande d'installation. Tous deux le rangent avec l'outil `security` de macOS, qui le donne ensuite sans rien demander à tout programme qui utilise ce même outil. sweetrb supprime une boîte avec tout ce qu'elle contient ; apple-mail-fast-mcp refuse une boîte qui n'est pas vide, sauf si on lui demande d'en supprimer aussi les messages ; Timbre ne supprime jamais un message avec une boîte.
 
 ## Signé et notarisé
 
@@ -132,6 +151,8 @@ Sur un vrai Mac (Apple silicon, 132 000 messages répartis sur six comptes, dont
 2. Donnez à Timbre l'**accès complet au disque**. Demandez à Claude d'*ouvrir les réglages d'autorisation de Timbre* : Réglages Système s'ouvre sur Confidentialité et sécurité › Accès complet au disque et le Finder sélectionne Timbre (l'icône du timbre-poste). Glissez-le dans la liste et activez-le. Timbre se met au travail tout seul quelques secondes plus tard : rien à redémarrer.
 3. La première fois que vous demandez un brouillon ou un déplacement, macOS demande si Timbre peut contrôler Mail : cliquez sur OK.
 
+Rien d'autre n'est demandé à l'installation. Un mot de passe n'est demandé que la première fois que vous créez ou supprimez un dossier dans un compte où Mail ne le fait pas, et une seule fois.
+
 L'index plein texte se construit en arrière-plan au premier lancement (environ une minute pour 100 000 messages sur un Mac récent) ; en attendant, la recherche porte sur les sujets et les expéditeurs. Ensuite, un nouveau mail est cherchable en quelques secondes. Après une mise à jour qui lit mieux les messages, Timbre les relit en arrière-plan, les plus récents d'abord, sans interrompre la recherche.
 
 ## Outils
@@ -151,6 +172,8 @@ L'index plein texte se construit en arrière-plan au premier lancement (environ 
 | `create_draft` | Nouveau, réponse, réponse à tous, transfert — en brouillon | ajoute un brouillon |
 | `mark_mail` | Lu ou non lu, drapeau | oui |
 | `move_mail` / `undo_move` | Archives, corbeille, n'importe quelle boîte — et retour (Gmail : corbeille et indésirables) | oui, réversible |
+| `create_mailbox` | Créer une boîte ou un libellé Gmail : par Mail, ou sur le serveur | ajoute une boîte |
+| `delete_mailbox` | Supprimer une boîte ou un libellé Gmail vide, sur le serveur | oui, boîtes vides seulement |
 | `prepare_send` / `confirm_send` | Envoi en deux étapes (seulement si activé) | envoie |
 
 ## Réglages
@@ -159,7 +182,7 @@ Dans Claude › Réglages › Extensions › Timbre : mode lecture seule, autori
 
 ## Confidentialité
 
-La recherche, la lecture et l'index restent sur votre Mac : Timbre n'envoie rien de votre courrier nulle part et ne collecte rien. Sa seule requête réseau est une vérification quotidienne du numéro de la dernière version sur GitHub ; désactivez *Check for updates* pour l'arrêter. Ce que Claude lit part chez Claude, pour vous répondre. L'index (`~/Library/Application Support/Timbre`) contient le texte de vos messages pour la recherche ; supprimez ce dossier pour l'effacer. La base de Mail n'est jamais ouverte qu'en lecture seule.
+La recherche, la lecture et l'index restent sur votre Mac : Timbre n'envoie rien de votre courrier nulle part et ne collecte rien. Il ne va sur le réseau que pour deux choses : une vérification quotidienne du numéro de la dernière version sur GitHub (désactivez *Check for updates* pour l'arrêter) et, quand vous créez ou supprimez une boîte que Mail ne gère pas, une connexion chiffrée à votre propre serveur de messagerie. Le mot de passe nécessaire reste dans votre trousseau de session sous le nom *Timbre IMAP (serveur)* ; supprimez-le là et Timbre l'oublie. Ce que Claude lit part chez Claude, pour vous répondre. L'index (`~/Library/Application Support/Timbre`) contient le texte de vos messages pour la recherche ; supprimez ce dossier pour l'effacer. La base de Mail n'est jamais ouverte qu'en lecture seule.
 
 ## Compiler soi-même
 
@@ -170,6 +193,16 @@ scripts/build-macos-from-linux.sh   # compilation croisée depuis Linux (cargo-z
 scripts/package-mcpb.sh         # assembler l'extension Claude Desktop
 timbre index | timbre search "facture from:orange" | timbre doctor | timbre bench
 ```
+
+## Historique des étoiles
+
+<a href="https://www.star-history.com/#alejandrosml/timbre&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=alejandrosml/timbre&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=alejandrosml/timbre&type=Date" />
+    <img alt="Historique des étoiles de Timbre" src="https://api.star-history.com/svg?repos=alejandrosml/timbre&type=Date" />
+  </picture>
+</a>
 
 ## Remerciements
 
