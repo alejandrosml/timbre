@@ -20,11 +20,20 @@
   "license": "MIT",
   "icon": "icon.png",
   "keywords": [
-    "mail",
     "apple mail",
+    "mail",
     "email",
     "search",
-    "macos"
+    "macos",
+    "imap",
+    "gmail",
+    "icloud",
+    "outlook",
+    "phishing",
+    "prompt injection"
+  ],
+  "privacy_policies": [
+    "https://github.com/alejandrosml/timbre/blob/main/PRIVACY.md"
   ],
   "server": {
     "type": "binary",

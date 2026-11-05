@@ -196,7 +196,7 @@ In Claude › Settings › Extensions › Timbre: read-only mode, allow sending,
 
 ## Privacy
 
-Searching, reading and the index stay on your Mac: Timbre sends nothing about your mail anywhere and collects nothing. It goes on the network for two things only: a daily check of the latest version number on GitHub (turn off *Check for updates* to stop it), and, when you make or delete a mailbox Mail will not, an encrypted connection to your own mail server. The password for that stays in your login keychain as *Timbre IMAP (server)*; delete it there and Timbre forgets it. What Claude reads goes to Claude, to answer you. The index (`~/Library/Application Support/Timbre`) contains the text of your messages for searching; delete that folder to remove it. Mail's own database is only ever opened read-only.
+The full policy is in [PRIVACY.md](PRIVACY.md). Searching, reading and the index stay on your Mac: Timbre sends nothing about your mail anywhere and collects nothing. It goes on the network for two things only: a daily check of the latest version number on GitHub (turn off *Check for updates* to stop it), and, when you make or delete a mailbox Mail will not, an encrypted connection to your own mail server. The password for that stays in your login keychain as *Timbre IMAP (server)*; delete it there and Timbre forgets it. What Claude reads goes to Claude, to answer you. The index (`~/Library/Application Support/Timbre`) contains the text of your messages for searching; delete that folder to remove it. Mail's own database is only ever opened read-only.
 
 ## Build from source
 
